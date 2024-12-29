@@ -1,0 +1,25 @@
+{
+  "transactions": [
+    {
+      "user_id": 1,
+      "coin_id": 1,
+      "type": "buy",
+      "amount": 0.5,
+      "price_at_transaction": 41000.00
+    },
+    {
+      "user_id": 1,
+      "coin_id": 2,
+      "type": "buy",
+      "amount": 5.0,
+      "price_at_transaction": 2100.00
+    },
+    {
+      "user_id": 2,
+      "coin_id": 1,
+      "type": "sell",
+      "amount": 0.25,
+      "price_at_transaction": 42000.00
+    }
+  ]
+}

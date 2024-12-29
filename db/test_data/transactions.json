@@ -1,0 +1,18 @@
+{
+  "transactions": [
+    {
+      "user_id": 1,
+      "coin_id": 1,
+      "type": "buy",
+      "amount": 1.0,
+      "price_at_transaction": 40000.00
+    },
+    {
+      "user_id": 2,
+      "coin_id": 2,
+      "type": "buy",
+      "amount": 2.0,
+      "price_at_transaction": 2000.00
+    }
+  ]
+}

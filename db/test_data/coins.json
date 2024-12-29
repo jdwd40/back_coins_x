@@ -1,0 +1,20 @@
+{
+  "coins": [
+    {
+      "name": "Bitcoin",
+      "symbol": "BTC",
+      "current_price": 40000.00,
+      "supply": 19000000,
+      "market_cap": 760000000000.00,
+      "description": "Test Bitcoin data"
+    },
+    {
+      "name": "Ethereum",
+      "symbol": "ETH",
+      "current_price": 2000.00,
+      "supply": 120000000,
+      "market_cap": 240000000000.00,
+      "description": "Test Ethereum data"
+    }
+  ]
+}

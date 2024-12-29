@@ -1,0 +1,28 @@
+{
+  "coins": [
+    {
+      "name": "Bitcoin",
+      "symbol": "BTC",
+      "current_price": 42000.00,
+      "supply": 19000000,
+      "market_cap": 798000000000.00,
+      "description": "The first and largest cryptocurrency by market capitalization"
+    },
+    {
+      "name": "Ethereum",
+      "symbol": "ETH",
+      "current_price": 2200.00,
+      "supply": 120000000,
+      "market_cap": 264000000000.00,
+      "description": "Leading smart contract platform"
+    },
+    {
+      "name": "Ripple",
+      "symbol": "XRP",
+      "current_price": 0.50,
+      "supply": 100000000000,
+      "market_cap": 50000000000.00,
+      "description": "Digital payment protocol and cryptocurrency"
+    }
+  ]
+}
