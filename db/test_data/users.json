@@ -1,13 +1,13 @@
 {
   "users": [
     {
-      "username": "testuser1",
-      "email": "test1@example.com",
+      "username": "john_doe",
+      "email": "john@example.com",
       "password_hash": "$2b$10$rG7.dv1Z0yF9RxMPe0AoYOJ.fwkV4I6D7f7D9iZj8kS8IqX5I5Iey"
     },
     {
-      "username": "testuser2",
-      "email": "test2@example.com",
+      "username": "jane_smith",
+      "email": "jane@example.com",
       "password_hash": "$2b$10$rG7.dv1Z0yF9RxMPe0AoYOJ.fwkV4I6D7f7D9iZj8kS8IqX5I5Iey"
     }
   ]

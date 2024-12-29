@@ -17,9 +17,9 @@ describe('Coins API', () => {
               name: expect.any(String),
               symbol: expect.any(String),
               current_price: expect.any(String),
-              supply: expect.any(String),
               market_cap: expect.any(String),
-              description: expect.any(String)
+              volume_24h: expect.any(String),
+              price_change_24h: expect.any(String)
             });
           });
         });
@@ -37,9 +37,9 @@ describe('Coins API', () => {
             name: 'Bitcoin',
             symbol: 'BTC',
             current_price: expect.any(String),
-            supply: expect.any(String),
             market_cap: expect.any(String),
-            description: expect.any(String)
+            volume_24h: expect.any(String),
+            price_change_24h: expect.any(String)
           });
         });
     });
@@ -49,7 +49,7 @@ describe('Coins API', () => {
         .get('/api/coins/999')
         .expect(404)
         .then(({ body }) => {
-          expect(body.msg).toBe('Coin not found');
+          expect(body.error).toBe('Coin not found');
         });
     });
 
@@ -58,7 +58,7 @@ describe('Coins API', () => {
         .get('/api/coins/not-a-number')
         .expect(400)
         .then(({ body }) => {
-          expect(body.msg).toBe('Invalid coin ID');
+          expect(body.error).toBe('Invalid coin ID');
         });
     });
   });

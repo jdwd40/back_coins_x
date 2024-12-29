@@ -6,16 +6,17 @@ const {
   updateUserProfile,
   deleteUser
 } = require('../controllers/users.controller');
+const { authenticateToken } = require('../middleware/auth.middleware');
 
 const usersRouter = express.Router();
 
-// Authentication routes
+// Public routes
 usersRouter.post('/register', registerUser);
 usersRouter.post('/login', loginUser);
 
-// Profile routes
-usersRouter.get('/:user_id', getUserProfile);
-usersRouter.put('/:user_id', updateUserProfile);
-usersRouter.delete('/:user_id', deleteUser);
+// Protected routes
+usersRouter.get('/:user_id', authenticateToken, getUserProfile);
+usersRouter.put('/:user_id', authenticateToken, updateUserProfile);
+usersRouter.delete('/:user_id', authenticateToken, deleteUser);
 
 module.exports = { usersRouter };

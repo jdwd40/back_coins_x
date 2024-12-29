@@ -1,5 +1,10 @@
-const seed = require('./db/seed');
 const db = require('./db/connection');
+const seed = require('./db/seed');
 
-beforeEach(() => seed());
-afterAll(() => db.end());
+beforeEach(async () => {
+  await seed();
+});
+
+afterAll(async () => {
+  await db.end();
+});

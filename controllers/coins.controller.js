@@ -1,34 +1,33 @@
-const { 
-  selectAllCoins,
-  selectCoinById
-} = require('../models/coins.model');
+const db = require('../db/connection');
 
-exports.getAllCoins = async (req, res, next) => {
+exports.getCoins = async (req, res, next) => {
   try {
-    const coins = await selectAllCoins();
-    res.status(200).send({ coins });
-  } catch (err) {
-    next(err);
+    const result = await db.query('SELECT * FROM coins');
+    res.status(200).json({ coins: result.rows });
+  } catch (error) {
+    next(error);
   }
 };
 
 exports.getCoinById = async (req, res, next) => {
   try {
     const { coin_id } = req.params;
-    
-    // Validate coin_id is a number
-    if (isNaN(coin_id)) {
-      return res.status(400).send({ msg: 'Invalid coin ID' });
+
+    if (!Number.isInteger(parseInt(coin_id))) {
+      return res.status(400).json({ error: 'Invalid coin ID' });
     }
 
-    const coin = await selectCoinById(coin_id);
-    
-    if (!coin) {
-      return res.status(404).send({ msg: 'Coin not found' });
+    const result = await db.query(
+      'SELECT * FROM coins WHERE coin_id = $1',
+      [coin_id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Coin not found' });
     }
 
-    res.status(200).send({ coin });
-  } catch (err) {
-    next(err);
+    res.status(200).json({ coin: result.rows[0] });
+  } catch (error) {
+    next(error);
   }
 };

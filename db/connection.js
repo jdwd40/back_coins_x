@@ -16,4 +16,18 @@ if (ENV === 'production') {
   config.max = 2;
 }
 
-module.exports = new Pool(config);
+const pool = new Pool(config);
+
+// Add a flag to track if pool has been ended
+let isEnded = false;
+
+module.exports = {
+  query: (...args) => pool.query(...args),
+  end: () => {
+    if (!isEnded) {
+      isEnded = true;
+      return pool.end();
+    }
+    return Promise.resolve();
+  }
+};
