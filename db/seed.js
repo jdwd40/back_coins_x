@@ -8,7 +8,6 @@ async function seed() {
     console.log(`Seeding ${ENV} database...`);
     
     // Read JSON data
-    console.log('Reading data files...');
     const coinsData = JSON.parse(
       await readFile(`${__dirname}/${ENV}_data/coins.json`, 'utf-8')
     );
@@ -20,7 +19,6 @@ async function seed() {
     );
 
     // Drop existing tables if they exist
-    console.log('Dropping existing tables...');
     await db.query(`DROP TABLE IF EXISTS "transactions" CASCADE;`);
     await db.query(`DROP TABLE IF EXISTS "portfolios" CASCADE;`);
     await db.query(`DROP TABLE IF EXISTS "price_history" CASCADE;`);
@@ -28,7 +26,6 @@ async function seed() {
     await db.query(`DROP TABLE IF EXISTS "users" CASCADE;`);
 
     // Create tables
-    console.log('Creating tables...');
     await db.query(`
       CREATE TABLE "users" (
         user_id SERIAL PRIMARY KEY,
@@ -78,7 +75,6 @@ async function seed() {
     `);
 
     // Insert data
-    console.log('Inserting data...');
     const insertCoinsQuery = format(
       'INSERT INTO "coins" (name, symbol, current_price, supply, market_cap, description) VALUES %L RETURNING *',
       coinsData.coins.map(({ name, symbol, current_price, supply, market_cap, description }) => 
@@ -107,7 +103,6 @@ async function seed() {
     await db.query(insertTransactionsQuery);
 
     // Create indexes
-    console.log('Creating indexes...');
     await db.query('CREATE INDEX idx_transactions_user_id ON "transactions"(user_id);');
     await db.query('CREATE INDEX idx_transactions_coin_id ON "transactions"(coin_id);');
     await db.query('CREATE INDEX idx_portfolios_user_id ON "portfolios"(user_id);');
