@@ -17,7 +17,7 @@ const seed = async () => {
       DROP SEQUENCE IF EXISTS coins_coin_id_seq CASCADE;
       DROP SEQUENCE IF EXISTS portfolios_portfolio_id_seq CASCADE;
       DROP SEQUENCE IF EXISTS transactions_transaction_id_seq CASCADE;
-      DROP SEQUENCE IF EXISTS price_history_history_id_seq CASCADE;
+      DROP SEQUENCE IF EXISTS price_history_price_history_id_seq CASCADE;
     `);
 
     // Create sequences
@@ -26,7 +26,7 @@ const seed = async () => {
       CREATE SEQUENCE coins_coin_id_seq;
       CREATE SEQUENCE portfolios_portfolio_id_seq;
       CREATE SEQUENCE transactions_transaction_id_seq;
-      CREATE SEQUENCE price_history_history_id_seq;
+      CREATE SEQUENCE price_history_price_history_id_seq;
     `);
 
     // Create tables
@@ -42,21 +42,22 @@ const seed = async () => {
 
       CREATE TABLE "coins" (
         coin_id INTEGER PRIMARY KEY DEFAULT nextval('coins_coin_id_seq'),
+        name VARCHAR(50) NOT NULL,
         symbol VARCHAR(10) UNIQUE NOT NULL,
-        name VARCHAR(100) NOT NULL,
-        current_price DECIMAL(20, 8) NOT NULL,
-        market_cap DECIMAL(20, 2),
-        volume_24h DECIMAL(20, 2),
-        price_change_24h DECIMAL(10, 2),
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        current_price DECIMAL(18, 2) NOT NULL,
+        supply INT NOT NULL,
+        market_cap DECIMAL(18, 2) NOT NULL,
+        date_added TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        description TEXT,
+        price_change_24h DECIMAL(8, 2)
       );
 
       CREATE TABLE "portfolios" (
         portfolio_id INTEGER PRIMARY KEY DEFAULT nextval('portfolios_portfolio_id_seq'),
-        user_id INTEGER REFERENCES "users"(user_id) ON DELETE CASCADE,
-        coin_id INTEGER REFERENCES "coins"(coin_id) ON DELETE CASCADE,
-        quantity DECIMAL(20, 8) NOT NULL,
+        user_id INTEGER REFERENCES users(user_id) ON DELETE CASCADE,
+        coin_id INTEGER REFERENCES coins(coin_id) ON DELETE CASCADE,
+        quantity DECIMAL(18, 8) NOT NULL,
+        average_buy_price DECIMAL(18, 2) NOT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         UNIQUE(user_id, coin_id)
@@ -64,92 +65,75 @@ const seed = async () => {
 
       CREATE TABLE "transactions" (
         transaction_id INTEGER PRIMARY KEY DEFAULT nextval('transactions_transaction_id_seq'),
-        user_id INTEGER REFERENCES "users"(user_id) ON DELETE CASCADE,
-        coin_id INTEGER REFERENCES "coins"(coin_id) ON DELETE CASCADE,
-        type VARCHAR(4) NOT NULL CHECK (type IN ('BUY', 'SELL')),
-        quantity DECIMAL(20, 8) NOT NULL,
-        price DECIMAL(20, 8) NOT NULL,
-        total_amount DECIMAL(20, 8) NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        user_id INTEGER REFERENCES users(user_id) ON DELETE CASCADE,
+        coin_id INTEGER REFERENCES coins(coin_id) ON DELETE CASCADE,
+        type VARCHAR(10) CHECK (type IN ('buy', 'sell')) NOT NULL,
+        amount DECIMAL(18, 2) NOT NULL,
+        price_at_transaction DECIMAL(18, 2) NOT NULL,
+        transaction_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
 
       CREATE TABLE "price_history" (
-        history_id INTEGER PRIMARY KEY DEFAULT nextval('price_history_history_id_seq'),
-        coin_id INTEGER REFERENCES "coins"(coin_id) ON DELETE CASCADE,
-        price DECIMAL(20, 8) NOT NULL,
-        recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        price_history_id INTEGER PRIMARY KEY DEFAULT nextval('price_history_price_history_id_seq'),
+        coin_id INTEGER REFERENCES coins(coin_id) ON DELETE CASCADE,
+        price DECIMAL(18, 2) NOT NULL,
+        recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT unique_coin_timestamp UNIQUE (coin_id, recorded_at)
       );
-    `);
 
-    // Reset sequences
-    await db.query(`
-      SELECT setval('users_user_id_seq', 1, false);
-      SELECT setval('coins_coin_id_seq', 1, false);
-      SELECT setval('portfolios_portfolio_id_seq', 1, false);
-      SELECT setval('transactions_transaction_id_seq', 1, false);
-      SELECT setval('price_history_history_id_seq', 1, false);
+      CREATE INDEX idx_price_history_coin_timestamp 
+      ON price_history(coin_id, recorded_at DESC);
     `);
 
     // Insert test data
-    const testUsers = [
-      {
-        username: 'john_doe',
-        email: 'john@example.com',
-        password_hash: await bcrypt.hash('password123', 10)
-      },
-      {
-        username: 'jane_smith',
-        email: 'jane@example.com',
-        password_hash: await bcrypt.hash('password123', 10)
-      }
-    ];
-
-    const userInsertQuery = format(
-      'INSERT INTO users (username, email, password_hash) VALUES %L RETURNING *',
-      testUsers.map(user => [user.username, user.email, user.password_hash])
-    );
+    const hashedPassword = await bcrypt.hash('password123', 10);
     
-    const insertedUsers = await db.query(userInsertQuery);
-
-    const testCoins = [
-      {
-        symbol: 'BTC',
-        name: 'Bitcoin',
-        current_price: 50000.00,
-        market_cap: 1000000000000.00,
-        volume_24h: 50000000000.00,
-        price_change_24h: 2.5
-      },
-      {
-        symbol: 'ETH',
-        name: 'Ethereum',
-        current_price: 3000.00,
-        market_cap: 350000000000.00,
-        volume_24h: 20000000000.00,
-        price_change_24h: 1.8
-      }
+    const usersData = [
+      ['testuser1', 'test1@example.com', hashedPassword],
+      ['testuser2', 'test2@example.com', hashedPassword]
     ];
 
-    const coinInsertQuery = format(
-      'INSERT INTO coins (symbol, name, current_price, market_cap, volume_24h, price_change_24h) VALUES %L RETURNING *',
-      testCoins.map(coin => [coin.symbol, coin.name, coin.current_price, coin.market_cap, coin.volume_24h, coin.price_change_24h])
+    const usersInsertSql = format(
+      'INSERT INTO users (username, email, password_hash) VALUES %L RETURNING *',
+      usersData
     );
 
-    const insertedCoins = await db.query(coinInsertQuery);
+    const coinsData = [
+      ['Bitcoin', 'BTC', '50000.00', 19000000, '950000000000.00', 'The first and most well-known cryptocurrency.'],
+      ['Ethereum', 'ETH', '3000.00', 120000000, '360000000000.00', 'A decentralized platform that runs smart contracts.']
+    ];
 
-    // Create indexes
-    await db.query('CREATE INDEX idx_transactions_user_id ON "transactions"(user_id);');
-    await db.query('CREATE INDEX idx_transactions_coin_id ON "transactions"(coin_id);');
-    await db.query('CREATE INDEX idx_portfolios_user_id ON "portfolios"(user_id);');
-    await db.query('CREATE INDEX idx_portfolios_coin_id ON "portfolios"(coin_id);');
-    await db.query('CREATE INDEX idx_price_history_coin_id ON "price_history"(coin_id);');
-    await db.query('CREATE INDEX idx_price_history_recorded_at ON "price_history"(recorded_at);');
+    const coinsInsertSql = format(
+      'INSERT INTO coins (name, symbol, current_price, supply, market_cap, description) VALUES %L RETURNING *',
+      coinsData
+    );
+
+    await db.query(usersInsertSql);
+    await db.query(coinsInsertSql);
 
     console.log('Seeding completed successfully!');
+
+    // Add some initial price history
+    const now = new Date();
+    const priceHistoryData = [
+      [1, '50000.00', new Date(now - 3600000)],  // 1 hour ago
+      [1, '49500.00', new Date(now - 7200000)],  // 2 hours ago
+      [2, '3000.00', new Date(now - 3600000)],   // 1 hour ago
+      [2, '2950.00', new Date(now - 7200000)]    // 2 hours ago
+    ];
+
+    const priceHistoryInsertSql = format(
+      'INSERT INTO price_history (coin_id, price, recorded_at) VALUES %L',
+      priceHistoryData
+    );
+
+    await db.query(priceHistoryInsertSql);
+    console.log('Seeding completed successfully!');
+
   } catch (error) {
-    console.error('Error during seeding:', error);
+    console.error('Error seeding:', error);
     throw error;
   }
-}
+};
 
 module.exports = seed;

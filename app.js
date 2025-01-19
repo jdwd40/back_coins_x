@@ -6,6 +6,9 @@ const app = express();
 const { coinsRouter } = require('./routes/coins.routes');
 const { usersRouter } = require('./routes/users.routes');
 const { transactionsRouter } = require('./routes/transactions.routes');
+const { marketRouter } = require('./routes/market.routes');
+
+const marketSimulator = require('./models/market-simulator');
 
 // Middleware
 app.use(cors());
@@ -15,19 +18,26 @@ app.use(express.json());
 app.use('/api/coins', coinsRouter);
 app.use('/api/users', usersRouter);
 app.use('/api/transactions', transactionsRouter);
+app.use('/api/market', marketRouter);
+
+// 404 handler
+app.all('/*', (req, res) => {
+  res.status(404).send({ msg: 'Route not found' });
+});
 
 // Error handling middleware
 app.use((err, req, res, next) => {
   if (err.status && err.msg) {
     res.status(err.status).send({ msg: err.msg });
   } else {
-    next(err);
+    console.error(err);
+    res.status(500).send({ msg: 'Internal Server Error' });
   }
 });
 
-app.use((err, req, res, next) => {
-  console.error(err);
-  res.status(500).send({ msg: 'Internal Server Error' });
-});
+// Start market simulation in production
+if (process.env.NODE_ENV === 'production') {
+  marketSimulator.start();
+}
 
 module.exports = app;
