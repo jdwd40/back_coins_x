@@ -3,7 +3,7 @@ name: Deploy to VPS
 on:
   push:
     branches:
-      - main  # or master, depending on your default branch
+      - main
 
 jobs:
   deploy:
@@ -17,7 +17,11 @@ jobs:
           username: ${{ secrets.SSH_USERNAME }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
-            cd /home/jd/back_coins_x
+            cd /home/jd/back_coinsx
             git pull origin main
             npm install
+            cd frontend
+            npm install
+            npm run build
+            cd ..
             pm2 restart all
