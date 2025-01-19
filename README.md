@@ -4,7 +4,7 @@
 
 ### Prerequisites
 - PostgreSQL installed
-- User `jd` with password `K1ller1921`
+- User `****` with password `****`
 
 ### Initial Database Creation
 ```bash
