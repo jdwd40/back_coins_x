@@ -17,10 +17,10 @@ CREATE TABLE Coins (
     name VARCHAR(50) NOT NULL,
     symbol VARCHAR(10) UNIQUE NOT NULL,
     current_price DECIMAL(18, 2) NOT NULL,
-    supply INT NOT NULL,
     market_cap DECIMAL(18, 2) NOT NULL,
-    date_added TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    description TEXT
+    circulating_supply INT NOT NULL,
+    price_change_24h DECIMAL(5, 2),
+    date_added TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Create Transactions table
@@ -49,7 +49,7 @@ CREATE TABLE PriceHistory (
     history_id SERIAL PRIMARY KEY,
     coin_id INT REFERENCES Coins(coin_id) ON DELETE CASCADE,
     price DECIMAL(18, 2) NOT NULL,
-    recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Create indexes for better query performance
@@ -58,4 +58,4 @@ CREATE INDEX idx_transactions_coin_id ON Transactions(coin_id);
 CREATE INDEX idx_portfolios_user_id ON Portfolios(user_id);
 CREATE INDEX idx_portfolios_coin_id ON Portfolios(coin_id);
 CREATE INDEX idx_price_history_coin_id ON PriceHistory(coin_id);
-CREATE INDEX idx_price_history_recorded_at ON PriceHistory(recorded_at);
+CREATE INDEX idx_price_history_created_at ON PriceHistory(created_at);

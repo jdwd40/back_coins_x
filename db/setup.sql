@@ -1,10 +1,10 @@
-DROP DATABASE IF EXISTS coins_x;
-DROP DATABASE IF EXISTS coins_x_test;
+DROP DATABASE IF EXISTS coinsx_test;
+DROP DATABASE IF EXISTS coinsx;
 
-CREATE DATABASE coins_x;
-CREATE DATABASE coins_x_test;
+CREATE DATABASE coinsx_test;
+CREATE DATABASE coinsx;
 
-\c coins_x
+\c coinsx
 
-ALTER DATABASE coins_x OWNER TO jd;
-ALTER DATABASE coins_x_test OWNER TO jd;
+ALTER DATABASE coinsx OWNER TO jd;
+ALTER DATABASE coinsx_test OWNER TO jd;

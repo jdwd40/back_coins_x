@@ -6,8 +6,8 @@
   "scripts": {
     "setup-dbs": "node setup-dbs.js",
     "setup-dev": "node setup-dev.js",
-    "test": "NODE_ENV=test jest",
-    "test-watch": "NODE_ENV=test jest --watch",
+    "test": "NODE_ENV=test jest --runInBand",
+    "test-watch": "NODE_ENV=test jest --watch --runInBand",
     "start": "node server.js",
     "dev": "nodemon server.js",
     "seed": "node db/seed.js"

@@ -28,7 +28,7 @@ describe('Transactions API', () => {
       const newTransaction = {
         user_id: 1,
         coin_id: 1,
-        type: 'buy',
+        type: 'BUY',
         amount: 0.5,
         price_at_transaction: 50000.00
       };
@@ -41,12 +41,12 @@ describe('Transactions API', () => {
         .then(({ body }) => {
           expect(body.transaction).toMatchObject({
             transaction_id: expect.any(Number),
-            user_id: newTransaction.user_id,
-            coin_id: newTransaction.coin_id,
+            user_id: 1,
+            coin_id: 1,
             type: 'BUY',
-            quantity: '0.50000000',
-            price: '50000.00000000',
-            total_amount: '25000.00000000',
+            quantity: '0.50',
+            price: '50000.00',
+            total_amount: '25000.00',
             created_at: expect.any(String)
           });
         });
@@ -57,7 +57,7 @@ describe('Transactions API', () => {
       const buyTransaction = {
         user_id: 1,
         coin_id: 1,
-        type: 'buy',
+        type: 'BUY',
         amount: 1.0,
         price_at_transaction: 50000.00
       };
@@ -71,7 +71,7 @@ describe('Transactions API', () => {
           const sellTransaction = {
             user_id: 1,
             coin_id: 1,
-            type: 'sell',
+            type: 'SELL',
             amount: 0.5,
             price_at_transaction: 55000.00
           };
@@ -84,12 +84,12 @@ describe('Transactions API', () => {
             .then(({ body }) => {
               expect(body.transaction).toMatchObject({
                 transaction_id: expect.any(Number),
-                user_id: sellTransaction.user_id,
-                coin_id: sellTransaction.coin_id,
+                user_id: 1,
+                coin_id: 1,
                 type: 'SELL',
-                quantity: '0.50000000',
-                price: '55000.00000000',
-                total_amount: '27500.00000000',
+                quantity: '0.50',
+                price: '55000.00',
+                total_amount: '27500.00',
                 created_at: expect.any(String)
               });
             });
@@ -100,7 +100,7 @@ describe('Transactions API', () => {
       const sellTransaction = {
         user_id: 1,
         coin_id: 1,
-        type: 'sell',
+        type: 'SELL',
         amount: 1.0,
         price_at_transaction: 50000.00
       };
@@ -136,7 +136,7 @@ describe('Transactions API', () => {
       const transaction = {
         user_id: 1,
         coin_id: 1,
-        type: 'buy',
+        type: 'BUY',
         amount: 0.5,
         price_at_transaction: 50000.00
       };
@@ -157,7 +157,7 @@ describe('Transactions API', () => {
       const transaction1 = {
         user_id: 1,
         coin_id: 1,
-        type: 'buy',
+        type: 'BUY',
         amount: 1.0,
         price_at_transaction: 50000.00
       };
@@ -206,7 +206,7 @@ describe('Transactions API', () => {
       const transaction1 = {
         user_id: 1,
         coin_id: 1,
-        type: 'buy',
+        type: 'BUY',
         amount: 1.0,
         price_at_transaction: 50000.00
       };

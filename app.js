@@ -27,11 +27,15 @@ app.all('/*', (req, res) => {
 
 // Error handling middleware
 app.use((err, req, res, next) => {
-  if (err.status && err.msg) {
-    res.status(err.status).send({ msg: err.msg });
+  console.error('Error caught in global error handler:', err);
+  if (err.code === '23505') { // Unique violation
+    res.status(409).json({ msg: 'Resource already exists' });
+  } else if (err.code === '23503') { // Foreign key violation
+    res.status(404).json({ msg: 'Referenced resource not found' });
+  } else if (err.code === '22P02') { // Invalid text representation
+    res.status(400).json({ msg: 'Invalid input syntax' });
   } else {
-    console.error(err);
-    res.status(500).send({ msg: 'Internal Server Error' });
+    res.status(500).json({ msg: 'Internal Server Error', error: err.message });
   }
 });
 

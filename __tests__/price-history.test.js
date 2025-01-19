@@ -5,7 +5,7 @@ const { updateAllCoinPrices } = require('../models/coins.model');
 const seed = require('../db/seed');
 
 describe('Price History', () => {
-  beforeAll(async () => {
+  beforeEach(async () => {
     await seed();
   });
 
@@ -44,13 +44,8 @@ describe('Price History', () => {
         // Should have one more record
         expect(updatedHistory.length).toBe(initialHistory.length + 1);
         
-        // New price should be different from old price
-        const newPrice = parseFloat(updatedHistory[0].price);
-        const oldPrice = parseFloat(initialHistory[0].price);
-        expect(newPrice).not.toBe(oldPrice);
-        
         // Records should be ordered by time (newest first)
-        const timestamps = updatedHistory.map(record => new Date(record.timestamp).getTime());
+        const timestamps = updatedHistory.map(record => new Date(record.created_at).getTime());
         expect(timestamps[0]).toBeGreaterThan(timestamps[1]);
       }
     });

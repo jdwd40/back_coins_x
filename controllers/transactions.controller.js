@@ -19,7 +19,7 @@ exports.createTransaction = async (req, res, next) => {
       return res.status(401).json({ msg: 'Unauthorized' });
     }
 
-    if (!['buy', 'sell'].includes(type.toLowerCase())) {
+    if (!['BUY', 'SELL'].includes(type.toUpperCase())) {
       return res.status(400).json({ msg: 'Invalid transaction type' });
     }
 
@@ -27,13 +27,19 @@ exports.createTransaction = async (req, res, next) => {
     const transaction = await insertTransaction(
       user_id,
       coin_id,
-      type.toLowerCase(),
+      type,
       amount,
       price_at_transaction
     );
 
-    // Update portfolio
-    await updatePortfolio(user_id, coin_id, type.toLowerCase(), amount, price_at_transaction);
+    // Update the user's portfolio
+    await updatePortfolio(
+      user_id,
+      coin_id,
+      type,
+      amount,
+      price_at_transaction
+    );
 
     res.status(201).json({ transaction });
   } catch (err) {

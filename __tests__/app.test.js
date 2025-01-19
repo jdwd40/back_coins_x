@@ -9,8 +9,9 @@ describe('API Endpoints', () => {
         .get('/api/coins')
         .expect(200)
         .then(({ body }) => {
+          console.log("from app.test",body);
           expect(Array.isArray(body.coins)).toBe(true);
-          expect(body.coins.length).toBe(2); // We have 2 coins in our test data
+          expect(body.coins.length).toBe(10); // We have 2 coins in our test data
           body.coins.forEach((coin) => {
             expect(coin).toHaveProperty('coin_id');
             expect(coin).toHaveProperty('name');

@@ -76,7 +76,7 @@ exports.selectUserPortfolio = async (user_id) => {
 
 exports.updatePortfolio = async (user_id, coin_id, type, amount, price_at_transaction) => {
   // First check if there's enough balance for a sell
-  if (type === 'sell') {
+  if (type.toUpperCase() === 'SELL') {
     const currentBalance = await db.query(
       `SELECT SUM(
          CASE 
@@ -106,7 +106,7 @@ exports.updatePortfolio = async (user_id, coin_id, type, amount, price_at_transa
        END,
        updated_at = CURRENT_TIMESTAMP
      RETURNING *`,
-    [user_id, coin_id, type === 'buy' ? amount : -amount]
+    [user_id, coin_id, type.toUpperCase() === 'BUY' ? amount : -amount]
   );
   
   return result.rows[0];

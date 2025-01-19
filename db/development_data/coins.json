@@ -1,84 +1,92 @@
-{
-  "coins": [
-    {
-      "coin_id": 1,
-      "name": "FutureCoin",
-      "symbol": "FTR",
-      "current_price": 0.10,
-      "market_cap": 30000,
-      "circulating_supply": 2500
-    },
-    {
-      "coin_id": 2,
-      "name": "NovaCash",
-      "symbol": "NVC",
-      "current_price": 1.37,
-      "market_cap": 18000,
-      "circulating_supply": 4500
-    },
-    {
-      "coin_id": 3,
-      "name": "Byteon",
-      "symbol": "BYT",
-      "current_price": 0.12,
-      "market_cap": 20000,
-      "circulating_supply": 4000
-    },
-    {
-      "coin_id": 4,
-      "name": "DigitalVault",
-      "symbol": "DGV",
-      "current_price": 0.10,
-      "market_cap": 7000,
-      "circulating_supply": 7000
-    },
-    {
-      "coin_id": 5,
-      "name": "Cybercore",
-      "symbol": "CYB",
-      "current_price": 96.45,
-      "market_cap": 12000,
-      "circulating_supply": 6000
-    },
-    {
-      "coin_id": 6,
-      "name": "BlockNation",
-      "symbol": "BLN",
-      "current_price": 43.46,
-      "market_cap": 30000,
-      "circulating_supply": 2000
-    },
-    {
-      "coin_id": 7,
-      "name": "StellaFortune",
-      "symbol": "STF",
-      "current_price": 3.91,
-      "market_cap": 14000,
-      "circulating_supply": 5500
-    },
-    {
-      "coin_id": 8,
-      "name": "Chaingenius",
-      "symbol": "CHG",
-      "current_price": 33.48,
-      "market_cap": 15000,
-      "circulating_supply": 5000
-    },
-    {
-      "coin_id": 9,
-      "name": "MeteorCoin",
-      "symbol": "MTC",
-      "current_price": 0.10,
-      "market_cap": 6400,
-      "circulating_supply": 8000
-    },
-    {
-      "coin_id": 10,
-      "name": "CryptoZen",
-      "symbol": "CZN",
-      "current_price": 32.00,
-      "market_cap": 25000,
-      "circulating_supply": 3000
-    }
-  ]
-}
+[
+  {
+    "coin_id": 1,
+    "name": "FutureCoin",
+    "symbol": "FTR",
+    "current_price": 0.10,
+    "market_cap": 30000,
+    "circulating_supply": 2500,
+    "price_change_24h": null
+  },
+  {
+    "coin_id": 2,
+    "name": "NovaCash",
+    "symbol": "NVC",
+    "current_price": 1.37,
+    "market_cap": 18000,
+    "circulating_supply": 4500,
+    "price_change_24h": null
+  },
+  {
+    "coin_id": 3,
+    "name": "Byteon",
+    "symbol": "BYT",
+    "current_price": 0.12,
+    "market_cap": 20000,
+    "circulating_supply": 4000,
+    "price_change_24h": null
+  },
+  {
+    "coin_id": 4,
+    "name": "DigitalVault",
+    "symbol": "DGV",
+    "current_price": 0.10,
+    "market_cap": 7000,
+    "circulating_supply": 7000,
+    "price_change_24h": null
+  },
+  {
+    "coin_id": 5,
+    "name": "Cybercore",
+    "symbol": "CYB",
+    "current_price": 96.45,
+    "market_cap": 12000,
+    "circulating_supply": 6000,
+    "price_change_24h": null
+  },
+  {
+    "coin_id": 6,
+    "name": "BlockNation",
+    "symbol": "BLN",
+    "current_price": 43.46,
+    "market_cap": 30000,
+    "circulating_supply": 2000,
+    "price_change_24h": null
+  },
+  {
+    "coin_id": 7,
+    "name": "StellaFortune",
+    "symbol": "STF",
+    "current_price": 3.91,
+    "market_cap": 14000,
+    "circulating_supply": 5500,
+    "price_change_24h": null
+  },
+  {
+    "coin_id": 8,
+    "name": "Chaingenius",
+    "symbol": "CHG",
+    "current_price": 33.48,
+    "market_cap": 15000,
+    "circulating_supply": 5000,
+    "price_change_24h": null
+  },
+  {
+    "coin_id": 9,
+    "name": "MeteorCoin",
+    "symbol": "MTC",
+    "current_price": 0.10,
+    "market_cap": 6400,
+    "circulating_supply": 8000,
+    "price_change_24h": null
+  },
+  {
+    "coin_id": 10,
+    "name": "CryptoZen",
+    "symbol": "CZN",
+    "current_price": 32.00,
+    "market_cap": 25000,
+    "circulating_supply": 3000,
+    "price_change_24h": null
+  }
+]

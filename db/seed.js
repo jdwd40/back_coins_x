@@ -45,19 +45,18 @@ const seed = async () => {
         name VARCHAR(50) NOT NULL,
         symbol VARCHAR(10) UNIQUE NOT NULL,
         current_price DECIMAL(18, 2) NOT NULL,
-        supply INT NOT NULL,
         market_cap DECIMAL(18, 2) NOT NULL,
-        date_added TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        description TEXT,
-        price_change_24h DECIMAL(8, 2)
+        circulating_supply INT NOT NULL,
+        price_change_24h DECIMAL(5, 2),
+        date_added TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
 
       CREATE TABLE "portfolios" (
         portfolio_id INTEGER PRIMARY KEY DEFAULT nextval('portfolios_portfolio_id_seq'),
         user_id INTEGER REFERENCES users(user_id) ON DELETE CASCADE,
         coin_id INTEGER REFERENCES coins(coin_id) ON DELETE CASCADE,
-        quantity DECIMAL(18, 8) NOT NULL,
-        average_buy_price DECIMAL(18, 2) NOT NULL,
+        quantity DECIMAL(18, 2) DEFAULT 0,
+        average_purchase_price DECIMAL(18, 2) DEFAULT 0,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         UNIQUE(user_id, coin_id)
@@ -67,71 +66,86 @@ const seed = async () => {
         transaction_id INTEGER PRIMARY KEY DEFAULT nextval('transactions_transaction_id_seq'),
         user_id INTEGER REFERENCES users(user_id) ON DELETE CASCADE,
         coin_id INTEGER REFERENCES coins(coin_id) ON DELETE CASCADE,
-        type VARCHAR(10) CHECK (type IN ('buy', 'sell')) NOT NULL,
-        amount DECIMAL(18, 2) NOT NULL,
-        price_at_transaction DECIMAL(18, 2) NOT NULL,
-        transaction_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        type VARCHAR(10) CHECK (type IN ('BUY', 'SELL')) NOT NULL,
+        quantity DECIMAL(18, 2) NOT NULL,
+        price DECIMAL(18, 2) NOT NULL,
+        total_amount DECIMAL(18, 2) NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
 
       CREATE TABLE "price_history" (
-        price_history_id INTEGER PRIMARY KEY DEFAULT nextval('price_history_price_history_id_seq'),
+        history_id INTEGER PRIMARY KEY DEFAULT nextval('price_history_price_history_id_seq'),
         coin_id INTEGER REFERENCES coins(coin_id) ON DELETE CASCADE,
         price DECIMAL(18, 2) NOT NULL,
-        recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        CONSTRAINT unique_coin_timestamp UNIQUE (coin_id, recorded_at)
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
 
-      CREATE INDEX idx_price_history_coin_timestamp 
-      ON price_history(coin_id, recorded_at DESC);
+      -- Create indexes for better query performance
+      CREATE INDEX idx_transactions_user_id ON transactions(user_id);
+      CREATE INDEX idx_transactions_coin_id ON transactions(coin_id);
+      CREATE INDEX idx_portfolios_user_id ON portfolios(user_id);
+      CREATE INDEX idx_portfolios_coin_id ON portfolios(coin_id);
+      CREATE INDEX idx_price_history_coin_id ON price_history(coin_id);
+      CREATE INDEX idx_price_history_created_at ON price_history(created_at);
     `);
 
     // Insert test data
-    const hashedPassword = await bcrypt.hash('password123', 10);
-    
-    const usersData = [
-      ['testuser1', 'test1@example.com', hashedPassword],
-      ['testuser2', 'test2@example.com', hashedPassword]
-    ];
+    const testData = require('./test_data/coins.json');
+    const coinValues = testData.map(coin => [
+      coin.name,
+      coin.symbol,
+      coin.current_price,
+      coin.market_cap,
+      coin.circulating_supply,
+      coin.price_change_24h
+    ]);
 
-    const usersInsertSql = format(
-      'INSERT INTO users (username, email, password_hash) VALUES %L RETURNING *',
-      usersData
+    const coinsResult = await db.query(
+      format(
+        'INSERT INTO coins (name, symbol, current_price, market_cap, circulating_supply, price_change_24h) VALUES %L RETURNING *',
+        coinValues
+      )
     );
 
-    const coinsData = [
-      ['Bitcoin', 'BTC', '50000.00', 19000000, '950000000000.00', 'The first and most well-known cryptocurrency.'],
-      ['Ethereum', 'ETH', '3000.00', 120000000, '360000000000.00', 'A decentralized platform that runs smart contracts.']
+    // Create test users
+    const hashedPassword = await bcrypt.hash('testpass123', 10);
+    const userValues = [
+      ['john_doe', 'john@example.com', hashedPassword],
+      ['jane_smith', 'jane@example.com', hashedPassword]
     ];
 
-    const coinsInsertSql = format(
-      'INSERT INTO coins (name, symbol, current_price, supply, market_cap, description) VALUES %L RETURNING *',
-      coinsData
+    const usersResult = await db.query(
+      format(
+        'INSERT INTO users (username, email, password_hash) VALUES %L RETURNING *',
+        userValues
+      )
     );
 
-    await db.query(usersInsertSql);
-    await db.query(coinsInsertSql);
-
-    console.log('Seeding completed successfully!');
-
-    // Add some initial price history
+    // Add initial price history for each coin
+    const coins = coinsResult.rows;
     const now = new Date();
-    const priceHistoryData = [
-      [1, '50000.00', new Date(now - 3600000)],  // 1 hour ago
-      [1, '49500.00', new Date(now - 7200000)],  // 2 hours ago
-      [2, '3000.00', new Date(now - 3600000)],   // 1 hour ago
-      [2, '2950.00', new Date(now - 7200000)]    // 2 hours ago
-    ];
+    const priceHistoryValues = coins.flatMap(coin => {
+      // Create 5 price history entries for each coin over the last 5 hours
+      return Array.from({ length: 5 }, (_, i) => {
+        const timestamp = new Date(now.getTime() - (i * 60 * 60 * 1000)); // i hours ago
+        return [
+          coin.coin_id,
+          coin.current_price,
+          timestamp
+        ];
+      });
+    });
 
-    const priceHistoryInsertSql = format(
-      'INSERT INTO price_history (coin_id, price, recorded_at) VALUES %L',
-      priceHistoryData
+    await db.query(
+      format(
+        'INSERT INTO price_history (coin_id, price, created_at) VALUES %L',
+        priceHistoryValues
+      )
     );
 
-    await db.query(priceHistoryInsertSql);
     console.log('Seeding completed successfully!');
-
   } catch (error) {
-    console.error('Error seeding:', error);
+    console.error('Error seeding database:', error);
     throw error;
   }
 };
