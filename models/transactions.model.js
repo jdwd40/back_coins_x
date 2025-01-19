@@ -74,40 +74,65 @@ exports.selectUserPortfolio = async (user_id) => {
   return result.rows;
 };
 
-exports.updatePortfolio = async (user_id, coin_id, type, amount, price_at_transaction) => {
-  // First check if there's enough balance for a sell
-  if (type.toUpperCase() === 'SELL') {
-    const currentBalance = await db.query(
-      `SELECT SUM(
-         CASE 
-           WHEN type = 'BUY' THEN quantity
-           WHEN type = 'SELL' THEN -quantity
-         END
-       ) as balance
-       FROM transactions
-       WHERE user_id = $1 AND coin_id = $2`,
-      [user_id, coin_id]
-    );
+exports.updatePortfolio = async (user_id, coin_id, type, amount, price) => {
+  // Check if portfolio entry exists
+  const portfolioResult = await db.query(
+    `SELECT quantity, average_price 
+     FROM user_portfolio 
+     WHERE user_id = $1 AND coin_id = $2`,
+    [user_id, coin_id]
+  );
+
+  const isBuy = type.toUpperCase() === 'BUY';
+  
+  if (portfolioResult.rows.length === 0) {
+    if (!isBuy) {
+      throw new Error('Cannot sell coins that are not in portfolio');
+    }
     
-    if (!currentBalance.rows[0].balance || currentBalance.rows[0].balance < amount) {
-      throw new Error('Insufficient balance');
+    // Create new portfolio entry for buy
+    await db.query(
+      `INSERT INTO user_portfolio 
+       (user_id, coin_id, quantity, average_price)
+       VALUES ($1, $2, $3, $4)`,
+      [user_id, coin_id, amount, price]
+    );
+  } else {
+    const { quantity, average_price } = portfolioResult.rows[0];
+    
+    if (isBuy) {
+      // Calculate new average price for buys
+      const newQuantity = quantity + amount;
+      const newAveragePrice = ((quantity * average_price) + (amount * price)) / newQuantity;
+      
+      await db.query(
+        `UPDATE user_portfolio 
+         SET quantity = $1, average_price = $2
+         WHERE user_id = $3 AND coin_id = $4`,
+        [newQuantity, newAveragePrice, user_id, coin_id]
+      );
+    } else {
+      // Handle sells
+      const newQuantity = quantity - amount;
+      
+      if (newQuantity < 0) {
+        throw new Error('Insufficient coins in portfolio');
+      } else if (newQuantity === 0) {
+        // Remove portfolio entry if quantity becomes 0
+        await db.query(
+          `DELETE FROM user_portfolio 
+           WHERE user_id = $1 AND coin_id = $2`,
+          [user_id, coin_id]
+        );
+      } else {
+        // Keep same average price for sells
+        await db.query(
+          `UPDATE user_portfolio 
+           SET quantity = $1
+           WHERE user_id = $2 AND coin_id = $3`,
+          [newQuantity, user_id, coin_id]
+        );
+      }
     }
   }
-
-  // If it's a sell and we have enough balance, or if it's a buy, proceed with portfolio update
-  const result = await db.query(
-    `INSERT INTO portfolios (user_id, coin_id, quantity)
-     VALUES ($1, $2, $3)
-     ON CONFLICT (user_id, coin_id)
-     DO UPDATE SET
-       quantity = CASE
-         WHEN portfolios.quantity + $3 < 0 THEN 0
-         ELSE portfolios.quantity + $3
-       END,
-       updated_at = CURRENT_TIMESTAMP
-     RETURNING *`,
-    [user_id, coin_id, type.toUpperCase() === 'BUY' ? amount : -amount]
-  );
-  
-  return result.rows[0];
 };

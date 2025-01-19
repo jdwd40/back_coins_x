@@ -8,9 +8,9 @@ const {
 
 exports.createTransaction = async (req, res, next) => {
   try {
-    const { user_id, coin_id, type, amount, price_at_transaction } = req.body;
+    const { user_id, coin_id, type, amount } = req.body;
     
-    if (!user_id || !coin_id || !type || !amount || !price_at_transaction) {
+    if (!user_id || !coin_id || !type || !amount) {
       return res.status(400).json({ msg: 'Missing required fields' });
     }
 
@@ -23,29 +23,105 @@ exports.createTransaction = async (req, res, next) => {
       return res.status(400).json({ msg: 'Invalid transaction type' });
     }
 
-    // Start a transaction to ensure portfolio is updated atomically
-    const transaction = await insertTransaction(
-      user_id,
-      coin_id,
-      type,
-      amount,
-      price_at_transaction
-    );
-
-    // Update the user's portfolio
-    await updatePortfolio(
-      user_id,
-      coin_id,
-      type,
-      amount,
-      price_at_transaction
-    );
-
-    res.status(201).json({ transaction });
-  } catch (err) {
-    if (err.message === 'Insufficient balance') {
-      return res.status(400).json({ msg: 'Insufficient balance for this transaction' });
+    // Validate amount
+    if (amount <= 0) {
+      return res.status(400).json({ msg: 'Amount must be greater than 0' });
     }
+
+    // Get current coin price and supply
+    const coinResult = await db.query(
+      'SELECT current_price, available_supply FROM coins WHERE coin_id = $1',
+      [coin_id]
+    );
+
+    if (coinResult.rows.length === 0) {
+      return res.status(404).json({ msg: 'Coin not found' });
+    }
+
+    const { current_price, available_supply } = coinResult.rows[0];
+    const total_amount = amount * current_price;
+
+    // Get user's current balance and portfolio
+    const userResult = await db.query(
+      'SELECT balance FROM users WHERE user_id = $1',
+      [user_id]
+    );
+
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({ msg: 'User not found' });
+    }
+
+    const { balance } = userResult.rows[0];
+
+    if (type.toUpperCase() === 'BUY') {
+      // Check if user has enough balance
+      if (balance < total_amount) {
+        return res.status(400).json({ msg: 'Insufficient balance' });
+      }
+
+      // Check if there's enough supply
+      if (amount > available_supply) {
+        return res.status(400).json({ msg: 'Insufficient coin supply' });
+      }
+    } else {
+      // For SELL operations, check if user has enough coins
+      const portfolioResult = await db.query(
+        `SELECT quantity FROM user_portfolio 
+         WHERE user_id = $1 AND coin_id = $2`,
+        [user_id, coin_id]
+      );
+
+      const userCoins = portfolioResult.rows[0]?.quantity || 0;
+      if (amount > userCoins) {
+        return res.status(400).json({ msg: 'Insufficient coins in portfolio' });
+      }
+    }
+
+    // Start a database transaction
+    await db.query('BEGIN');
+
+    try {
+      // Insert the transaction
+      const transaction = await insertTransaction(
+        user_id,
+        coin_id,
+        type,
+        amount,
+        current_price
+      );
+
+      // Update the user's portfolio
+      await updatePortfolio(
+        user_id,
+        coin_id,
+        type,
+        amount,
+        current_price
+      );
+
+      // Update user's balance
+      await db.query(
+        `UPDATE users 
+         SET balance = balance ${type.toUpperCase() === 'BUY' ? '-' : '+'} $1
+         WHERE user_id = $2`,
+        [total_amount, user_id]
+      );
+
+      // Update coin supply
+      await db.query(
+        `UPDATE coins 
+         SET available_supply = available_supply ${type.toUpperCase() === 'BUY' ? '-' : '+'} $1
+         WHERE coin_id = $2`,
+        [amount, coin_id]
+      );
+
+      await db.query('COMMIT');
+      res.status(201).json({ transaction });
+    } catch (err) {
+      await db.query('ROLLBACK');
+      throw err;
+    }
+  } catch (err) {
     next(err);
   }
 };

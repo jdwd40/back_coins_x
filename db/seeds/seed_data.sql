@@ -1,4 +1,4 @@
--- Connect to the database
+npm run setup-dbsnpm run setup-dbs-- Connect to the database
 \c coins_x;
 
 -- Seed Users table
