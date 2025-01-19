@@ -24,7 +24,7 @@ exports.getCoinById = async (req, res, next) => {
       return res.status(404).json({ msg: 'Coin not found' });
     }
 
-    res.status(200).json(coin);
+    res.status(200).json({ coin });
   } catch (error) {
     console.error('Error in getCoinById:', error);
     next(error);
@@ -35,7 +35,6 @@ exports.updatePrice = async (req, res, next) => {
   try {
     const { coin_id } = req.params;
     const { current_price } = req.body;
-    console.log('Updating price for coin:', coin_id, 'to:', current_price);
 
     if (!Number.isInteger(parseInt(coin_id))) {
       return res.status(400).json({ msg: 'Invalid coin ID' });
@@ -45,20 +44,8 @@ exports.updatePrice = async (req, res, next) => {
       return res.status(400).json({ msg: 'Current price is required' });
     }
 
-    try {
-      const updatedCoin = await updateCoinPrice(coin_id, current_price);
-      console.log('Successfully updated coin:', updatedCoin);
-      res.status(200).json(updatedCoin);
-    } catch (err) {
-      console.error('Error updating coin price:', err);
-      if (err.message === 'Invalid price format') {
-        return res.status(400).json({ msg: 'Invalid price format' });
-      }
-      if (err.message === 'Coin not found') {
-        return res.status(404).json({ msg: 'Coin not found' });
-      }
-      throw err;
-    }
+    const updatedCoin = await updateCoinPrice(coin_id, current_price);
+    res.status(200).json({ coin: updatedCoin });
   } catch (error) {
     console.error('Error in updatePrice:', error);
     next(error);
@@ -68,18 +55,16 @@ exports.updatePrice = async (req, res, next) => {
 exports.getPriceHistory = async (req, res, next) => {
   try {
     const { coin_id } = req.params;
+    console.log('Getting price history for coin:', coin_id);
 
     if (!Number.isInteger(parseInt(coin_id))) {
-      return res.status(400).json({ error: 'Invalid coin ID' });
+      console.log('Invalid coin ID:', coin_id);
+      return res.status(400).json({ msg: 'Invalid coin ID' });
     }
 
-    const history = await getCoinPriceHistory(coin_id);
-
-    if (!history) {
-      return res.status(404).json({ error: 'Coin not found' });
-    }
-
-    res.status(200).json({ priceHistory: history });
+    const priceHistory = await getCoinPriceHistory(coin_id);
+    console.log(`Retrieved ${priceHistory.length} price history entries for coin ${coin_id}`);
+    res.status(200).json({ price_history: priceHistory });
   } catch (error) {
     console.error('Error in getPriceHistory:', error);
     next(error);

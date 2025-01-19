@@ -2,11 +2,12 @@ const db = require('./connection');
 const format = require('pg-format');
 const bcrypt = require('bcrypt');
 
-const seed = async () => {
+const seed = async (shouldEnd = false) => {
   try {
     console.log('Seeding test database...');
 
     // Drop existing tables and sequences if they exist
+    console.log('Dropping existing tables and sequences...');
     await db.query(`
       DROP TABLE IF EXISTS "price_history" CASCADE;
       DROP TABLE IF EXISTS "transactions" CASCADE;
@@ -21,6 +22,7 @@ const seed = async () => {
     `);
 
     // Create sequences
+    console.log('Creating sequences...');
     await db.query(`
       CREATE SEQUENCE users_user_id_seq;
       CREATE SEQUENCE coins_coin_id_seq;
@@ -30,6 +32,7 @@ const seed = async () => {
     `);
 
     // Create tables
+    console.log('Creating tables...');
     await db.query(`
       CREATE TABLE "users" (
         user_id INTEGER PRIMARY KEY DEFAULT nextval('users_user_id_seq'),
@@ -90,6 +93,7 @@ const seed = async () => {
     `);
 
     // Insert test data
+    console.log('Inserting test data...');
     const testData = require('./test_data/coins.json');
     const coinValues = testData.map(coin => [
       coin.name,
@@ -108,6 +112,7 @@ const seed = async () => {
     );
 
     // Create test users
+    console.log('Creating test users...');
     const hashedPassword = await bcrypt.hash('testpass123', 10);
     const userValues = [
       ['john_doe', 'john@example.com', hashedPassword],
@@ -122,6 +127,7 @@ const seed = async () => {
     );
 
     // Add initial price history for each coin
+    console.log('Adding price history...');
     const coins = coinsResult.rows;
     const now = new Date();
     const priceHistoryValues = coins.flatMap(coin => {
@@ -147,7 +153,19 @@ const seed = async () => {
   } catch (error) {
     console.error('Error seeding database:', error);
     throw error;
+  } finally {
+    if (shouldEnd) {
+      await db.end();
+    }
   }
 };
+
+if (require.main === module) {
+  // Only run seed() if this file is run directly
+  seed(true).catch(err => {
+    console.error('Failed to seed database:', err);
+    process.exit(1);
+  });
+}
 
 module.exports = seed;

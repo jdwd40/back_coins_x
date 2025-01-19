@@ -114,11 +114,16 @@ class MarketSimulator {
 
   // Update prices for all coins based on current market conditions
   async updateAllPrices() {
-    if (!this.currentCycle || !this.isRunning) return;
+    if (!this.currentCycle || !this.isRunning) {
+      console.log('Market simulator not running or no current cycle');
+      return;
+    }
 
     try {
+      console.log('Starting price update cycle');
       const result = await db.query('SELECT coin_id, current_price FROM coins');
       const coins = result.rows;
+      console.log(`Updating prices for ${coins.length} coins`);
 
       await db.query('BEGIN');
       try {
@@ -127,6 +132,8 @@ class MarketSimulator {
             parseFloat(coin.current_price),
             coin.coin_id
           );
+
+          console.log(`Updating coin ${coin.coin_id}: ${coin.current_price} -> ${newPrice}`);
 
           await db.query(
             `UPDATE coins 
@@ -143,37 +150,46 @@ class MarketSimulator {
           );
         }
         await db.query('COMMIT');
+        console.log('Successfully updated all coin prices and recorded history');
       } catch (error) {
         await db.query('ROLLBACK');
         throw error;
       }
     } catch (error) {
       console.error('Error updating prices:', error);
-      // Stop the simulation if we encounter database errors
-      this.stop();
     }
   }
 
   // Calculate new price based on market conditions
   calculateNewPrice(currentPrice, coinId) {
-    let adjustment = 0;
+    const marketEffect = (() => {
+      switch (this.currentCycle.type) {
+        case MARKET_CYCLES.BOOM:
+          return 0.02; // 2% up bias
+        case MARKET_CYCLES.BUST:
+          return -0.02; // 2% down bias
+        default:
+          return 0; // No bias in stable market
+      }
+    })();
 
-    // Market cycle effect (±0.5% to ±2% per update)
-    const cycleEffect = this.currentCycle.type === MARKET_CYCLES.BOOM ? 1 : 
-                       this.currentCycle.type === MARKET_CYCLES.BUST ? -1 : 0;
-    adjustment += (Math.random() * 0.015 + 0.005) * cycleEffect;
+    const coinEvent = this.coinEvents.get(coinId);
+    const eventEffect = coinEvent ? (coinEvent.multiplier - 1) * 0.1 : 0;
 
-    // Coin-specific event effect
-    const event = this.coinEvents.get(coinId);
-    if (event) {
-      const eventProgress = (new Date() - event.startTime) / event.duration;
-      const eventEffect = (event.multiplier - 1) * (1 - eventProgress);
-      adjustment += eventEffect * 0.01; // Scale down the effect
-    }
+    // Random component (-2% to +2%)
+    const randomEffect = (Math.random() * 0.04) - 0.02;
 
-    // Apply the adjustment
-    const newPrice = currentPrice * (1 + adjustment);
-    return Math.round(newPrice * 100) / 100; // Round to 2 decimal places
+    // Combine all effects
+    const totalEffect = marketEffect + eventEffect + randomEffect;
+    
+    // Calculate new price with the combined effect
+    let newPrice = currentPrice * (1 + totalEffect);
+
+    // Ensure price doesn't go below 0.01
+    newPrice = Math.max(0.01, newPrice);
+
+    // Round to 2 decimal places
+    return Math.round(newPrice * 100) / 100;
   }
 
   // Generate a random duration within a range
@@ -215,6 +231,60 @@ class MarketSimulator {
       },
       events: activeEvents
     };
+  }
+
+  // Get market statistics including all coins and market highs/lows
+  async getMarketStats() {
+    try {
+      // Get current values of all coins
+      const currentValues = await db.query(`
+        SELECT 
+          c.*,
+          COALESCE(
+            (SELECT price 
+             FROM price_history ph 
+             WHERE ph.coin_id = c.coin_id 
+             ORDER BY created_at DESC 
+             LIMIT 1
+            ),
+            c.current_price
+          ) as latest_price
+        FROM coins c
+      `);
+
+      // Get all-time market high and low
+      const marketStats = await db.query(`
+        WITH market_totals AS (
+          SELECT 
+            created_at,
+            SUM(price) as total_market_value
+          FROM price_history
+          GROUP BY created_at
+        )
+        SELECT 
+          MAX(total_market_value) as all_time_high,
+          MIN(total_market_value) as all_time_low,
+          (
+            SELECT total_market_value 
+            FROM market_totals 
+            ORDER BY created_at DESC 
+            LIMIT 1
+          ) as current_market_value
+        FROM market_totals
+      `);
+
+      return {
+        coins: currentValues.rows,
+        market_stats: marketStats.rows[0] || {
+          all_time_high: null,
+          all_time_low: null,
+          current_market_value: null
+        }
+      };
+    } catch (error) {
+      console.error('Error getting market stats:', error);
+      throw error;
+    }
   }
 }
 

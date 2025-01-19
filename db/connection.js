@@ -9,7 +9,13 @@ if (!process.env.PGDATABASE && !process.env.DATABASE_URL) {
   throw new Error('PGDATABASE or DATABASE_URL not set');
 }
 
-const config = {};
+const config = {
+  database: process.env.PGDATABASE,
+  user: process.env.PGUSER || 'jd',
+  password: process.env.PGPASSWORD,
+  host: process.env.PGHOST || 'localhost',
+  port: process.env.PGPORT || 5432
+};
 
 if (ENV === 'production') {
   config.connectionString = process.env.DATABASE_URL;
