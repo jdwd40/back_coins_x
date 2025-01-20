@@ -58,33 +58,59 @@ class MarketSimulator {
 
   // Start the market simulation
   async start() {
-    if (this.isRunning) return;
-    this.isRunning = true;
+    console.log('Starting market simulation...');
+    if (this.isRunning) {
+      console.log('Market simulator already running');
+      return;
+    }
     
-    // Initialize volatility profiles
-    await this.initializeCoinVolatility();
-    
-    // Start initial market cycle
-    this.startNewMarketCycle();
-    
-    // Start price updates
-    this.startPriceUpdates();
+    try {
+      // Initialize volatility profiles first
+      console.log('Initializing coin volatility...');
+      await this.initializeCoinVolatility();
+      
+      // Start initial market cycle
+      console.log('Starting market cycle...');
+      await this.startNewMarketCycle();
+      
+      // Mark as running only after initialization is complete
+      this.isRunning = true;
+      
+      // Start price updates
+      console.log('Starting price updates...');
+      this.startPriceUpdates();
+    } catch (error) {
+      console.error('Error starting market simulator:', error);
+      this.isRunning = false;
+    }
   }
 
   // Start a new market cycle
   async startNewMarketCycle() {
-    if (!this.isRunning) return;
+    if (!this.isRunning && this.currentCycle) return;
+
+    // Clear existing cycle timeout if any
+    if (this.cycleTimeout) {
+      clearTimeout(this.cycleTimeout);
+      this.cycleTimeout = null;
+    }
 
     // Determine cycle type and duration
     const cycleTypes = Object.values(MARKET_CYCLES);
-    const cycleType = cycleTypes[Math.floor(Math.random() * cycleTypes.length)];
+    const randomCycle = cycleTypes[Math.floor(Math.random() * cycleTypes.length)];
     const duration = this.getRandomDuration(30000, 120000); // 30s to 2m
 
     this.currentCycle = {
-      type: cycleType,
+      ...randomCycle,
       startTime: new Date(),
       duration: duration
     };
+
+    console.log('Starting new market cycle:', {
+      type: this.currentCycle.type,
+      baseEffect: this.currentCycle.baseEffect,
+      duration: duration
+    });
 
     // Schedule next cycle
     this.cycleTimeout = setTimeout(() => {
@@ -131,9 +157,18 @@ class MarketSimulator {
 
   // Start periodic price updates
   startPriceUpdates() {
-    this.updateIntervalId = setInterval(async () => {
-      if (!this.isRunning) return;
-      await this.updateAllPrices();
+    console.log('Starting price updates...');
+    if (this.updateIntervalId) {
+      console.log('Price updates already running');
+      return;
+    }
+
+    // Initial update
+    this.updateAllPrices();
+
+    // Set interval for future updates
+    this.updateIntervalId = setInterval(() => {
+      this.updateAllPrices();
     }, this.priceUpdateInterval);
   }
 
@@ -146,31 +181,43 @@ class MarketSimulator {
 
     try {
       console.log('Starting price update cycle');
-      const result = await db.query('SELECT coin_id, current_price FROM coins');
+      const result = await db.query('SELECT coin_id, current_price::numeric FROM coins');
       const coins = result.rows;
       console.log(`Updating prices for ${coins.length} coins`);
 
       await db.query('BEGIN');
       try {
         for (const coin of coins) {
-          const newPrice = this.calculateNewPrice(
-            parseFloat(coin.current_price),
-            coin.coin_id
-          );
+          // Ensure current_price is a number
+          const currentPrice = typeof coin.current_price === 'string' 
+            ? parseFloat(coin.current_price) 
+            : coin.current_price;
 
-          console.log(`Updating coin ${coin.coin_id}: ${coin.current_price} -> ${newPrice}`);
+          if (isNaN(currentPrice)) {
+            console.error(`Invalid price for coin ${coin.coin_id}: ${coin.current_price}`);
+            continue;
+          }
+
+          const newPrice = this.calculateNewPrice(currentPrice, coin.coin_id);
+
+          if (isNaN(newPrice)) {
+            console.error(`Calculated invalid price for coin ${coin.coin_id}: ${newPrice}`);
+            continue;
+          }
+
+          console.log(`Updating coin ${coin.coin_id}: ${currentPrice} -> ${newPrice}`);
 
           await db.query(
             `UPDATE coins 
-             SET current_price = $1,
-                 price_change_24h = ROUND(((($1::decimal - current_price) / current_price) * 100), 2)
+             SET current_price = $1::decimal,
+                 price_change_24h = ROUND(((($1::decimal - current_price::decimal) / current_price::decimal) * 100), 2)
              WHERE coin_id = $2`,
             [newPrice, coin.coin_id]
           );
 
           await db.query(
             `INSERT INTO price_history (coin_id, price)
-             VALUES ($1, $2)`,
+             VALUES ($1, $2::decimal)`,
             [coin.coin_id, newPrice]
           );
         }
@@ -187,58 +234,67 @@ class MarketSimulator {
 
   // Calculate new price based on market conditions
   calculateNewPrice(currentPrice, coinId) {
+    console.log(`Calculating new price for coin ${coinId}. Current price: ${currentPrice}`);
+    
     const volatilityProfile = this.coinVolatility.get(coinId);
-    if (!volatilityProfile) return currentPrice;
+    if (!volatilityProfile) {
+      console.log(`No volatility profile found for coin ${coinId}`);
+      return currentPrice;
+    }
+
+    console.log(`Volatility profile for coin ${coinId}:`, volatilityProfile);
+    console.log(`Current market cycle:`, this.currentCycle);
 
     const { baseVolatility, trendDirection, trendStrength } = volatilityProfile;
 
     // Market cycle effect
-    const marketEffect = this.currentCycle.type === 'STABLE' 
-      ? 0 
-      : this.currentCycle.baseEffect * baseVolatility;
+    const marketEffect = this.currentCycle ? 
+      (this.currentCycle.type === 'STABLE' ? 0 : this.currentCycle.baseEffect * baseVolatility) : 0;
+    console.log(`Market effect: ${marketEffect}`);
 
     // Coin-specific event effect
     const coinEvent = this.coinEvents.get(coinId);
     const eventEffect = coinEvent ? (coinEvent.multiplier - 1) * 0.1 * baseVolatility : 0;
+    console.log(`Event effect: ${eventEffect}`);
 
     // Random component scaled by volatility (-2% to +2% * volatility)
     const randomEffect = ((Math.random() * 0.04) - 0.02) * baseVolatility;
+    console.log(`Random effect: ${randomEffect}`);
 
     // Trend component
     const trendEffect = trendDirection * trendStrength * 0.01 * baseVolatility;
+    console.log(`Trend effect: ${trendEffect}`);
 
     // Combine all effects
     const totalEffect = marketEffect + eventEffect + randomEffect + trendEffect;
+    console.log(`Total effect: ${totalEffect}`);
     
     // Calculate new price with the combined effect
     let newPrice = currentPrice * (1 + totalEffect);
+    console.log(`Initial new price calculation: ${newPrice}`);
 
     // Price limits based on volatility
     const maxChange = 0.1 * baseVolatility; // Max 10% change per update, scaled by volatility
     const minPrice = currentPrice * (1 - maxChange);
     const maxPrice = currentPrice * (1 + maxChange);
     newPrice = Math.min(Math.max(newPrice, minPrice), maxPrice);
+    console.log(`After applying limits (${minPrice} - ${maxPrice}): ${newPrice}`);
 
     // Ensure price doesn't go below 0.01
     newPrice = Math.max(0.01, newPrice);
 
-    // Occasionally update trend
-    if (Math.random() < 0.1) { // 10% chance to change trend
-      this.coinVolatility.set(coinId, {
-        ...volatilityProfile,
-        trendDirection: Math.random() > 0.5 ? 1 : -1,
-        trendStrength: Math.random()
-      });
+    // Round to appropriate decimal places based on price range
+    let finalPrice;
+    if (newPrice < 1) {
+      finalPrice = Math.round(newPrice * 10000) / 10000; // 4 decimal places for small prices
+    } else if (newPrice < 100) {
+      finalPrice = Math.round(newPrice * 100) / 100; // 2 decimal places for medium prices
+    } else {
+      finalPrice = Math.round(newPrice); // whole numbers for large prices
     }
 
-    // Round to appropriate decimal places based on price range
-    if (newPrice < 1) {
-      return Math.round(newPrice * 10000) / 10000; // 4 decimal places for small prices
-    } else if (newPrice < 100) {
-      return Math.round(newPrice * 100) / 100; // 2 decimal places for medium prices
-    } else {
-      return Math.round(newPrice); // whole numbers for large prices
-    }
+    console.log(`Final price after rounding: ${finalPrice}`);
+    return finalPrice;
   }
 
   // Generate a random duration within a range
