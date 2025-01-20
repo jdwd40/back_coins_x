@@ -4,7 +4,8 @@ const {
   loginUser,
   getUserProfile,
   updateUserProfile,
-  deleteUser
+  deleteUser,
+  updateUserFunds
 } = require('../controllers/users.controller');
 const { authenticateToken } = require('../middleware/auth.middleware');
 
@@ -18,5 +19,6 @@ usersRouter.post('/login', loginUser);
 usersRouter.get('/:user_id', authenticateToken, getUserProfile);
 usersRouter.put('/:user_id', authenticateToken, updateUserProfile);
 usersRouter.delete('/:user_id', authenticateToken, deleteUser);
+usersRouter.patch('/:user_id/funds', authenticateToken, updateUserFunds);
 
 module.exports = { usersRouter };

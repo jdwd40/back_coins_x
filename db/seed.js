@@ -39,6 +39,7 @@ const seed = async (shouldEnd = false) => {
         username VARCHAR(50) UNIQUE NOT NULL,
         email VARCHAR(100) UNIQUE NOT NULL,
         password_hash VARCHAR(255) NOT NULL,
+        funds DECIMAL(18, 2) DEFAULT 1000.00 NOT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
@@ -115,13 +116,13 @@ const seed = async (shouldEnd = false) => {
     console.log('Creating test users...');
     const hashedPassword = await bcrypt.hash('testpass123', 10);
     const userValues = [
-      ['john_doe', 'john@example.com', hashedPassword],
-      ['jane_smith', 'jane@example.com', hashedPassword]
+      ['john_doe', 'john@example.com', hashedPassword, 1000.00],
+      ['jane_smith', 'jane@example.com', hashedPassword, 1000.00]
     ];
 
     const usersResult = await db.query(
       format(
-        'INSERT INTO users (username, email, password_hash) VALUES %L RETURNING *',
+        'INSERT INTO users (username, email, password_hash, funds) VALUES %L RETURNING *',
         userValues
       )
     );

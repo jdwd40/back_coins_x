@@ -102,3 +102,54 @@ exports.deleteUser = async (req, res, next) => {
     next(err);
   }
 };
+
+const updateUserFunds = async (req, res) => {
+  const { user_id } = req.params;
+  const { amount } = req.body;
+
+  try {
+    // Verify amount is a valid number
+    const fundAmount = parseFloat(amount);
+    if (isNaN(fundAmount)) {
+      return res.status(400).json({ error: 'Invalid amount provided' });
+    }
+
+    // Get current funds
+    const currentFundsResult = await db.query(
+      'SELECT funds FROM Users WHERE user_id = $1',
+      [user_id]
+    );
+
+    if (currentFundsResult.rows.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const currentFunds = parseFloat(currentFundsResult.rows[0].funds);
+    const newFunds = currentFunds + fundAmount;
+
+    // Don't allow negative funds
+    if (newFunds < 0) {
+      return res.status(400).json({ error: 'Insufficient funds' });
+    }
+
+    // Update funds
+    const result = await db.query(
+      'UPDATE Users SET funds = $1 WHERE user_id = $2 RETURNING user_id, username, funds',
+      [newFunds, user_id]
+    );
+
+    res.status(200).json(result.rows[0]);
+  } catch (error) {
+    console.error('Error updating user funds:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+module.exports = {
+  registerUser,
+  loginUser,
+  getUserProfile,
+  updateUserProfile,
+  deleteUser,
+  updateUserFunds
+};
