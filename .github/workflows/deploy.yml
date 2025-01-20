@@ -19,7 +19,7 @@ jobs:
           script: |
             echo "Current directory before cd:"
             pwd
-            cd /home/jd/back_coinsx
+            cd /home/jd/back_coins_x
             echo "Current directory after cd:"
             pwd
             echo "Current git status:"
