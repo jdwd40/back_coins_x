@@ -6,7 +6,7 @@ const {
   removeUser
 } = require('../models/users.model');
 
-exports.registerUser = async (req, res, next) => {
+const registerUser = async (req, res, next) => {
   try {
     const { username, email, password } = req.body;
     
@@ -24,7 +24,7 @@ exports.registerUser = async (req, res, next) => {
   }
 };
 
-exports.loginUser = async (req, res, next) => {
+const loginUser = async (req, res, next) => {
   try {
     const { email, password } = req.body;
     
@@ -42,7 +42,7 @@ exports.loginUser = async (req, res, next) => {
   }
 };
 
-exports.getUserProfile = async (req, res, next) => {
+const getUserProfile = async (req, res, next) => {
   try {
     const { user_id } = req.params;
     
@@ -51,7 +51,6 @@ exports.getUserProfile = async (req, res, next) => {
     }
 
     const user = await selectUserById(user_id);
-    
     if (!user) {
       return res.status(404).json({ msg: 'User not found' });
     }
@@ -62,42 +61,35 @@ exports.getUserProfile = async (req, res, next) => {
   }
 };
 
-exports.updateUserProfile = async (req, res, next) => {
+const updateUserProfile = async (req, res, next) => {
   try {
     const { user_id } = req.params;
-    const updateData = req.body;
-    
-    if (isNaN(user_id)) {
-      return res.status(400).json({ msg: 'Invalid user ID' });
-    }
+    const updates = req.body;
 
-    const updatedUser = await updateUser(user_id, updateData);
-    
+    const updatedUser = await updateUser(user_id, updates);
     if (!updatedUser) {
       return res.status(404).json({ msg: 'User not found' });
     }
 
     res.status(200).json({ user: updatedUser });
   } catch (err) {
+    if (err.code === '23505') {
+      return res.status(409).json({ msg: 'Username or email already exists' });
+    }
     next(err);
   }
 };
 
-exports.deleteUser = async (req, res, next) => {
+const deleteUser = async (req, res, next) => {
   try {
     const { user_id } = req.params;
-    
-    if (isNaN(user_id)) {
-      return res.status(400).json({ msg: 'Invalid user ID' });
-    }
 
-    const deleted = await removeUser(user_id);
-    
-    if (!deleted) {
+    const deletedUser = await removeUser(user_id);
+    if (!deletedUser) {
       return res.status(404).json({ msg: 'User not found' });
     }
 
-    res.status(204).json();
+    res.status(200).json({ msg: 'User deleted successfully' });
   } catch (err) {
     next(err);
   }
