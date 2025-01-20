@@ -17,7 +17,19 @@ jobs:
           username: ${{ secrets.SSH_USERNAME }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
+            echo "Current directory before cd:"
+            pwd
             cd /home/jd/back_coinsx
-            git pull origin main
+            echo "Current directory after cd:"
+            pwd
+            echo "Current git status:"
+            git status
+            echo "Fetching latest changes..."
+            git fetch origin main
+            echo "Resetting to origin/main..."
+            git reset --hard origin/main
+            echo "Installing dependencies..."
             npm install
+            echo "Restarting PM2..."
             pm2 restart all
+            echo "Deployment complete"
