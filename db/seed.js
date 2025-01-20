@@ -93,71 +93,50 @@ const seed = async (shouldEnd = false) => {
       CREATE INDEX idx_price_history_created_at ON price_history(created_at);
     `);
 
-    // Insert test data
-    console.log('Inserting test data...');
-    const testData = require('./test_data/coins.json');
-    const coinValues = testData.map(coin => [
+    // Insert coins data
+    console.log('Inserting coins...');
+    const coinsData = require('./development_data/coins.json');
+    const coinValues = coinsData.map(coin => [
       coin.name,
       coin.symbol,
       coin.current_price,
       coin.market_cap,
       coin.circulating_supply,
-      coin.price_change_24h
+      coin.price_change_24h || null
     ]);
 
-    const coinsResult = await db.query(
+    await db.query(
       format(
         'INSERT INTO coins (name, symbol, current_price, market_cap, circulating_supply, price_change_24h) VALUES %L RETURNING *',
         coinValues
       )
     );
 
-    // Create test users
-    console.log('Creating test users...');
-    const hashedPassword = await bcrypt.hash('testpass123', 10);
-    const userValues = [
-      ['john_doe', 'john@example.com', hashedPassword, 1000.00],
-      ['jane_smith', 'jane@example.com', hashedPassword, 1000.00]
-    ];
+    // Insert users data
+    console.log('Inserting users...');
+    const usersData = require('./development_data/users.json').users;
+    const userValues = usersData.map(user => [
+      user.username,
+      user.email,
+      user.password_hash,
+      user.funds || 1000.00
+    ]);
 
-    const usersResult = await db.query(
+    await db.query(
       format(
         'INSERT INTO users (username, email, password_hash, funds) VALUES %L RETURNING *',
         userValues
       )
     );
 
-    // Add initial price history for each coin
-    console.log('Adding price history...');
-    const coins = coinsResult.rows;
-    const now = new Date();
-    const priceHistoryValues = coins.flatMap(coin => {
-      // Create 5 price history entries for each coin over the last 5 hours
-      return Array.from({ length: 5 }, (_, i) => {
-        const timestamp = new Date(now.getTime() - (i * 60 * 60 * 1000)); // i hours ago
-        return [
-          coin.coin_id,
-          coin.current_price,
-          timestamp
-        ];
-      });
-    });
+    console.log('Seeding completed successfully');
 
-    await db.query(
-      format(
-        'INSERT INTO price_history (coin_id, price, created_at) VALUES %L',
-        priceHistoryValues
-      )
-    );
-
-    console.log('Seeding completed successfully!');
-  } catch (error) {
-    console.error('Error seeding database:', error);
-    throw error;
-  } finally {
     if (shouldEnd) {
       await db.end();
     }
+  } catch (err) {
+    console.error('Error during seeding:', err);
+    throw err;
   }
 };
 
