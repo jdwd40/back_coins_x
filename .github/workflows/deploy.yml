@@ -1,4 +1,4 @@
-name: Deploy to VPS
+name: Deploy Backend API to VPS
 
 on:
   push:
@@ -20,8 +20,4 @@ jobs:
             cd /home/jd/back_coinsx
             git pull origin main
             npm install
-            cd frontend
-            npm install
-            npm run build
-            cd ..
             pm2 restart all
