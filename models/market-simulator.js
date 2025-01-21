@@ -1,25 +1,25 @@
 const db = require('../db/connection');
 
-// Market cycle types with varying intensities
+// Market cycle types with more balanced effects
 const MARKET_CYCLES = {
-  STRONG_BOOM: { type: 'STRONG_BOOM', baseEffect: 0.03 },
-  MILD_BOOM: { type: 'MILD_BOOM', baseEffect: 0.015 },
-  STRONG_BUST: { type: 'STRONG_BUST', baseEffect: -0.03 },
-  MILD_BUST: { type: 'MILD_BUST', baseEffect: -0.015 },
+  STRONG_BOOM: { type: 'STRONG_BOOM', baseEffect: 0.005 },    // 0.5% max
+  MILD_BOOM: { type: 'MILD_BOOM', baseEffect: 0.002 },       // 0.2% max
+  STRONG_BUST: { type: 'STRONG_BUST', baseEffect: -0.005 },  // -0.5% max
+  MILD_BUST: { type: 'MILD_BUST', baseEffect: -0.002 },      // -0.2% max
   STABLE: { type: 'STABLE', baseEffect: 0 }
 };
 
-// Coin event types with varying impacts
+// More balanced event impacts with shorter durations
 const COIN_EVENTS = {
-  MAJOR_PARTNERSHIP: { type: 'MAJOR_PARTNERSHIP', multiplier: 1.3, duration: { min: 40000, max: 80000 } },
-  MINOR_PARTNERSHIP: { type: 'MINOR_PARTNERSHIP', multiplier: 1.1, duration: { min: 20000, max: 40000 } },
-  REGULATION_NEGATIVE: { type: 'REGULATION_NEGATIVE', multiplier: 0.7, duration: { min: 30000, max: 60000 } },
-  REGULATION_POSITIVE: { type: 'REGULATION_POSITIVE', multiplier: 1.2, duration: { min: 30000, max: 60000 } },
-  MAJOR_ADOPTION: { type: 'MAJOR_ADOPTION', multiplier: 1.4, duration: { min: 50000, max: 90000 } },
-  MINOR_ADOPTION: { type: 'MINOR_ADOPTION', multiplier: 1.15, duration: { min: 25000, max: 45000 } },
-  SCANDAL: { type: 'SCANDAL', multiplier: 0.6, duration: { min: 35000, max: 70000 } },
-  RUMOR_POSITIVE: { type: 'RUMOR_POSITIVE', multiplier: 1.1, duration: { min: 15000, max: 30000 } },
-  RUMOR_NEGATIVE: { type: 'RUMOR_NEGATIVE', multiplier: 0.9, duration: { min: 15000, max: 30000 } }
+  MAJOR_PARTNERSHIP: { type: 'MAJOR_PARTNERSHIP', multiplier: 1.05, duration: { min: 20000, max: 40000 } },  // +5%
+  MINOR_PARTNERSHIP: { type: 'MINOR_PARTNERSHIP', multiplier: 1.02, duration: { min: 10000, max: 20000 } },  // +2%
+  REGULATION_NEGATIVE: { type: 'REGULATION_NEGATIVE', multiplier: 0.95, duration: { min: 15000, max: 30000 } }, // -5%
+  REGULATION_POSITIVE: { type: 'REGULATION_POSITIVE', multiplier: 1.03, duration: { min: 15000, max: 30000 } }, // +3%
+  MAJOR_ADOPTION: { type: 'MAJOR_ADOPTION', multiplier: 1.08, duration: { min: 25000, max: 45000 } },        // +8%
+  MINOR_ADOPTION: { type: 'MINOR_ADOPTION', multiplier: 1.03, duration: { min: 12000, max: 22000 } },        // +3%
+  SCANDAL: { type: 'SCANDAL', multiplier: 0.93, duration: { min: 17000, max: 35000 } },                      // -7%
+  RUMOR_POSITIVE: { type: 'RUMOR_POSITIVE', multiplier: 1.01, duration: { min: 7000, max: 15000 } },        // +1%
+  RUMOR_NEGATIVE: { type: 'RUMOR_NEGATIVE', multiplier: 0.99, duration: { min: 7000, max: 15000 } }         // -1%
 };
 
 class MarketSimulator {
@@ -31,29 +31,107 @@ class MarketSimulator {
     this.coinEvents = new Map();
     this.coinVolatility = new Map();
     this.isRunning = false;
-    this.lastPrices = new Map(); // Store last 24h of prices for each coin
+    this.lastPrices = new Map();
+    this.initialPrices = new Map();
+    this.priceHistory = new Map();
   }
 
-  // Initialize coin volatility profiles
+  // Initialize coin volatility profiles with more conservative values
   async initializeCoinVolatility() {
-    const result = await db.query('SELECT coin_id, symbol FROM coins');
+    const result = await db.query('SELECT coin_id, symbol, current_price FROM coins');
     const coins = result.rows;
 
     coins.forEach(coin => {
-      // Assign random volatility profile (0.5 to 2.0)
-      // Higher number means more volatile
-      const baseVolatility = 0.5 + (Math.random() * 1.5);
+      // Store initial price for mean reversion
+      this.initialPrices.set(coin.coin_id, parseFloat(coin.current_price));
       
-      // Store volatility profile
+      // Assign more conservative volatility (0.2 to 0.8)
+      const baseVolatility = 0.2 + (Math.random() * 0.6);
+      
       this.coinVolatility.set(coin.coin_id, {
         baseVolatility,
         lastUpdate: new Date(),
         trendDirection: Math.random() > 0.5 ? 1 : -1,
-        trendStrength: Math.random()
+        trendStrength: Math.random() * 0.002, // 0.2% max trend effect
+        trendDuration: this.getRandomDuration(30000, 60000), // 30s to 1m trend duration
+        trendStartTime: new Date()
       });
+
+      // Initialize price history for this coin
+      this.priceHistory.set(coin.coin_id, []);
 
       console.log(`Set volatility for ${coin.symbol}: ${baseVolatility}`);
     });
+  }
+
+  // Calculate new price with mean reversion and damping
+  calculateNewPrice(currentPrice, coinId) {
+    const volatilityProfile = this.coinVolatility.get(coinId);
+    if (!volatilityProfile) return currentPrice;
+
+    const { baseVolatility, trendDirection, trendStrength } = volatilityProfile;
+    const initialPrice = this.initialPrices.get(coinId);
+    
+    // Market cycle effect (reduced impact)
+    const marketEffect = this.currentCycle ? 
+      (this.currentCycle.type === 'STABLE' ? 0 : this.currentCycle.baseEffect * baseVolatility) : 0;
+
+    // Coin-specific event effect
+    const coinEvent = this.coinEvents.get(coinId);
+    const eventEffect = coinEvent ? (coinEvent.multiplier - 1) * 0.1 * baseVolatility : 0;
+
+    // Reduced random component (-0.2% to +0.2% * volatility)
+    const randomEffect = ((Math.random() * 0.004) - 0.002) * baseVolatility;
+
+    // Trend component with duration check
+    let trendEffect = 0;
+    const now = new Date();
+    if (now - volatilityProfile.trendStartTime >= volatilityProfile.trendDuration) {
+      // Update trend
+      volatilityProfile.trendDirection *= -1; // Reverse direction
+      volatilityProfile.trendStrength = Math.random() * 0.002;
+      volatilityProfile.trendDuration = this.getRandomDuration(30000, 60000);
+      volatilityProfile.trendStartTime = now;
+      this.coinVolatility.set(coinId, volatilityProfile);
+    }
+    trendEffect = trendDirection * trendStrength;
+
+    // Mean reversion effect (pulls price back towards initial price)
+    const priceDeviation = (currentPrice - initialPrice) / initialPrice;
+    const meanReversionStrength = 0.001; // 0.1% max reversion effect
+    const meanReversionEffect = -priceDeviation * meanReversionStrength;
+
+    // Combine all effects
+    const totalEffect = marketEffect + eventEffect + randomEffect + trendEffect + meanReversionEffect;
+    
+    // Apply a much stricter change limit (0.5% max per update)
+    const maxChange = 0.005;
+    const limitedEffect = Math.max(Math.min(totalEffect, maxChange), -maxChange);
+    
+    // Calculate new price
+    let newPrice = currentPrice * (1 + limitedEffect);
+
+    // Enforce price bounds (between 20% and 500% of initial price)
+    const minPrice = initialPrice * 0.2;
+    const maxPrice = initialPrice * 5;
+    newPrice = Math.min(Math.max(newPrice, minPrice), maxPrice);
+
+    // Store in price history (keep last 24 hours)
+    const priceHistory = this.priceHistory.get(coinId) || [];
+    priceHistory.push({ price: newPrice, timestamp: now });
+    if (priceHistory.length > 17280) { // 24h worth of 5s intervals
+      priceHistory.shift();
+    }
+    this.priceHistory.set(coinId, priceHistory);
+
+    // Round based on price range
+    if (newPrice < 1) {
+      return Math.round(newPrice * 10000) / 10000; // 4 decimal places
+    } else if (newPrice < 100) {
+      return Math.round(newPrice * 100) / 100; // 2 decimal places
+    } else {
+      return Math.round(newPrice * 10) / 10; // 1 decimal place
+    }
   }
 
   // Start the market simulation
@@ -230,71 +308,6 @@ class MarketSimulator {
     } catch (error) {
       console.error('Error updating prices:', error);
     }
-  }
-
-  // Calculate new price based on market conditions
-  calculateNewPrice(currentPrice, coinId) {
-    console.log(`Calculating new price for coin ${coinId}. Current price: ${currentPrice}`);
-    
-    const volatilityProfile = this.coinVolatility.get(coinId);
-    if (!volatilityProfile) {
-      console.log(`No volatility profile found for coin ${coinId}`);
-      return currentPrice;
-    }
-
-    console.log(`Volatility profile for coin ${coinId}:`, volatilityProfile);
-    console.log(`Current market cycle:`, this.currentCycle);
-
-    const { baseVolatility, trendDirection, trendStrength } = volatilityProfile;
-
-    // Market cycle effect
-    const marketEffect = this.currentCycle ? 
-      (this.currentCycle.type === 'STABLE' ? 0 : this.currentCycle.baseEffect * baseVolatility) : 0;
-    console.log(`Market effect: ${marketEffect}`);
-
-    // Coin-specific event effect
-    const coinEvent = this.coinEvents.get(coinId);
-    const eventEffect = coinEvent ? (coinEvent.multiplier - 1) * 0.1 * baseVolatility : 0;
-    console.log(`Event effect: ${eventEffect}`);
-
-    // Random component scaled by volatility (-2% to +2% * volatility)
-    const randomEffect = ((Math.random() * 0.04) - 0.02) * baseVolatility;
-    console.log(`Random effect: ${randomEffect}`);
-
-    // Trend component
-    const trendEffect = trendDirection * trendStrength * 0.01 * baseVolatility;
-    console.log(`Trend effect: ${trendEffect}`);
-
-    // Combine all effects
-    const totalEffect = marketEffect + eventEffect + randomEffect + trendEffect;
-    console.log(`Total effect: ${totalEffect}`);
-    
-    // Calculate new price with the combined effect
-    let newPrice = currentPrice * (1 + totalEffect);
-    console.log(`Initial new price calculation: ${newPrice}`);
-
-    // Price limits based on volatility
-    const maxChange = 0.1 * baseVolatility; // Max 10% change per update, scaled by volatility
-    const minPrice = currentPrice * (1 - maxChange);
-    const maxPrice = currentPrice * (1 + maxChange);
-    newPrice = Math.min(Math.max(newPrice, minPrice), maxPrice);
-    console.log(`After applying limits (${minPrice} - ${maxPrice}): ${newPrice}`);
-
-    // Ensure price doesn't go below 0.01
-    newPrice = Math.max(0.01, newPrice);
-
-    // Round to appropriate decimal places based on price range
-    let finalPrice;
-    if (newPrice < 1) {
-      finalPrice = Math.round(newPrice * 10000) / 10000; // 4 decimal places for small prices
-    } else if (newPrice < 100) {
-      finalPrice = Math.round(newPrice * 100) / 100; // 2 decimal places for medium prices
-    } else {
-      finalPrice = Math.round(newPrice); // whole numbers for large prices
-    }
-
-    console.log(`Final price after rounding: ${finalPrice}`);
-    return finalPrice;
   }
 
   // Generate a random duration within a range
