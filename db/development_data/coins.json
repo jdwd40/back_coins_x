@@ -3,7 +3,7 @@
     "coin_id": 1,
     "name": "FutureCoin",
     "symbol": "FTR",
-    "current_price": 0.10,
+    "current_price": 10.10,
     "market_cap": 30000,
     "circulating_supply": 2500,
     "price_change_24h": null
@@ -12,7 +12,7 @@
     "coin_id": 2,
     "name": "NovaCash",
     "symbol": "NVC",
-    "current_price": 1.37,
+    "current_price": 21.37,
     "market_cap": 18000,
     "circulating_supply": 4500,
     "price_change_24h": null
@@ -21,7 +21,7 @@
     "coin_id": 3,
     "name": "Byteon",
     "symbol": "BYT",
-    "current_price": 0.12,
+    "current_price": 10.12,
     "market_cap": 20000,
     "circulating_supply": 4000,
     "price_change_24h": null
@@ -30,7 +30,7 @@
     "coin_id": 4,
     "name": "DigitalVault",
     "symbol": "DGV",
-    "current_price": 0.10,
+    "current_price": 20.10,
     "market_cap": 7000,
     "circulating_supply": 7000,
     "price_change_24h": null
@@ -57,7 +57,7 @@
     "coin_id": 7,
     "name": "StellaFortune",
     "symbol": "STF",
-    "current_price": 3.91,
+    "current_price": 33.91,
     "market_cap": 14000,
     "circulating_supply": 5500,
     "price_change_24h": null
@@ -75,7 +75,7 @@
     "coin_id": 9,
     "name": "MeteorCoin",
     "symbol": "MTC",
-    "current_price": 0.10,
+    "current_price": 15.10,
     "market_cap": 6400,
     "circulating_supply": 8000,
     "price_change_24h": null
