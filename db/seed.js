@@ -52,6 +52,7 @@ const seed = async (shouldEnd = false) => {
         market_cap DECIMAL(18, 2) NOT NULL,
         circulating_supply INT NOT NULL,
         price_change_24h DECIMAL(5, 2),
+        founder VARCHAR(50) NOT NULL,
         date_added TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
 
@@ -102,18 +103,35 @@ const seed = async (shouldEnd = false) => {
       coin.current_price,
       coin.market_cap,
       coin.circulating_supply,
-      coin.price_change_24h || null
+      coin.price_change_24h || null,
+      coin.founder
     ]);
 
-    await db.query(
+    const insertedCoins = await db.query(
       format(
-        'INSERT INTO coins (name, symbol, current_price, market_cap, circulating_supply, price_change_24h) VALUES %L RETURNING *',
+        'INSERT INTO coins (name, symbol, current_price, market_cap, circulating_supply, price_change_24h, founder) VALUES %L RETURNING *',
         coinValues
       )
     );
 
+    // Update prices randomly between £20-£50
+    console.log('\nUpdating coin prices...');
+    console.log('Current Prices (in £):');
+    console.log('----------------------');
+
+    for (const coin of insertedCoins.rows) {
+      const newPrice = (Math.random() * (50 - 20) + 20).toFixed(2);
+      await db.query(
+        'UPDATE coins SET current_price = $1 WHERE coin_id = $2 RETURNING name, current_price',
+        [newPrice, coin.coin_id]
+      ).then(result => {
+        const updatedCoin = result.rows[0];
+        console.log(`${updatedCoin.name}: £${updatedCoin.current_price}`);
+      });
+    }
+
     // Insert users data
-    console.log('Inserting users...');
+    console.log('\nInserting users...');
     const usersData = require('./development_data/users.json').users;
     const userValues = usersData.map(user => [
       user.username,

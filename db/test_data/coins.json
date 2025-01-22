@@ -1,92 +1,132 @@
 [
   {
     "coin_id": 1,
-    "name": "FutureCoin",
-    "symbol": "FTR",
+    "name": "BitBerto",
+    "symbol": "BTB",
     "current_price": 0.10,
     "market_cap": 30000,
     "circulating_supply": 2500,
-    "price_change_24h": null
+    "price_change_24h": null,
+    "founder": "Roberto"
   },
   {
     "coin_id": 2,
-    "name": "NovaCash",
-    "symbol": "NVC",
+    "name": "GedCoin",
+    "symbol": "GED",
     "current_price": 1.37,
     "market_cap": 18000,
     "circulating_supply": 4500,
-    "price_change_24h": null
+    "price_change_24h": null,
+    "founder": "Gedster"
   },
   {
     "coin_id": 3,
-    "name": "Byteon",
-    "symbol": "BYT",
+    "name": "Mr B Block",
+    "symbol": "MBB",
     "current_price": 0.12,
     "market_cap": 20000,
     "circulating_supply": 4000,
-    "price_change_24h": null
+    "price_change_24h": null,
+    "founder": "Mr B"
   },
   {
     "coin_id": 4,
-    "name": "DigitalVault",
-    "symbol": "DGV",
+    "name": "BartoSatashi",
+    "symbol": "BTS",
     "current_price": 0.10,
     "market_cap": 7000,
     "circulating_supply": 7000,
-    "price_change_24h": null
+    "price_change_24h": null,
+    "founder": "Bart"
   },
   {
     "coin_id": 5,
-    "name": "Cybercore",
-    "symbol": "CYB",
+    "name": "PeteChain",
+    "symbol": "PTC",
     "current_price": 96.45,
     "market_cap": 12000,
     "circulating_supply": 6000,
-    "price_change_24h": null
+    "price_change_24h": null,
+    "founder": "Pete"
   },
   {
     "coin_id": 6,
-    "name": "BlockNation",
-    "symbol": "BLN",
+    "name": "DeanNode",
+    "symbol": "DNO",
     "current_price": 43.46,
     "market_cap": 30000,
     "circulating_supply": 2000,
-    "price_change_24h": null
+    "price_change_24h": null,
+    "founder": "Deano"
   },
   {
     "coin_id": 7,
-    "name": "StellaFortune",
-    "symbol": "STF",
+    "name": "DeanSpark",
+    "symbol": "DSP",
     "current_price": 3.91,
     "market_cap": 14000,
     "circulating_supply": 5500,
-    "price_change_24h": null
+    "price_change_24h": null,
+    "founder": "Sparky Dean"
   },
   {
     "coin_id": 8,
-    "name": "Chaingenius",
-    "symbol": "CHG",
+    "name": "SlateBit",
+    "symbol": "SLB",
     "current_price": 33.48,
     "market_cap": 15000,
     "circulating_supply": 5000,
-    "price_change_24h": null
+    "price_change_24h": null,
+    "founder": "Slates"
   },
   {
     "coin_id": 9,
-    "name": "MeteorCoin",
-    "symbol": "MTC",
+    "name": "JarLedger",
+    "symbol": "JRL",
     "current_price": 0.10,
     "market_cap": 6400,
     "circulating_supply": 8000,
-    "price_change_24h": null
+    "price_change_24h": null,
+    "founder": "Jar Father"
   },
   {
     "coin_id": 10,
-    "name": "CryptoZen",
-    "symbol": "CZN",
+    "name": "WolliWarden",
+    "symbol": "WLW",
     "current_price": 32.00,
     "market_cap": 25000,
     "circulating_supply": 3000,
-    "price_change_24h": null
+    "price_change_24h": null,
+    "founder": "Si Wollaston"
+  },
+  {
+    "coin_id": 11,
+    "name": "HashAd",
+    "symbol": "HAD",
+    "current_price": 35.50,
+    "market_cap": 22000,
+    "circulating_supply": 4200,
+    "price_change_24h": null,
+    "founder": "Adam Evans"
+  },
+  {
+    "coin_id": 12,
+    "name": "ChrisByte",
+    "symbol": "CBT",
+    "current_price": 28.75,
+    "market_cap": 19000,
+    "circulating_supply": 3800,
+    "price_change_24h": null,
+    "founder": "Chris Evans"
+  },
+  {
+    "coin_id": 13,
+    "name": "HodlWayne",
+    "symbol": "HDW",
+    "current_price": 42.20,
+    "market_cap": 24000,
+    "circulating_supply": 4800,
+    "price_change_24h": null,
+    "founder": "Wayne"
   }
 ]
