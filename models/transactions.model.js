@@ -1,42 +1,94 @@
 const db = require('../db/connection');
 
 exports.insertTransaction = async (user_id, coin_id, type, amount, price_at_transaction) => {
-  const total = amount * price_at_transaction;
-  
-  const result = await db.query(
-    `INSERT INTO transactions 
-     (user_id, coin_id, type, quantity, price, total_amount)
-     VALUES ($1, $2, $3, $4, $5, $6)
-     RETURNING *`,
-    [user_id, coin_id, type.toUpperCase(), amount, price_at_transaction, total]
-  );
-  
-  return result.rows[0];
+  // Validate inputs
+  if (!user_id || !coin_id || !type || !amount || !price_at_transaction) {
+    throw new Error('Missing required fields for transaction');
+  }
+
+  // Ensure type is either 'buy' or 'sell'
+  const normalizedType = type.toLowerCase();
+  if (!['buy', 'sell'].includes(normalizedType)) {
+    throw new Error('Invalid transaction type');
+  }
+
+  try {
+    const result = await db.query(
+      `INSERT INTO transactions 
+       (user_id, coin_id, type, amount, price_at_transaction)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING 
+         transaction_id,
+         user_id,
+         coin_id,
+         type,
+         amount,
+         price_at_transaction,
+         transaction_date`,
+      [user_id, coin_id, normalizedType, amount, price_at_transaction]
+    );
+    
+    return result.rows[0];
+  } catch (error) {
+    throw new Error(`Failed to record transaction: ${error.message}`);
+  }
 };
 
 exports.selectUserTransactions = async (user_id) => {
-  const result = await db.query(
-    `SELECT t.*, c.name as coin_name, c.symbol
-     FROM transactions t
-     JOIN coins c ON t.coin_id = c.coin_id
-     WHERE t.user_id = $1
-     ORDER BY t.created_at DESC`,
-    [user_id]
-  );
-  
-  return result.rows;
+  try {
+    const result = await db.query(
+      `SELECT 
+         t.transaction_id,
+         t.user_id,
+         t.coin_id,
+         c.name as coin_name,
+         c.symbol as coin_symbol,
+         t.type,
+         t.amount,
+         t.price_at_transaction,
+         (t.amount * t.price_at_transaction) as total_value,
+         t.transaction_date
+       FROM transactions t
+       JOIN coins c ON t.coin_id = c.coin_id
+       WHERE t.user_id = $1
+       ORDER BY t.transaction_date DESC`,
+      [user_id]
+    );
+    
+    return result.rows;
+  } catch (error) {
+    throw new Error(`Failed to fetch user transactions: ${error.message}`);
+  }
 };
 
 exports.selectTransactionById = async (transaction_id) => {
-  const result = await db.query(
-    `SELECT t.*, c.name as coin_name, c.symbol
-     FROM transactions t
-     JOIN coins c ON t.coin_id = c.coin_id
-     WHERE t.transaction_id = $1`,
-    [transaction_id]
-  );
-  
-  return result.rows[0];
+  try {
+    const result = await db.query(
+      `SELECT 
+         t.transaction_id,
+         t.user_id,
+         t.coin_id,
+         c.name as coin_name,
+         c.symbol as coin_symbol,
+         t.type,
+         t.amount,
+         t.price_at_transaction,
+         (t.amount * t.price_at_transaction) as total_value,
+         t.transaction_date
+       FROM transactions t
+       JOIN coins c ON t.coin_id = c.coin_id
+       WHERE t.transaction_id = $1`,
+      [transaction_id]
+    );
+    
+    if (result.rows.length === 0) {
+      throw new Error('Transaction not found');
+    }
+    
+    return result.rows[0];
+  } catch (error) {
+    throw new Error(`Failed to fetch transaction: ${error.message}`);
+  }
 };
 
 exports.selectUserPortfolio = async (user_id) => {
@@ -48,14 +100,14 @@ exports.selectUserPortfolio = async (user_id) => {
        c.current_price,
        SUM(
          CASE 
-           WHEN t.type = 'BUY' THEN t.quantity
-           WHEN t.type = 'SELL' THEN -t.quantity
+           WHEN t.type = 'BUY' THEN t.amount
+           WHEN t.type = 'SELL' THEN -t.amount
          END
        ) as total_amount,
        SUM(
          CASE 
-           WHEN t.type = 'BUY' THEN t.quantity * t.price
-           WHEN t.type = 'SELL' THEN -t.quantity * t.price
+           WHEN t.type = 'BUY' THEN t.amount * t.price_at_transaction
+           WHEN t.type = 'SELL' THEN -t.amount * t.price_at_transaction
          END
        ) as total_invested
      FROM transactions t
@@ -64,8 +116,8 @@ exports.selectUserPortfolio = async (user_id) => {
      GROUP BY c.coin_id, c.name, c.symbol, c.current_price
      HAVING SUM(
        CASE 
-         WHEN t.type = 'BUY' THEN t.quantity
-         WHEN t.type = 'SELL' THEN -t.quantity
+         WHEN t.type = 'BUY' THEN t.amount
+         WHEN t.type = 'SELL' THEN -t.amount
        END
      ) > 0`,
     [user_id]

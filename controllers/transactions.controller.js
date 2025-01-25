@@ -41,7 +41,7 @@ exports.createTransaction = async (req, res, next) => {
     const { current_price, available_supply } = coinResult.rows[0];
     const total_amount = amount * current_price;
 
-    // Get user's current balance and portfolio
+    // Get user's current balance
     const userResult = await db.query(
       'SELECT balance FROM users WHERE user_id = $1',
       [user_id]
@@ -81,7 +81,7 @@ exports.createTransaction = async (req, res, next) => {
     await db.query('BEGIN');
 
     try {
-      // Insert the transaction
+      // Record the transaction
       const transaction = await insertTransaction(
         user_id,
         coin_id,
@@ -116,7 +116,14 @@ exports.createTransaction = async (req, res, next) => {
       );
 
       await db.query('COMMIT');
-      res.status(201).json({ transaction });
+
+      // Fetch the complete transaction details with coin information
+      const completedTransaction = await selectTransactionById(transaction.transaction_id);
+      
+      res.status(201).json({
+        msg: `Successfully ${type.toLowerCase()}ed coins`,
+        transaction: completedTransaction
+      });
     } catch (err) {
       await db.query('ROLLBACK');
       throw err;
@@ -129,17 +136,13 @@ exports.createTransaction = async (req, res, next) => {
 exports.getUserTransactions = async (req, res, next) => {
   try {
     const { user_id } = req.params;
-    
-    if (isNaN(user_id)) {
-      return res.status(400).json({ msg: 'Invalid user ID' });
-    }
 
     // Check if the authenticated user matches the requested user_id
     if (req.user.user_id !== parseInt(user_id)) {
       return res.status(401).json({ msg: 'Unauthorized' });
     }
 
-    const transactions = await selectUserTransactions(user_id);
+    const transactions = await selectUserTransactions(parseInt(user_id));
     res.status(200).json({ transactions });
   } catch (err) {
     next(err);
@@ -149,20 +152,15 @@ exports.getUserTransactions = async (req, res, next) => {
 exports.getTransactionById = async (req, res, next) => {
   try {
     const { transaction_id } = req.params;
-    
-    if (isNaN(transaction_id)) {
-      return res.status(400).json({ msg: 'Invalid transaction ID' });
-    }
+    const transaction = await selectTransactionById(parseInt(transaction_id));
 
-    const transaction = await selectTransactionById(transaction_id);
-    
-    if (!transaction) {
-      return res.status(404).json({ msg: 'Transaction not found' });
-    }
-
-    // Check if the authenticated user owns this transaction
+    // Check if the authenticated user matches the transaction's user_id
     if (req.user.user_id !== transaction.user_id) {
       return res.status(401).json({ msg: 'Unauthorized' });
+    }
+
+    if (!transaction) {
+      return res.status(404).json({ msg: 'Transaction not found' });
     }
 
     res.status(200).json({ transaction });
