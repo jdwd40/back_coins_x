@@ -65,23 +65,67 @@ exports.getCoinPriceHistory = async (coinId) => {
   try {
     console.log('Starting getCoinPriceHistory with:', { coinId });
     const result = await db.query(
-      `SELECT history_id, coin_id, price, created_at 
-       FROM price_history 
-       WHERE coin_id = $1 
-         AND created_at >= NOW() - INTERVAL '2 hours'
-       ORDER BY created_at ASC`,
+      `SELECT 
+        history_id,
+        coin_id,
+        price,
+        created_at,
+        TO_CHAR(created_at, 'YYYY-MM-DD HH24:MI:SS') as formatted_timestamp
+      FROM price_history 
+      WHERE coin_id = $1 
+      ORDER BY created_at DESC`,
       [coinId]
     );
-    
-    if (result.rows.length === 0) {
-      console.log('No price history found for coin:', coinId);
-      return [];
-    }
-
-    console.log('Successfully retrieved price history:', result.rows.length, 'entries');
+    console.log('Successfully retrieved price history:', result.rows);
     return result.rows;
   } catch (error) {
     console.error('Error in getCoinPriceHistory:', error);
+    throw error;
+  }
+};
+
+exports.getMarketHistory = async () => {
+  try {
+    console.log('Starting getMarketHistory');
+    const result = await db.query(
+      `WITH market_snapshots AS (
+        SELECT 
+          ph.timestamp,
+          SUM(ph.price * c.supply) as total_market_value
+        FROM price_history ph
+        JOIN coins c ON ph.coin_id = c.coin_id
+        GROUP BY ph.timestamp
+        ORDER BY ph.timestamp DESC
+      ),
+      market_stats AS (
+        SELECT 
+          MAX(total_market_value) as all_time_high,
+          MIN(total_market_value) as all_time_low
+        FROM market_snapshots
+      )
+      SELECT 
+        ms.*,
+        json_agg(
+          json_build_object(
+            'timestamp', TO_CHAR(mh.timestamp, 'YYYY-MM-DD HH24:MI:SS'),
+            'total_market_value', mh.total_market_value
+          ) ORDER BY mh.timestamp DESC
+        ) as history
+      FROM market_stats ms
+      CROSS JOIN market_snapshots mh
+      GROUP BY ms.all_time_high, ms.all_time_low`
+    );
+    
+    const marketHistory = result.rows[0] || {
+      all_time_high: 0,
+      all_time_low: 0,
+      history: []
+    };
+    
+    console.log('Successfully retrieved market history');
+    return marketHistory;
+  } catch (error) {
+    console.error('Error in getMarketHistory:', error);
     throw error;
   }
 };

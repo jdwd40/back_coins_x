@@ -35,3 +35,13 @@ exports.getMarketStats = async (req, res, next) => {
     next(err);
   }
 };
+
+exports.getMarketHistory = async (req, res, next) => {
+  try {
+    const { getMarketHistory } = require('../models/coins.model');
+    const marketHistory = await getMarketHistory();
+    res.status(200).json(marketHistory);
+  } catch (err) {
+    next(err);
+  }
+};
