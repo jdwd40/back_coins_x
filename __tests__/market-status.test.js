@@ -25,7 +25,7 @@ describe('Market Status API', () => {
       expect(response.body).toEqual({
         status: 'STOPPED',
         currentCycle: null,
-        timeRemaining: 0,
+        timeRemaining: '00:00:00',
         events: []
       });
     });
@@ -48,27 +48,25 @@ describe('Market Status API', () => {
         status: 'RUNNING',
         currentCycle: expect.objectContaining({
           type: expect.any(String),
-          timeRemaining: expect.any(Number)
+          timeRemaining: expect.stringMatching(/^\d{2}:\d{2}:\d{2}$/)
         }),
         events: expect.arrayContaining([
           expect.objectContaining({
             coinId: expect.any(Number),
             type: expect.any(String),
-            timeRemaining: expect.any(Number),
+            timeRemaining: expect.stringMatching(/^\d{2}:\d{2}:\d{2}$/),
             effect: expect.stringMatching(/^(POSITIVE|NEGATIVE)$/)
           })
         ])
       });
 
-      // Verify time remaining is reasonable
-      expect(response.body.currentCycle.timeRemaining).toBeGreaterThan(0);
-      expect(response.body.currentCycle.timeRemaining).toBeLessThanOrEqual(120000); // Max 2 minutes
-
+      // Verify time remaining is in correct format and reasonable
+      expect(response.body.currentCycle.timeRemaining).toMatch(/^\d{2}:\d{2}:\d{2}$/);
+      
       // Verify events
       expect(response.body.events.length).toBeGreaterThan(0);
       response.body.events.forEach(event => {
-        expect(event.timeRemaining).toBeGreaterThan(0);
-        expect(event.timeRemaining).toBeLessThanOrEqual(60000); // Max 1 minute
+        expect(event.timeRemaining).toMatch(/^\d{2}:\d{2}:\d{2}$/);
       });
     });
 
@@ -93,15 +91,24 @@ describe('Market Status API', () => {
         .get('/api/market/status')
         .expect(200);
 
+      // Helper function to convert HH:MM:SS to seconds
+      const timeToSeconds = (timeStr) => {
+        const [hours, minutes, seconds] = timeStr.split(':').map(Number);
+        return hours * 3600 + minutes * 60 + seconds;
+      };
+
       // Verify time remaining has decreased
-      expect(response2.body.currentCycle.timeRemaining)
-        .toBeLessThan(response1.body.currentCycle.timeRemaining);
+      const time1 = timeToSeconds(response1.body.currentCycle.timeRemaining);
+      const time2 = timeToSeconds(response2.body.currentCycle.timeRemaining);
+      expect(time2).toBeLessThan(time1);
 
       // Check events time remaining
       const event1 = response1.body.events[0];
       const event2 = response2.body.events.find(e => e.coinId === event1.coinId);
       if (event2) { // Same event might still be active
-        expect(event2.timeRemaining).toBeLessThan(event1.timeRemaining);
+        const eventTime1 = timeToSeconds(event1.timeRemaining);
+        const eventTime2 = timeToSeconds(event2.timeRemaining);
+        expect(eventTime2).toBeLessThan(eventTime1);
       }
     });
   });

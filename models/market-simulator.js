@@ -310,6 +310,15 @@ class MarketSimulator {
     }
   }
 
+  // Format milliseconds to HH:MM:SS
+  formatTimeRemaining(ms) {
+    if (ms <= 0) return '00:00:00';
+    const seconds = Math.floor((ms / 1000) % 60);
+    const minutes = Math.floor((ms / (1000 * 60)) % 60);
+    const hours = Math.floor(ms / (1000 * 60 * 60));
+    return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+  }
+
   // Generate a random duration within a range
   getRandomDuration(min, max) {
     return Math.floor(Math.random() * (max - min + 1) + min);
@@ -336,7 +345,7 @@ class MarketSimulator {
       return {
         coinId,
         type: event.type,
-        timeRemaining: eventTimeRemaining,
+        timeRemaining: this.formatTimeRemaining(eventTimeRemaining),
         effect: event.multiplier > 1 ? 'POSITIVE' : 'NEGATIVE'
       };
     });
@@ -345,7 +354,7 @@ class MarketSimulator {
       status: 'RUNNING',
       currentCycle: {
         type: this.currentCycle?.type || 'NONE',
-        timeRemaining: cycleTimeRemaining
+        timeRemaining: this.formatTimeRemaining(cycleTimeRemaining)
       },
       events: activeEvents
     };
