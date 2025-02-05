@@ -59,3 +59,13 @@ back_coinsx/
 - `PriceHistory`: Historical price data for coins
 
 See the migration files for detailed schema information.
+
+---
+
+create .env.development
+PGDATABASE=coins_x
+
+
+npm install
+npm run setup-dbs
+npm run seed    
