@@ -15,17 +15,18 @@ exports.insertTransaction = async (user_id, coin_id, type, amount, price_at_tran
   try {
     const result = await db.query(
       `INSERT INTO transactions 
-       (user_id, coin_id, type, amount, price_at_transaction)
-       VALUES ($1, $2, $3, $4, $5)
+       (user_id, coin_id, type, quantity, price, total_amount)
+       VALUES ($1, $2, $3, $4, $5, $6)
        RETURNING 
          transaction_id,
          user_id,
          coin_id,
          type,
-         amount,
-         price_at_transaction,
+         quantity,
+         price,
+         total_amount,
          transaction_date`,
-      [user_id, coin_id, normalizedType, amount, price_at_transaction]
+      [user_id, coin_id, normalizedType, amount, price_at_transaction, amount * price_at_transaction]
     );
     
     return result.rows[0];
@@ -44,9 +45,9 @@ exports.selectUserTransactions = async (user_id) => {
          c.name as coin_name,
          c.symbol as coin_symbol,
          t.type,
-         t.amount,
-         t.price_at_transaction,
-         (t.amount * t.price_at_transaction) as total_value,
+         t.quantity,
+         t.price,
+         t.total_amount,
          t.transaction_date
        FROM transactions t
        JOIN coins c ON t.coin_id = c.coin_id
@@ -71,9 +72,9 @@ exports.selectTransactionById = async (transaction_id) => {
          c.name as coin_name,
          c.symbol as coin_symbol,
          t.type,
-         t.amount,
-         t.price_at_transaction,
-         (t.amount * t.price_at_transaction) as total_value,
+         t.quantity,
+         t.price,
+         t.total_amount,
          t.transaction_date
        FROM transactions t
        JOIN coins c ON t.coin_id = c.coin_id
@@ -100,14 +101,14 @@ exports.selectUserPortfolio = async (user_id) => {
        c.current_price,
        SUM(
          CASE 
-           WHEN t.type = 'BUY' THEN t.amount
-           WHEN t.type = 'SELL' THEN -t.amount
+           WHEN t.type = 'BUY' THEN t.quantity
+           WHEN t.type = 'SELL' THEN -t.quantity
          END
        ) as total_amount,
        SUM(
          CASE 
-           WHEN t.type = 'BUY' THEN t.amount * t.price_at_transaction
-           WHEN t.type = 'SELL' THEN -t.amount * t.price_at_transaction
+           WHEN t.type = 'BUY' THEN t.total_amount
+           WHEN t.type = 'SELL' THEN -t.total_amount
          END
        ) as total_invested
      FROM transactions t
@@ -116,8 +117,8 @@ exports.selectUserPortfolio = async (user_id) => {
      GROUP BY c.coin_id, c.name, c.symbol, c.current_price
      HAVING SUM(
        CASE 
-         WHEN t.type = 'BUY' THEN t.amount
-         WHEN t.type = 'SELL' THEN -t.amount
+         WHEN t.type = 'BUY' THEN t.quantity
+         WHEN t.type = 'SELL' THEN -t.quantity
        END
      ) > 0`,
     [user_id]
@@ -126,66 +127,34 @@ exports.selectUserPortfolio = async (user_id) => {
   return result.rows;
 };
 
-exports.updatePortfolio = async (user_id, coin_id, type, amount, price) => {
-  // Check if portfolio entry exists
-  const portfolioResult = await db.query(
-    `SELECT quantity, average_price 
-     FROM user_portfolio 
-     WHERE user_id = $1 AND coin_id = $2`,
-    [user_id, coin_id]
-  );
-
-  const isBuy = type.toUpperCase() === 'BUY';
-  
-  if (portfolioResult.rows.length === 0) {
-    if (!isBuy) {
-      throw new Error('Cannot sell coins that are not in portfolio');
-    }
-    
-    // Create new portfolio entry for buy
-    await db.query(
-      `INSERT INTO user_portfolio 
-       (user_id, coin_id, quantity, average_price)
-       VALUES ($1, $2, $3, $4)`,
-      [user_id, coin_id, amount, price]
+exports.updatePortfolio = async (user_id, coin_id, type, amount, price_at_transaction) => {
+  try {
+    // Check if portfolio entry exists
+    const portfolioResult = await db.query(
+      'SELECT quantity FROM portfolios WHERE user_id = $1 AND coin_id = $2',
+      [user_id, coin_id]
     );
-  } else {
-    const { quantity, average_price } = portfolioResult.rows[0];
-    
-    if (isBuy) {
-      // Calculate new average price for buys
-      const newQuantity = quantity + amount;
-      const newAveragePrice = ((quantity * average_price) + (amount * price)) / newQuantity;
-      
+
+    const quantityChange = type === 'BUY' ? amount : -amount;
+
+    if (portfolioResult.rows.length === 0) {
+      // Create new portfolio entry if it doesn't exist
       await db.query(
-        `UPDATE user_portfolio 
-         SET quantity = $1, average_price = $2
-         WHERE user_id = $3 AND coin_id = $4`,
-        [newQuantity, newAveragePrice, user_id, coin_id]
+        `INSERT INTO portfolios (user_id, coin_id, quantity)
+         VALUES ($1, $2, $3)`,
+        [user_id, coin_id, quantityChange]
       );
     } else {
-      // Handle sells
-      const newQuantity = quantity - amount;
-      
-      if (newQuantity < 0) {
-        throw new Error('Insufficient coins in portfolio');
-      } else if (newQuantity === 0) {
-        // Remove portfolio entry if quantity becomes 0
-        await db.query(
-          `DELETE FROM user_portfolio 
-           WHERE user_id = $1 AND coin_id = $2`,
-          [user_id, coin_id]
-        );
-      } else {
-        // Keep same average price for sells
-        await db.query(
-          `UPDATE user_portfolio 
-           SET quantity = $1
-           WHERE user_id = $2 AND coin_id = $3`,
-          [newQuantity, user_id, coin_id]
-        );
-      }
+      // Update existing portfolio entry
+      await db.query(
+        `UPDATE portfolios 
+         SET quantity = quantity + $1
+         WHERE user_id = $2 AND coin_id = $3`,
+        [quantityChange, user_id, coin_id]
+      );
     }
+  } catch (error) {
+    throw error;
   }
 };
 
@@ -216,10 +185,10 @@ exports.processBuyTransaction = async (user_id, coin_id, amount, price_at_transa
     // Record transaction
     const transactionResult = await db.query(
       `INSERT INTO transactions 
-       (user_id, coin_id, type, amount, price_at_transaction)
-       VALUES ($1, $2, 'BUY', $3, $4)
+       (user_id, coin_id, type, quantity, price, total_amount)
+       VALUES ($1, $2, 'BUY', $3, $4, $5)
        RETURNING *`,
-      [user_id, coin_id, amount, price_at_transaction]
+      [user_id, coin_id, amount, price_at_transaction, totalCost]
     );
     
     // Update portfolio
@@ -243,7 +212,7 @@ exports.processSellTransaction = async (user_id, coin_id, amount, price_at_trans
     
     // Check portfolio balance
     const portfolioResult = await db.query(
-      `SELECT quantity FROM user_portfolio 
+      `SELECT quantity FROM portfolios 
        WHERE user_id = $1 AND coin_id = $2 FOR UPDATE`,
       [user_id, coin_id]
     );
@@ -261,10 +230,10 @@ exports.processSellTransaction = async (user_id, coin_id, amount, price_at_trans
     // Record transaction
     const transactionResult = await db.query(
       `INSERT INTO transactions 
-       (user_id, coin_id, type, amount, price_at_transaction)
-       VALUES ($1, $2, 'SELL', $3, $4)
+       (user_id, coin_id, type, quantity, price, total_amount)
+       VALUES ($1, $2, 'SELL', $3, $4, $5)
        RETURNING *`,
-      [user_id, coin_id, amount, price_at_transaction]
+      [user_id, coin_id, amount, price_at_transaction, totalValue]
     );
     
     // Update portfolio
