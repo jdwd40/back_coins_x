@@ -190,32 +190,31 @@ exports.updatePortfolio = async (user_id, coin_id, type, amount, price) => {
 };
 
 exports.processBuyTransaction = async (user_id, coin_id, amount, price_at_transaction) => {
-  const client = await db.connect();
-  
   try {
-    await client.query('BEGIN');
+    // Start a database transaction
+    await db.query('BEGIN');
     
     // Calculate total cost
     const totalCost = amount * price_at_transaction;
     
     // Check user balance
-    const balanceResult = await client.query(
+    const balanceResult = await db.query(
       'SELECT balance FROM users WHERE user_id = $1 FOR UPDATE',
       [user_id]
     );
     
-    if (balanceResult.rows[0].balance < totalCost) {
+    if (!balanceResult.rows[0] || balanceResult.rows[0].balance < totalCost) {
       throw new Error('Insufficient balance');
     }
     
     // Update user balance
-    await client.query(
+    await db.query(
       'UPDATE users SET balance = balance - $1 WHERE user_id = $2',
       [totalCost, user_id]
     );
     
     // Record transaction
-    const transactionResult = await client.query(
+    const transactionResult = await db.query(
       `INSERT INTO transactions 
        (user_id, coin_id, type, amount, price_at_transaction)
        VALUES ($1, $2, 'BUY', $3, $4)
@@ -226,27 +225,24 @@ exports.processBuyTransaction = async (user_id, coin_id, amount, price_at_transa
     // Update portfolio
     await exports.updatePortfolio(user_id, coin_id, 'BUY', amount, price_at_transaction);
     
-    await client.query('COMMIT');
+    await db.query('COMMIT');
     return transactionResult.rows[0];
   } catch (error) {
-    await client.query('ROLLBACK');
+    await db.query('ROLLBACK');
     throw error;
-  } finally {
-    client.release();
   }
 };
 
 exports.processSellTransaction = async (user_id, coin_id, amount, price_at_transaction) => {
-  const client = await db.connect();
-  
   try {
-    await client.query('BEGIN');
+    // Start a database transaction
+    await db.query('BEGIN');
     
     // Calculate total value
     const totalValue = amount * price_at_transaction;
     
     // Check portfolio balance
-    const portfolioResult = await client.query(
+    const portfolioResult = await db.query(
       `SELECT quantity FROM user_portfolio 
        WHERE user_id = $1 AND coin_id = $2 FOR UPDATE`,
       [user_id, coin_id]
@@ -257,13 +253,13 @@ exports.processSellTransaction = async (user_id, coin_id, amount, price_at_trans
     }
     
     // Update user balance
-    await client.query(
+    await db.query(
       'UPDATE users SET balance = balance + $1 WHERE user_id = $2',
       [totalValue, user_id]
     );
     
     // Record transaction
-    const transactionResult = await client.query(
+    const transactionResult = await db.query(
       `INSERT INTO transactions 
        (user_id, coin_id, type, amount, price_at_transaction)
        VALUES ($1, $2, 'SELL', $3, $4)
@@ -274,12 +270,10 @@ exports.processSellTransaction = async (user_id, coin_id, amount, price_at_trans
     // Update portfolio
     await exports.updatePortfolio(user_id, coin_id, 'SELL', amount, price_at_transaction);
     
-    await client.query('COMMIT');
+    await db.query('COMMIT');
     return transactionResult.rows[0];
   } catch (error) {
-    await client.query('ROLLBACK');
+    await db.query('ROLLBACK');
     throw error;
-  } finally {
-    client.release();
   }
 };
