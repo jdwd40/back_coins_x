@@ -197,19 +197,19 @@ exports.processBuyTransaction = async (user_id, coin_id, amount, price_at_transa
     // Calculate total cost
     const totalCost = amount * price_at_transaction;
     
-    // Check user balance
-    const balanceResult = await db.query(
-      'SELECT balance FROM users WHERE user_id = $1 FOR UPDATE',
+    // Check user funds
+    const fundsResult = await db.query(
+      'SELECT funds FROM users WHERE user_id = $1 FOR UPDATE',
       [user_id]
     );
     
-    if (!balanceResult.rows[0] || balanceResult.rows[0].balance < totalCost) {
-      throw new Error('Insufficient balance');
+    if (!fundsResult.rows[0] || fundsResult.rows[0].funds < totalCost) {
+      throw new Error('Insufficient funds');
     }
     
-    // Update user balance
+    // Update user funds
     await db.query(
-      'UPDATE users SET balance = balance - $1 WHERE user_id = $2',
+      'UPDATE users SET funds = funds - $1 WHERE user_id = $2',
       [totalCost, user_id]
     );
     
@@ -252,9 +252,9 @@ exports.processSellTransaction = async (user_id, coin_id, amount, price_at_trans
       throw new Error('Insufficient coins in portfolio');
     }
     
-    // Update user balance
+    // Update user funds
     await db.query(
-      'UPDATE users SET balance = balance + $1 WHERE user_id = $2',
+      'UPDATE users SET funds = funds + $1 WHERE user_id = $2',
       [totalValue, user_id]
     );
     
