@@ -188,3 +188,98 @@ exports.updatePortfolio = async (user_id, coin_id, type, amount, price) => {
     }
   }
 };
+
+exports.processBuyTransaction = async (user_id, coin_id, amount, price_at_transaction) => {
+  const client = await db.connect();
+  
+  try {
+    await client.query('BEGIN');
+    
+    // Calculate total cost
+    const totalCost = amount * price_at_transaction;
+    
+    // Check user balance
+    const balanceResult = await client.query(
+      'SELECT balance FROM users WHERE user_id = $1 FOR UPDATE',
+      [user_id]
+    );
+    
+    if (balanceResult.rows[0].balance < totalCost) {
+      throw new Error('Insufficient balance');
+    }
+    
+    // Update user balance
+    await client.query(
+      'UPDATE users SET balance = balance - $1 WHERE user_id = $2',
+      [totalCost, user_id]
+    );
+    
+    // Record transaction
+    const transactionResult = await client.query(
+      `INSERT INTO transactions 
+       (user_id, coin_id, type, amount, price_at_transaction)
+       VALUES ($1, $2, 'BUY', $3, $4)
+       RETURNING *`,
+      [user_id, coin_id, amount, price_at_transaction]
+    );
+    
+    // Update portfolio
+    await exports.updatePortfolio(user_id, coin_id, 'BUY', amount, price_at_transaction);
+    
+    await client.query('COMMIT');
+    return transactionResult.rows[0];
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+};
+
+exports.processSellTransaction = async (user_id, coin_id, amount, price_at_transaction) => {
+  const client = await db.connect();
+  
+  try {
+    await client.query('BEGIN');
+    
+    // Calculate total value
+    const totalValue = amount * price_at_transaction;
+    
+    // Check portfolio balance
+    const portfolioResult = await client.query(
+      `SELECT quantity FROM user_portfolio 
+       WHERE user_id = $1 AND coin_id = $2 FOR UPDATE`,
+      [user_id, coin_id]
+    );
+    
+    if (!portfolioResult.rows[0] || portfolioResult.rows[0].quantity < amount) {
+      throw new Error('Insufficient coins in portfolio');
+    }
+    
+    // Update user balance
+    await client.query(
+      'UPDATE users SET balance = balance + $1 WHERE user_id = $2',
+      [totalValue, user_id]
+    );
+    
+    // Record transaction
+    const transactionResult = await client.query(
+      `INSERT INTO transactions 
+       (user_id, coin_id, type, amount, price_at_transaction)
+       VALUES ($1, $2, 'SELL', $3, $4)
+       RETURNING *`,
+      [user_id, coin_id, amount, price_at_transaction]
+    );
+    
+    // Update portfolio
+    await exports.updatePortfolio(user_id, coin_id, 'SELL', amount, price_at_transaction);
+    
+    await client.query('COMMIT');
+    return transactionResult.rows[0];
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+};
