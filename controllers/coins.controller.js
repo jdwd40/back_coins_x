@@ -55,18 +55,15 @@ exports.updatePrice = async (req, res, next) => {
 exports.getPriceHistory = async (req, res, next) => {
   try {
     const { coin_id } = req.params;
-    console.log('Getting price history for coin:', coin_id);
-
-    if (!Number.isInteger(parseInt(coin_id))) {
-      console.log('Invalid coin ID:', coin_id);
-      return res.status(400).json({ msg: 'Invalid coin ID' });
-    }
-
-    const priceHistory = await getCoinPriceHistory(coin_id);
-    console.log(`Retrieved ${priceHistory.length} price history entries for coin ${coin_id}`);
-    res.status(200).json({ price_history: priceHistory });
-  } catch (error) {
-    console.error('Error in getPriceHistory:', error);
-    next(error);
+    const { page, limit } = req.query;
+    
+    // Convert to numbers if provided, otherwise pass null
+    const pageNum = page ? parseInt(page) : null;
+    const limitNum = limit ? parseInt(limit) : null;
+    
+    const priceHistory = await getCoinPriceHistory(coin_id, pageNum, limitNum);
+    res.status(200).json(priceHistory);
+  } catch (err) {
+    next(err);
   }
 };
