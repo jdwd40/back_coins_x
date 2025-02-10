@@ -90,12 +90,12 @@ exports.getMarketHistory = async () => {
     const result = await db.query(
       `WITH market_snapshots AS (
         SELECT 
-          ph.recorded_at,
+          ph.created_at,
           SUM(ph.price * c.supply) as total_market_value
         FROM price_history ph
         JOIN coins c ON ph.coin_id = c.coin_id
-        GROUP BY ph.recorded_at
-        ORDER BY ph.recorded_at DESC
+        GROUP BY ph.created_at
+        ORDER BY ph.created_at DESC
       ),
       market_stats AS (
         SELECT 
@@ -107,7 +107,7 @@ exports.getMarketHistory = async () => {
         ms.*,
         json_agg(
           json_build_object(
-            'timestamp', TO_CHAR(mh.recorded_at, 'YYYY-MM-DD HH24:MI:SS'),
+            'timestamp', TO_CHAR(mh.created_at, 'YYYY-MM-DD HH24:MI:SS'),
             'total_market_value', mh.total_market_value
           )
         ) as history
