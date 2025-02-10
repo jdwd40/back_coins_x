@@ -91,7 +91,7 @@ exports.getMarketHistory = async () => {
       `WITH market_snapshots AS (
         SELECT 
           ph.created_at,
-          SUM(ph.price * c.supply) as total_market_value
+          SUM(ph.price * c.circulating_supply) as total_market_value
         FROM price_history ph
         JOIN coins c ON ph.coin_id = c.coin_id
         GROUP BY ph.created_at
