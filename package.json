@@ -8,8 +8,8 @@
     "setup-dev": "node setup-dev.js",
     "test": "NODE_ENV=test jest --runInBand",
     "test-watch": "NODE_ENV=test jest --watch --runInBand",
-    "start": "node server.js",
-    "dev": "nodemon server.js",
+    "start": "NODE_OPTIONS='--max-old-space-size=512' node server.js",
+    "dev": "NODE_OPTIONS='--max-old-space-size=512' nodemon server.js",
     "seed": "node db/seed.js",
     "clear-price-history": "node clear-price-history.js"
   },

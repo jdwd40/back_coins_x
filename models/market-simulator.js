@@ -33,7 +33,6 @@ class MarketSimulator {
     this.isRunning = false;
     this.lastPrices = new Map();
     this.initialPrices = new Map();
-    this.priceHistory = new Map();
   }
 
   // Initialize coin volatility profiles with more conservative values
@@ -56,9 +55,6 @@ class MarketSimulator {
         trendDuration: this.getRandomDuration(30000, 60000), // 30s to 1m trend duration
         trendStartTime: new Date()
       });
-
-      // Initialize price history for this coin
-      this.priceHistory.set(coin.coin_id, []);
 
       console.log(`[MARKET] Set volatility for ${coin.symbol}: ${baseVolatility}`);
     });
@@ -115,14 +111,6 @@ class MarketSimulator {
     const minPrice = initialPrice * 0.2;
     const maxPrice = initialPrice * 5;
     newPrice = Math.min(Math.max(newPrice, minPrice), maxPrice);
-
-    // Store in price history (keep last 24 hours)
-    const priceHistory = this.priceHistory.get(coinId) || [];
-    priceHistory.push({ price: newPrice, timestamp: now });
-    if (priceHistory.length > 17280) { // 24h worth of 5s intervals
-      priceHistory.shift();
-    }
-    this.priceHistory.set(coinId, priceHistory);
 
     // Round based on price range
     if (newPrice < 1) {
@@ -275,64 +263,32 @@ class MarketSimulator {
 
   // Update prices for all coins based on current market conditions
   async updateAllPrices() {
-    if (!this.currentCycle || !this.isRunning) {
-      console.log('[MARKET] Update skipped - market not running or no cycle');
-      return;
-    }
+    if (!this.isRunning) return;
 
     try {
-      const result = await db.query('SELECT coin_id, current_price::numeric FROM coins');
+      const result = await db.query('SELECT coin_id, current_price FROM coins');
       const coins = result.rows;
-      let updatedCoins = 0;
 
-      await db.query('BEGIN');
-      try {
-        for (const coin of coins) {
-          // Ensure current_price is a number
-          const currentPrice = typeof coin.current_price === 'string' 
-            ? parseFloat(coin.current_price) 
-            : coin.current_price;
+      for (const coin of coins) {
+        const currentPrice = parseFloat(coin.current_price);
+        const newPrice = this.calculateNewPrice(currentPrice, coin.coin_id);
+        
+        // Update current price in coins table and add to price history
+        await db.query(
+          'UPDATE coins SET current_price = $1 WHERE coin_id = $2',
+          [newPrice, coin.coin_id]
+        );
+        
+        await db.query(
+          'INSERT INTO price_history (coin_id, price) VALUES ($1, $2)',
+          [coin.coin_id, newPrice]
+        );
 
-          if (isNaN(currentPrice)) {
-            console.error(`[MARKET] Invalid price for coin ${coin.coin_id}: ${coin.current_price}`);
-            continue;
-          }
-
-          const newPrice = this.calculateNewPrice(currentPrice, coin.coin_id);
-
-          if (isNaN(newPrice)) {
-            console.error(`[MARKET] Invalid calculated price for coin ${coin.coin_id}: ${newPrice}`);
-            continue;
-          }
-
-          await db.query(
-            `UPDATE coins 
-             SET current_price = $1::decimal,
-                 price_change_24h = ROUND(((($1::decimal - current_price::decimal) / current_price::decimal) * 100), 2)
-             WHERE coin_id = $2`,
-            [newPrice, coin.coin_id]
-          );
-
-          await db.query(
-            `INSERT INTO price_history (coin_id, price)
-             VALUES ($1, $2::decimal)`,
-            [coin.coin_id, newPrice]
-          );
-          
-          updatedCoins++;
-        }
-        await db.query('COMMIT');
-        console.log(`[MARKET] Successfully updated ${updatedCoins}/${coins.length} coins`);
-      } catch (error) {
-        await db.query('ROLLBACK');
-        throw error;
+        // Only store last price in memory for calculations
+        this.lastPrices.set(coin.coin_id, newPrice);
       }
     } catch (error) {
-      console.error('[MARKET] Failed to update prices:', error);
-      if (!this.isRunning) {
-        console.log('[MARKET] Market stopped due to update failure');
-      }
-      throw error;
+      console.error('[MARKET] Error updating prices:', error);
     }
   }
 
