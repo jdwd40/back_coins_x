@@ -90,12 +90,12 @@ exports.getMarketHistory = async () => {
     const result = await db.query(
       `WITH market_snapshots AS (
         SELECT 
-          ph.timestamp,
+          ph.recorded_at,
           SUM(ph.price * c.supply) as total_market_value
         FROM price_history ph
         JOIN coins c ON ph.coin_id = c.coin_id
-        GROUP BY ph.timestamp
-        ORDER BY ph.timestamp DESC
+        GROUP BY ph.recorded_at
+        ORDER BY ph.recorded_at DESC
       ),
       market_stats AS (
         SELECT 
@@ -107,23 +107,16 @@ exports.getMarketHistory = async () => {
         ms.*,
         json_agg(
           json_build_object(
-            'timestamp', TO_CHAR(mh.timestamp, 'YYYY-MM-DD HH24:MI:SS'),
+            'timestamp', TO_CHAR(mh.recorded_at, 'YYYY-MM-DD HH24:MI:SS'),
             'total_market_value', mh.total_market_value
-          ) ORDER BY mh.timestamp DESC
+          )
         ) as history
-      FROM market_stats ms
-      CROSS JOIN market_snapshots mh
+      FROM market_stats ms, market_snapshots mh
       GROUP BY ms.all_time_high, ms.all_time_low`
     );
     
-    const marketHistory = result.rows[0] || {
-      all_time_high: 0,
-      all_time_low: 0,
-      history: []
-    };
-    
-    console.log('Successfully retrieved market history');
-    return marketHistory;
+    console.log('Successfully retrieved market history:', result.rows[0]);
+    return result.rows[0];
   } catch (error) {
     console.error('Error in getMarketHistory:', error);
     throw error;
