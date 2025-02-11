@@ -19,7 +19,9 @@ const config = {
 
 if (ENV === 'production') {
   config.connectionString = process.env.DATABASE_URL;
-  config.max = 2;
+  config.max = 10; // Increase max connections
+  config.idleTimeoutMillis = 30000; // Close idle connections after 30 seconds
+  config.connectionTimeoutMillis = 2000; // Fail fast if can't connect
 }
 
 const pool = new Pool(config);

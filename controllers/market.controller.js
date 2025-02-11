@@ -38,8 +38,14 @@ exports.getMarketStats = async (req, res, next) => {
 
 exports.getMarketHistory = async (req, res, next) => {
   try {
+    const { page, limit } = req.query;
+    
+    // Convert to numbers if provided, otherwise pass null
+    const pageNum = page ? parseInt(page) : null;
+    const limitNum = limit ? parseInt(limit) : null;
+    
     const { getMarketHistory } = require('../models/coins.model');
-    const marketHistory = await getMarketHistory();
+    const marketHistory = await getMarketHistory(pageNum, limitNum);
     res.status(200).json(marketHistory);
   } catch (err) {
     next(err);

@@ -44,7 +44,6 @@ class MarketSimulator {
     this.isRunning = false;
     this.lastPrices = new Map();
     this.initialPrices = new Map();
-    this.priceHistory = new Map();
   }
 
   // Initialize coin volatility profiles with more conservative values
@@ -68,10 +67,7 @@ class MarketSimulator {
         trendStartTime: new Date()
       });
 
-      // Initialize price history for this coin
-      this.priceHistory.set(coin.coin_id, []);
-
-      console.log(`Set volatility for ${coin.symbol}: ${baseVolatility}`);
+      console.log(`[MARKET] Set volatility for ${coin.symbol}: ${baseVolatility}`);
     });
   }
 
@@ -127,14 +123,6 @@ class MarketSimulator {
     const maxPrice = initialPrice * 5;
     newPrice = Math.min(Math.max(newPrice, minPrice), maxPrice);
 
-    // Store in price history (keep last 24 hours)
-    const priceHistory = this.priceHistory.get(coinId) || [];
-    priceHistory.push({ price: newPrice, timestamp: now });
-    if (priceHistory.length > 17280) { // 24h worth of 5s intervals
-      priceHistory.shift();
-    }
-    this.priceHistory.set(coinId, priceHistory);
-
     // Round based on price range
     if (newPrice < 1) {
       return Math.round(newPrice * 10000) / 10000; // 4 decimal places
@@ -147,44 +135,51 @@ class MarketSimulator {
 
   // Start the market simulation
   async start() {
-    console.log('Starting market simulation...');
     if (this.isRunning) {
-      console.log('Market simulator already running');
+      console.log('[MARKET] Already running');
       return;
     }
     
     try {
-      // Initialize volatility profiles first
-      console.log('Initializing coin volatility...');
+      console.log('[MARKET] Starting simulation...');
       await this.initializeCoinVolatility();
-      
-      // Start initial market cycle
-      console.log('Starting market cycle...');
       await this.startNewMarketCycle();
-      
-      // Mark as running only after initialization is complete
       this.isRunning = true;
-      
-      // Start price updates
-      console.log('Starting price updates...');
       this.startPriceUpdates();
+      console.log('[MARKET] Successfully started');
     } catch (error) {
-      console.error('Error starting market simulator:', error);
+      console.error('[MARKET] Failed to start:', error);
       this.isRunning = false;
     }
+  }
+
+  // Stop the market simulation
+  stop() {
+    console.log('[MARKET] Stopping simulation...');
+    this.isRunning = false;
+    
+    if (this.updateIntervalId) {
+      clearInterval(this.updateIntervalId);
+      this.updateIntervalId = null;
+    }
+    
+    if (this.cycleTimeout) {
+      clearTimeout(this.cycleTimeout);
+      this.cycleTimeout = null;
+    }
+    
+    console.log('[MARKET] Simulation stopped');
   }
 
   // Start a new market cycle
   async startNewMarketCycle() {
     if (!this.isRunning && this.currentCycle) return;
 
-    // Clear existing cycle timeout if any
     if (this.cycleTimeout) {
       clearTimeout(this.cycleTimeout);
       this.cycleTimeout = null;
     }
 
-    // Determine cycle type and duration
     const cycleTypes = Object.values(MARKET_CYCLES);
     const randomCycle = cycleTypes[Math.floor(Math.random() * cycleTypes.length)];
     const duration = this.getRandomDuration(30000, 120000); // 30s to 2m
@@ -195,18 +190,12 @@ class MarketSimulator {
       duration: duration
     };
 
-    console.log('Starting new market cycle:', {
-      type: this.currentCycle.type,
-      baseEffect: this.currentCycle.baseEffect,
-      duration: duration
-    });
+    console.log(`[MARKET] New cycle: ${this.currentCycle.type}, Effect: ${this.currentCycle.baseEffect}, Duration: ${duration}ms`);
 
-    // Schedule next cycle
     this.cycleTimeout = setTimeout(() => {
       this.startNewMarketCycle();
     }, duration);
 
-    // Start random events for coins
     await this.initializeCoinEvents();
   }
 
@@ -246,78 +235,71 @@ class MarketSimulator {
 
   // Start periodic price updates
   startPriceUpdates() {
-    console.log('Starting price updates...');
     if (this.updateIntervalId) {
-      console.log('Price updates already running');
       return;
     }
 
-    // Initial update
-    this.updateAllPrices();
+    const startUpdateInterval = () => {
+      this.updateIntervalId = setInterval(async () => {
+        try {
+          await this.updateAllPrices();
+        } catch (error) {
+          console.error('[MARKET] Error in price update interval:', error);
+          clearInterval(this.updateIntervalId);
+          this.updateIntervalId = null;
+          
+          if (this.isRunning) {
+            console.log('[MARKET] Attempting recovery in 5 seconds...');
+            setTimeout(() => {
+              if (this.isRunning) {
+                console.log('[MARKET] Restarting price updates...');
+                startUpdateInterval();
+              } else {
+                console.log('[MARKET] Recovery aborted - market is stopped');
+              }
+            }, 5000);
+          } else {
+            console.log('[MARKET] Market stopped due to error');
+          }
+        }
+      }, this.priceUpdateInterval);
+    };
 
-    // Set interval for future updates
-    this.updateIntervalId = setInterval(() => {
-      this.updateAllPrices();
-    }, this.priceUpdateInterval);
+    this.updateAllPrices().catch(error => {
+      console.error('[MARKET] Error in initial price update:', error);
+    });
+
+    startUpdateInterval();
   }
 
   // Update prices for all coins based on current market conditions
   async updateAllPrices() {
-    if (!this.currentCycle || !this.isRunning) {
-      console.log('Market simulator not running or no current cycle');
-      return;
-    }
+    if (!this.isRunning) return;
 
     try {
-      console.log('Starting price update cycle');
-      const result = await db.query('SELECT coin_id, current_price::numeric FROM coins');
+      const result = await db.query('SELECT coin_id, current_price FROM coins');
       const coins = result.rows;
-      console.log(`Updating prices for ${coins.length} coins`);
 
-      await db.query('BEGIN');
-      try {
-        for (const coin of coins) {
-          // Ensure current_price is a number
-          const currentPrice = typeof coin.current_price === 'string' 
-            ? parseFloat(coin.current_price) 
-            : coin.current_price;
+      for (const coin of coins) {
+        const currentPrice = parseFloat(coin.current_price);
+        const newPrice = this.calculateNewPrice(currentPrice, coin.coin_id);
+        
+        // Update current price in coins table and add to price history
+        await db.query(
+          'UPDATE coins SET current_price = $1 WHERE coin_id = $2',
+          [newPrice, coin.coin_id]
+        );
+        
+        await db.query(
+          'INSERT INTO price_history (coin_id, price) VALUES ($1, $2)',
+          [coin.coin_id, newPrice]
+        );
 
-          if (isNaN(currentPrice)) {
-            console.error(`Invalid price for coin ${coin.coin_id}: ${coin.current_price}`);
-            continue;
-          }
-
-          const newPrice = this.calculateNewPrice(currentPrice, coin.coin_id);
-
-          if (isNaN(newPrice)) {
-            console.error(`Calculated invalid price for coin ${coin.coin_id}: ${newPrice}`);
-            continue;
-          }
-
-          console.log(`Updating coin ${coin.coin_id}: ${currentPrice} -> ${newPrice}`);
-
-          await db.query(
-            `UPDATE coins 
-             SET current_price = $1::decimal,
-                 price_change_24h = ROUND(((($1::decimal - current_price::decimal) / current_price::decimal) * 100), 2)
-             WHERE coin_id = $2`,
-            [newPrice, coin.coin_id]
-          );
-
-          await db.query(
-            `INSERT INTO price_history (coin_id, price)
-             VALUES ($1, $2::decimal)`,
-            [coin.coin_id, newPrice]
-          );
-        }
-        await db.query('COMMIT');
-        console.log('Successfully updated all coin prices and recorded history');
-      } catch (error) {
-        await db.query('ROLLBACK');
-        throw error;
+        // Only store last price in memory for calculations
+        this.lastPrices.set(coin.coin_id, newPrice);
       }
     } catch (error) {
-      console.error('Error updating prices:', error);
+      console.error('[MARKET] Error updating prices:', error);
     }
   }
 
@@ -446,7 +428,7 @@ class MarketSimulator {
         }
       };
     } catch (error) {
-      console.error('Error getting market stats:', error);
+      console.error('[MARKET] Error getting market stats:', error);
       throw error;
     }
   }

@@ -17,6 +17,18 @@ CREATE TABLE price_history (
 CREATE INDEX idx_price_history_coin_timestamp 
 ON price_history(coin_id, recorded_at DESC);
 
+-- Create a function to clean old price history
+CREATE OR REPLACE FUNCTION cleanup_price_history() RETURNS void AS $$
+BEGIN
+    DELETE FROM price_history 
+    WHERE recorded_at < NOW() - INTERVAL '24 hours';
+END;
+$$ LANGUAGE plpgsql;
+
+-- Create a scheduled job to run cleanup every hour
+CREATE EXTENSION IF NOT EXISTS pg_cron;
+SELECT cron.schedule('0 * * * *', 'SELECT cleanup_price_history()');
+
 -- Connect to the test database
 \c coins_x_test jd;
 
@@ -35,3 +47,15 @@ CREATE TABLE price_history (
 -- Create index for faster queries
 CREATE INDEX idx_price_history_coin_timestamp 
 ON price_history(coin_id, recorded_at DESC);
+
+-- Create a function to clean old price history
+CREATE OR REPLACE FUNCTION cleanup_price_history() RETURNS void AS $$
+BEGIN
+    DELETE FROM price_history 
+    WHERE recorded_at < NOW() - INTERVAL '24 hours';
+END;
+$$ LANGUAGE plpgsql;
+
+-- Create a scheduled job to run cleanup every hour
+CREATE EXTENSION IF NOT EXISTS pg_cron;
+SELECT cron.schedule('0 * * * *', 'SELECT cleanup_price_history()');

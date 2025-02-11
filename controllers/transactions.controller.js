@@ -3,8 +3,12 @@ const {
   selectUserTransactions,
   selectTransactionById,
   selectUserPortfolio,
-  updatePortfolio
+  updatePortfolio,
+  processBuyTransaction,
+  processSellTransaction
 } = require('../models/transactions.model');
+const { selectCoinById } = require('../models/coins.model');
+const { getUserBalance } = require('../models/users.model');
 
 exports.createTransaction = async (req, res, next) => {
   try {
@@ -28,106 +32,8 @@ exports.createTransaction = async (req, res, next) => {
       return res.status(400).json({ msg: 'Amount must be greater than 0' });
     }
 
-    // Get current coin price and supply
-    const coinResult = await db.query(
-      'SELECT current_price, available_supply FROM coins WHERE coin_id = $1',
-      [coin_id]
-    );
-
-    if (coinResult.rows.length === 0) {
-      return res.status(404).json({ msg: 'Coin not found' });
-    }
-
-    const { current_price, available_supply } = coinResult.rows[0];
-    const total_amount = amount * current_price;
-
-    // Get user's current balance
-    const userResult = await db.query(
-      'SELECT balance FROM users WHERE user_id = $1',
-      [user_id]
-    );
-
-    if (userResult.rows.length === 0) {
-      return res.status(404).json({ msg: 'User not found' });
-    }
-
-    const { balance } = userResult.rows[0];
-
-    if (type.toUpperCase() === 'BUY') {
-      // Check if user has enough balance
-      if (balance < total_amount) {
-        return res.status(400).json({ msg: 'Insufficient balance' });
-      }
-
-      // Check if there's enough supply
-      if (amount > available_supply) {
-        return res.status(400).json({ msg: 'Insufficient coin supply' });
-      }
-    } else {
-      // For SELL operations, check if user has enough coins
-      const portfolioResult = await db.query(
-        `SELECT quantity FROM user_portfolio 
-         WHERE user_id = $1 AND coin_id = $2`,
-        [user_id, coin_id]
-      );
-
-      const userCoins = portfolioResult.rows[0]?.quantity || 0;
-      if (amount > userCoins) {
-        return res.status(400).json({ msg: 'Insufficient coins in portfolio' });
-      }
-    }
-
-    // Start a database transaction
-    await db.query('BEGIN');
-
-    try {
-      // Record the transaction
-      const transaction = await insertTransaction(
-        user_id,
-        coin_id,
-        type,
-        amount,
-        current_price
-      );
-
-      // Update the user's portfolio
-      await updatePortfolio(
-        user_id,
-        coin_id,
-        type,
-        amount,
-        current_price
-      );
-
-      // Update user's balance
-      await db.query(
-        `UPDATE users 
-         SET balance = balance ${type.toUpperCase() === 'BUY' ? '-' : '+'} $1
-         WHERE user_id = $2`,
-        [total_amount, user_id]
-      );
-
-      // Update coin supply
-      await db.query(
-        `UPDATE coins 
-         SET available_supply = available_supply ${type.toUpperCase() === 'BUY' ? '-' : '+'} $1
-         WHERE coin_id = $2`,
-        [amount, coin_id]
-      );
-
-      await db.query('COMMIT');
-
-      // Fetch the complete transaction details with coin information
-      const completedTransaction = await selectTransactionById(transaction.transaction_id);
-      
-      res.status(201).json({
-        msg: `Successfully ${type.toLowerCase()}ed coins`,
-        transaction: completedTransaction
-      });
-    } catch (err) {
-      await db.query('ROLLBACK');
-      throw err;
-    }
+    const transaction = await insertTransaction(user_id, coin_id, type, amount);
+    res.status(201).json(transaction);
   } catch (err) {
     next(err);
   }
@@ -135,15 +41,8 @@ exports.createTransaction = async (req, res, next) => {
 
 exports.getUserTransactions = async (req, res, next) => {
   try {
-    const { user_id } = req.params;
-
-    // Check if the authenticated user matches the requested user_id
-    if (req.user.user_id !== parseInt(user_id)) {
-      return res.status(401).json({ msg: 'Unauthorized' });
-    }
-
-    const transactions = await selectUserTransactions(parseInt(user_id));
-    res.status(200).json({ transactions });
+    const transactions = await selectUserTransactions(req.params.user_id);
+    res.status(200).json(transactions);
   } catch (err) {
     next(err);
   }
@@ -151,19 +50,11 @@ exports.getUserTransactions = async (req, res, next) => {
 
 exports.getTransactionById = async (req, res, next) => {
   try {
-    const { transaction_id } = req.params;
-    const transaction = await selectTransactionById(parseInt(transaction_id));
-
-    // Check if the authenticated user matches the transaction's user_id
-    if (req.user.user_id !== transaction.user_id) {
-      return res.status(401).json({ msg: 'Unauthorized' });
-    }
-
+    const transaction = await selectTransactionById(req.params.transaction_id);
     if (!transaction) {
       return res.status(404).json({ msg: 'Transaction not found' });
     }
-
-    res.status(200).json({ transaction });
+    res.status(200).json(transaction);
   } catch (err) {
     next(err);
   }
@@ -171,19 +62,119 @@ exports.getTransactionById = async (req, res, next) => {
 
 exports.getPortfolioByUserId = async (req, res, next) => {
   try {
-    const { user_id } = req.params;
-    
-    if (isNaN(user_id)) {
-      return res.status(400).json({ msg: 'Invalid user ID' });
+    const portfolio = await selectUserPortfolio(req.params.user_id);
+    res.status(200).json(portfolio);
+  } catch (err) {
+    next(err);
+  }
+};
+
+// Add new buy transaction controller
+exports.processBuyTransaction = async (req, res, next) => {
+  try {
+    const { user_id, coin_id, amount } = req.body;
+
+    // Validate input
+    if (!user_id || !coin_id || !amount || amount <= 0) {
+      return res.status(400).json({ 
+        status: 'error',
+        message: 'Invalid input parameters. Please provide valid user_id, coin_id, and amount greater than 0.' 
+      });
     }
 
-    // Check if the authenticated user matches the requested user_id
+    // Check if the authenticated user matches the user_id in the request
     if (req.user.user_id !== parseInt(user_id)) {
-      return res.status(401).json({ msg: 'Unauthorized' });
+      return res.status(401).json({ 
+        status: 'error',
+        message: 'Unauthorized. You can only make transactions for your own account.' 
+      });
     }
 
-    const portfolio = await selectUserPortfolio(user_id);
-    res.status(200).json({ portfolio });
+    // Get current coin price and check if coin exists
+    const coin = await selectCoinById(coin_id);
+    if (!coin) {
+      return res.status(404).json({ 
+        status: 'error',
+        message: 'Coin not found. Please provide a valid coin_id.' 
+      });
+    }
+
+    try {
+      const transaction = await processBuyTransaction(user_id, coin_id, amount, coin.current_price);
+      res.status(201).json({
+        status: 'success',
+        message: 'Buy transaction completed successfully',
+        data: transaction
+      });
+    } catch (err) {
+      if (err.message === 'Insufficient funds') {
+        return res.status(400).json({
+          status: 'error',
+          message: `Insufficient funds. You need ${(amount * coin.current_price).toFixed(2)} to complete this purchase.`,
+          required_amount: amount * coin.current_price,
+          current_price: coin.current_price
+        });
+      }
+      throw err;
+    }
+  } catch (err) {
+    next(err);
+  }
+};
+
+// Add new sell transaction controller
+exports.processSellTransaction = async (req, res, next) => {
+  try {
+    const { user_id, coin_id, amount } = req.body;
+
+    // Validate input
+    if (!user_id || !coin_id || !amount || amount <= 0) {
+      return res.status(400).json({ 
+        status: 'error',
+        message: 'Invalid input parameters. Please provide valid user_id, coin_id, and amount greater than 0.' 
+      });
+    }
+
+    // Check if the authenticated user matches the user_id in the request
+    if (req.user.user_id !== parseInt(user_id)) {
+      return res.status(401).json({ 
+        status: 'error',
+        message: 'Unauthorized. You can only make transactions for your own account.' 
+      });
+    }
+
+    // Get current coin price and check if coin exists
+    const coin = await selectCoinById(coin_id);
+    if (!coin) {
+      return res.status(404).json({ 
+        status: 'error',
+        message: 'Coin not found. Please provide a valid coin_id.' 
+      });
+    }
+
+    try {
+      const transaction = await processSellTransaction(user_id, coin_id, amount, coin.current_price);
+      res.status(201).json({
+        status: 'success',
+        message: 'Sell transaction completed successfully',
+        data: transaction
+      });
+    } catch (err) {
+      if (err.message === 'Insufficient coins in portfolio') {
+        // Get current portfolio balance
+        const portfolio = await selectUserPortfolio(user_id);
+        const coinPortfolio = portfolio.find(p => p.coin_id === coin_id);
+        const available = coinPortfolio ? coinPortfolio.quantity : 0;
+
+        return res.status(400).json({
+          status: 'error',
+          message: `Insufficient coins in portfolio. You have ${available} coins available to sell.`,
+          available_amount: available,
+          requested_amount: amount
+        });
+      }
+      throw err;
+    }
   } catch (err) {
     next(err);
   }

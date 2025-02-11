@@ -6,9 +6,9 @@ exports.createUser = async (username, email, password) => {
   const hashedPassword = await bcrypt.hash(password, 10);
   
   const result = await db.query(
-    `INSERT INTO users (username, email, password_hash)
-     VALUES ($1, $2, $3)
-     RETURNING user_id, username, email, created_at`,
+    `INSERT INTO users (username, email, password_hash, balance)
+     VALUES ($1, $2, $3, 1000.00)
+     RETURNING user_id, username, email, balance, created_at`,
     [username, email, hashedPassword]
   );
   
@@ -97,6 +97,37 @@ exports.updateUser = async (user_id, updateData) => {
   );
   
   return result.rows[0];
+};
+
+exports.updateUserBalance = async (user_id, amount) => {
+  const result = await db.query(
+    `UPDATE users 
+     SET balance = balance + $1
+     WHERE user_id = $2
+     RETURNING user_id, username, balance`,
+    [amount, user_id]
+  );
+
+  if (result.rows.length === 0) {
+    throw new Error('User not found');
+  }
+
+  return result.rows[0];
+};
+
+exports.getUserBalance = async (user_id) => {
+  const result = await db.query(
+    `SELECT balance 
+     FROM users 
+     WHERE user_id = $1`,
+    [user_id]
+  );
+
+  if (result.rows.length === 0) {
+    throw new Error('User not found');
+  }
+
+  return result.rows[0].balance;
 };
 
 exports.removeUser = async (user_id) => {
