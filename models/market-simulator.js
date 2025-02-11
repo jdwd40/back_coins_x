@@ -9,17 +9,17 @@ const MARKET_CYCLES = {
   STABLE: { type: 'STABLE', baseEffect: 0 }
 };
 
-// More balanced event impacts with shorter durations
+// More balanced event impacts with longer durations
 const COIN_EVENTS = {
-  MAJOR_PARTNERSHIP: { type: 'MAJOR_PARTNERSHIP', multiplier: 1.05, duration: { min: 20000, max: 40000 } },  // +5%
-  MINOR_PARTNERSHIP: { type: 'MINOR_PARTNERSHIP', multiplier: 1.02, duration: { min: 10000, max: 20000 } },  // +2%
-  REGULATION_NEGATIVE: { type: 'REGULATION_NEGATIVE', multiplier: 0.95, duration: { min: 15000, max: 30000 } }, // -5%
-  REGULATION_POSITIVE: { type: 'REGULATION_POSITIVE', multiplier: 1.03, duration: { min: 15000, max: 30000 } }, // +3%
-  MAJOR_ADOPTION: { type: 'MAJOR_ADOPTION', multiplier: 1.08, duration: { min: 25000, max: 45000 } },        // +8%
-  MINOR_ADOPTION: { type: 'MINOR_ADOPTION', multiplier: 1.03, duration: { min: 12000, max: 22000 } },        // +3%
-  SCANDAL: { type: 'SCANDAL', multiplier: 0.93, duration: { min: 17000, max: 35000 } },                      // -7%
-  RUMOR_POSITIVE: { type: 'RUMOR_POSITIVE', multiplier: 1.01, duration: { min: 7000, max: 15000 } },        // +1%
-  RUMOR_NEGATIVE: { type: 'RUMOR_NEGATIVE', multiplier: 0.99, duration: { min: 7000, max: 15000 } }         // -1%
+  MAJOR_PARTNERSHIP: { type: 'MAJOR_PARTNERSHIP', multiplier: 1.05, duration: { min: 120000, max: 900000 } },  // +5%, 2-15 mins
+  MINOR_PARTNERSHIP: { type: 'MINOR_PARTNERSHIP', multiplier: 1.02, duration: { min: 120000, max: 900000 } },  // +2%
+  REGULATION_NEGATIVE: { type: 'REGULATION_NEGATIVE', multiplier: 0.95, duration: { min: 120000, max: 900000 } }, // -5%
+  REGULATION_POSITIVE: { type: 'REGULATION_POSITIVE', multiplier: 1.03, duration: { min: 120000, max: 900000 } }, // +3%
+  MAJOR_ADOPTION: { type: 'MAJOR_ADOPTION', multiplier: 1.08, duration: { min: 120000, max: 900000 } },        // +8%
+  MINOR_ADOPTION: { type: 'MINOR_ADOPTION', multiplier: 1.03, duration: { min: 120000, max: 900000 } },        // +3%
+  SCANDAL: { type: 'SCANDAL', multiplier: 0.93, duration: { min: 120000, max: 900000 } },                      // -7%
+  RUMOR_POSITIVE: { type: 'RUMOR_POSITIVE', multiplier: 1.01, duration: { min: 120000, max: 900000 } },        // +1%
+  RUMOR_NEGATIVE: { type: 'RUMOR_NEGATIVE', multiplier: 0.99, duration: { min: 120000, max: 900000 } }         // -1%
 };
 
 // Time range options for price history
@@ -37,7 +37,7 @@ class MarketSimulator {
   constructor() {
     this.currentCycle = null;
     this.cycleTimeout = null;
-    this.priceUpdateInterval = 5000;
+    this.priceUpdateInterval = 30000;  // Changed to 30 seconds
     this.updateIntervalId = null;
     this.coinEvents = new Map();
     this.coinVolatility = new Map();
@@ -182,7 +182,7 @@ class MarketSimulator {
 
     const cycleTypes = Object.values(MARKET_CYCLES);
     const randomCycle = cycleTypes[Math.floor(Math.random() * cycleTypes.length)];
-    const duration = this.getRandomDuration(30000, 120000); // 30s to 2m
+    const duration = this.getRandomDuration(120000, 600000); // Changed to 2-10 mins
 
     this.currentCycle = {
       ...randomCycle,
