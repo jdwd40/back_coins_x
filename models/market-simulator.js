@@ -22,6 +22,17 @@ const COIN_EVENTS = {
   RUMOR_NEGATIVE: { type: 'RUMOR_NEGATIVE', multiplier: 0.99, duration: { min: 7000, max: 15000 } }         // -1%
 };
 
+// Time range options for price history
+const TIME_RANGES = {
+  '10M': 10 * 60 * 1000,        // 10 minutes in ms
+  '30M': 30 * 60 * 1000,        // 30 minutes in ms
+  '1H': 60 * 60 * 1000,         // 1 hour in ms
+  '2H': 2 * 60 * 60 * 1000,     // 2 hours in ms
+  '12H': 12 * 60 * 60 * 1000,   // 12 hours in ms
+  '24H': 24 * 60 * 60 * 1000,   // 24 hours in ms
+  'ALL': null                    // No time limit
+};
+
 class MarketSimulator {
   constructor() {
     this.currentCycle = null;
@@ -361,36 +372,59 @@ class MarketSimulator {
   }
 
   // Get market statistics including all coins and market highs/lows
-  async getMarketStats() {
+  async getMarketStats(timeRange = '30M') {
     try {
-      // Get current values of all coins
+      const timeRangeMs = TIME_RANGES[timeRange] || TIME_RANGES['30M'];
+      const now = new Date();
+      const timeFilter = timeRangeMs ? `AND created_at >= NOW() - INTERVAL '${timeRangeMs / 1000} seconds'` : '';
+
+      // Get current values and price history of all coins
       const currentValues = await db.query(`
+        WITH recent_prices AS (
+          SELECT 
+            coin_id,
+            price,
+            created_at,
+            ROW_NUMBER() OVER (PARTITION BY coin_id ORDER BY created_at DESC) as rn
+          FROM price_history
+          WHERE 1=1 ${timeFilter}
+        )
         SELECT 
           c.*,
           COALESCE(
+            (SELECT json_agg(
+              json_build_object(
+                'price', rp.price,
+                'timestamp', rp.created_at
+              ) ORDER BY rp.created_at
+            )
+            FROM recent_prices rp
+            WHERE rp.coin_id = c.coin_id
+            ), '[]'::json
+          ) as price_history,
+          COALESCE(
             (SELECT price 
-             FROM price_history ph 
-             WHERE ph.coin_id = c.coin_id 
-             ORDER BY created_at DESC 
-             LIMIT 1
+             FROM recent_prices 
+             WHERE coin_id = c.coin_id AND rn = 1
             ),
             c.current_price
           ) as latest_price
         FROM coins c
       `);
 
-      // Get all-time market high and low
+      // Get market high and low for the selected time range
       const marketStats = await db.query(`
         WITH market_totals AS (
           SELECT 
             created_at,
             SUM(price) as total_market_value
           FROM price_history
+          WHERE 1=1 ${timeFilter}
           GROUP BY created_at
         )
         SELECT 
-          MAX(total_market_value) as all_time_high,
-          MIN(total_market_value) as all_time_low,
+          MAX(total_market_value) as period_high,
+          MIN(total_market_value) as period_low,
           (
             SELECT total_market_value 
             FROM market_totals 
@@ -401,11 +435,14 @@ class MarketSimulator {
       `);
 
       return {
-        coins: currentValues.rows,
-        market_stats: marketStats.rows[0] || {
-          all_time_high: null,
-          all_time_low: null,
-          current_market_value: null
+        timeRange,
+        coins: currentValues.rows.map(coin => ({
+          ...coin,
+          price_history: coin.price_history || []
+        })),
+        market_stats: {
+          ...marketStats.rows[0],
+          time_range_ms: timeRangeMs
         }
       };
     } catch (error) {
