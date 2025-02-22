@@ -43,7 +43,6 @@ describe('Market Status API', () => {
         .expect(200);
 
       // Check response structure
-      console.log(response.body);
       expect(response.body).toMatchObject({
         status: 'RUNNING',
         currentCycle: expect.objectContaining({

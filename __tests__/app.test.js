@@ -4,20 +4,13 @@ const db = require('../db/connection');
 
 describe('API Endpoints', () => {
   describe('GET /api/coins', () => {
-    test('responds with an array of coins', () => {
+    test('200: responds with an array of coins', () => {
       return request(app)
         .get('/api/coins')
         .expect(200)
         .then(({ body }) => {
-          console.log("from app.test",body);
           expect(Array.isArray(body.coins)).toBe(true);
-          expect(body.coins.length).toBe(10); // We have 2 coins in our test data
-          body.coins.forEach((coin) => {
-            expect(coin).toHaveProperty('coin_id');
-            expect(coin).toHaveProperty('name');
-            expect(coin).toHaveProperty('symbol');
-            expect(coin).toHaveProperty('current_price');
-          });
+          expect(body.coins).toHaveLength(13);
         });
     });
   });

@@ -1,0 +1,14 @@
+                                               Table "public.price_history"
+   Column   |            Type             | Collation | Nullable |                         Default                         
+------------+-----------------------------+-----------+----------+---------------------------------------------------------
+ history_id | integer                     |           | not null | nextval('price_history_price_history_id_seq'::regclass)
+ coin_id    | integer                     |           |          | 
+ price      | numeric(18,2)               |           | not null | 
+ created_at | timestamp without time zone |           |          | CURRENT_TIMESTAMP
+Indexes:
+    "price_history_pkey" PRIMARY KEY, btree (history_id)
+    "idx_price_history_coin_id" btree (coin_id)
+    "idx_price_history_created_at" btree (created_at)
+Foreign-key constraints:
+    "price_history_coin_id_fkey" FOREIGN KEY (coin_id) REFERENCES coins(coin_id) ON DELETE CASCADE
+
