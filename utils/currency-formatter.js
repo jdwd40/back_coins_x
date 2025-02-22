@@ -1,22 +1,17 @@
 /**
- * Utility class for handling GBP currency formatting
+ * Utility class for handling number formatting and conversion
  */
 class CurrencyFormatter {
   /**
-   * Format a number as GBP currency string with commas
+   * Format a number with 2 decimal places
    * @param {number} value - The number to format
-   * @returns {string} Formatted GBP string
+   * @returns {number} Formatted number with 2 decimal places
    */
   static formatGBP(value) {
     if (value === null || value === undefined) {
-      return '£0.00';
+      return 0.00;
     }
-    return new Intl.NumberFormat('en-GB', {
-      style: 'currency',
-      currency: 'GBP',
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2
-    }).format(Number(value));
+    return Number(Number(value).toFixed(2));
   }
 
   /**
@@ -52,10 +47,9 @@ class CurrencyFormatter {
         throw new Error('NEGATIVE_PRICE');
       }
       
-      // Return with 2 decimal precision
       return Number(num.toFixed(2));
     } catch (err) {
-      if (err.message === 'NEGATIVE_PRICE' || err.message === 'INVALID_FORMAT') {
+      if (err.message === 'NEGATIVE_PRICE') {
         throw err;
       }
       throw new Error('INVALID_FORMAT');

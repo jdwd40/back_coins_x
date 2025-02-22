@@ -14,8 +14,8 @@ This document explains the structure and behavior of the Coins API endpoints for
     coin_id: number;
     name: string;
     symbol: string;
-    current_price: string;  // Formatted as GBP (e.g., "£150.00")
-    market_cap: string;     // Formatted as GBP (e.g., "£1,000,000.00")
+    current_price: number;  // Price in GBP with 2 decimal places
+    market_cap: number;     // Value in GBP with 2 decimal places
     circulating_supply: number;
     price_change_24h: number;
     founder: string;
@@ -35,8 +35,8 @@ This document explains the structure and behavior of the Coins API endpoints for
     coin_id: number;
     name: string;
     symbol: string;
-    current_price: string;  // Formatted as GBP (e.g., "£150.00")
-    market_cap: string;     // Formatted as GBP (e.g., "£1,000,000.00")
+    current_price: number;  // Price in GBP with 2 decimal places
+    market_cap: number;     // Value in GBP with 2 decimal places
     circulating_supply: number;
     price_change_24h: number;
     founder: string;
@@ -52,14 +52,14 @@ This document explains the structure and behavior of the Coins API endpoints for
 - **Request Body**:
 ```typescript
 {
-  price?: number | string;  // Can be number or GBP string (e.g., 150.00 or "£150.00")
-  current_price?: number | string;  // Alternative field name, same format as price
+  price?: number;  // Price in GBP with up to 2 decimal places
+  current_price?: number;  // Alternative field name, same format as price
 }
 ```
 - **Validation Rules**:
-  - Price must be between £0.01 and £1,000,000,000
+  - Price must be between 0.01 and 1,000,000,000
   - Price must be a positive number
-  - Price can be provided as a number or GBP-formatted string
+  - Price will be rounded to 2 decimal places
 
 ### 4. Get Price History
 - **Endpoint**: `GET /coins/:coin_id/history`
@@ -72,7 +72,7 @@ This document explains the structure and behavior of the Coins API endpoints for
 ```typescript
 {
   history: {
-    price: string;  // Formatted as GBP
+    price: number;  // Price in GBP with 2 decimal places
     timestamp: string;  // ISO date string
     price_change_percentage: number;
   }[];
@@ -87,11 +87,12 @@ This document explains the structure and behavior of the Coins API endpoints for
 
 ## Important Notes
 
-1. **Currency Formatting**:
-   - All monetary values in responses are formatted as GBP strings (e.g., "£150.00")
-   - When sending prices in requests, you can use either:
+1. **Number Formatting**:
+   - All monetary values are returned as numbers with 2 decimal places
+   - Frontend should handle currency formatting and display
+   - When sending prices in requests, you can use:
      - Plain numbers (e.g., 150.00)
-     - GBP-formatted strings (e.g., "£150.00")
+     - Strings that can be converted to numbers (e.g., "150.00")
 
 2. **Error Handling**:
    - All endpoints return appropriate HTTP status codes:
