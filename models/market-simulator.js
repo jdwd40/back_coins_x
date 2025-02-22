@@ -366,15 +366,21 @@ class MarketSimulator {
         WITH market_totals AS (
           SELECT 
             DATE_TRUNC('minute', ph.created_at) as timestamp,
-            SUM(ph.price * c.circulating_supply) as total_value
-          FROM price_history ph
+            SUM(DISTINCT ph.price * c.circulating_supply) as total_value
+          FROM (
+            SELECT DISTINCT ON (coin_id, DATE_TRUNC('minute', created_at))
+              coin_id, price, created_at
+            FROM price_history
+            WHERE 1=1 ${timeFilter}
+            ORDER BY coin_id, DATE_TRUNC('minute', created_at), created_at DESC
+          ) ph
           JOIN coins c ON c.coin_id = ph.coin_id
-          WHERE 1=1 ${timeFilter}
           GROUP BY DATE_TRUNC('minute', ph.created_at)
         ),
         current_market AS (
           SELECT SUM(current_price * circulating_supply) as current_value
           FROM coins
+          WHERE current_price > 0
         )
         SELECT 
           (SELECT current_value FROM current_market) as current_value,
