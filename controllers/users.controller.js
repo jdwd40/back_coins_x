@@ -1,10 +1,13 @@
+const usersModel = require('../models/users.model');
+const logger = require('../utils/logger');
+
 const { 
   createUser,
   authenticateUser,
   selectUserById,
   updateUser,
   removeUser
-} = require('../models/users.model');
+} = usersModel;
 
 const registerUser = async (req, res, next) => {
   try {

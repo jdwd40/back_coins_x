@@ -1,4 +1,5 @@
 const db = require('../db/connection');
+const logger = require('../utils/logger');
 
 // Market cycle types with more balanced effects
 const MARKET_CYCLES = {
@@ -67,7 +68,7 @@ class MarketSimulator {
         trendStartTime: new Date()
       });
 
-      console.log(`[MARKET] Set volatility for ${coin.symbol}: ${baseVolatility}`);
+      logger.log(`[MARKET] Set volatility for ${coin.symbol}: ${baseVolatility}`);
     });
   }
 
@@ -136,26 +137,26 @@ class MarketSimulator {
   // Start the market simulation
   async start() {
     if (this.isRunning) {
-      console.log('[MARKET] Already running');
+      logger.log('[MARKET] Already running');
       return;
     }
     
     try {
-      console.log('[MARKET] Starting simulation...');
+      logger.log('[MARKET] Starting simulation...');
       await this.initializeCoinVolatility();
       await this.startNewMarketCycle();
       this.isRunning = true;
       this.startPriceUpdates();
-      console.log('[MARKET] Successfully started');
+      logger.log('[MARKET] Successfully started');
     } catch (error) {
-      console.error('[MARKET] Failed to start:', error);
+      logger.error('[MARKET] Failed to start:', error);
       this.isRunning = false;
     }
   }
 
   // Stop the market simulation
   stop() {
-    console.log('[MARKET] Stopping simulation...');
+    logger.log('[MARKET] Stopping simulation...');
     this.isRunning = false;
     
     if (this.updateIntervalId) {
@@ -168,7 +169,7 @@ class MarketSimulator {
       this.cycleTimeout = null;
     }
     
-    console.log('[MARKET] Simulation stopped');
+    logger.log('[MARKET] Simulation stopped');
   }
 
   // Start a new market cycle
@@ -190,7 +191,7 @@ class MarketSimulator {
       duration: duration
     };
 
-    console.log(`[MARKET] New cycle: ${this.currentCycle.type}, Effect: ${this.currentCycle.baseEffect}, Duration: ${duration}ms`);
+    logger.log(`[MARKET] New cycle: ${this.currentCycle.type}, Effect: ${this.currentCycle.baseEffect}, Duration: ${duration}ms`);
 
     this.cycleTimeout = setTimeout(() => {
       this.startNewMarketCycle();
@@ -244,29 +245,29 @@ class MarketSimulator {
         try {
           await this.updateAllPrices();
         } catch (error) {
-          console.error('[MARKET] Error in price update interval:', error);
+          logger.error('[MARKET] Error in price update interval:', error);
           clearInterval(this.updateIntervalId);
           this.updateIntervalId = null;
           
           if (this.isRunning) {
-            console.log('[MARKET] Attempting recovery in 5 seconds...');
+            logger.log('[MARKET] Attempting recovery in 5 seconds...');
             setTimeout(() => {
               if (this.isRunning) {
-                console.log('[MARKET] Restarting price updates...');
+                logger.log('[MARKET] Restarting price updates...');
                 startUpdateInterval();
               } else {
-                console.log('[MARKET] Recovery aborted - market is stopped');
+                logger.log('[MARKET] Recovery aborted - market is stopped');
               }
             }, 5000);
           } else {
-            console.log('[MARKET] Market stopped due to error');
+            logger.log('[MARKET] Market stopped due to error');
           }
         }
       }, this.priceUpdateInterval);
     };
 
     this.updateAllPrices().catch(error => {
-      console.error('[MARKET] Error in initial price update:', error);
+      logger.error('[MARKET] Error in initial price update:', error);
     });
 
     startUpdateInterval();
@@ -299,7 +300,7 @@ class MarketSimulator {
         this.lastPrices.set(coin.coin_id, newPrice);
       }
     } catch (error) {
-      console.error('[MARKET] Error updating prices:', error);
+      logger.error('[MARKET] Error updating prices:', error);
     }
   }
 
@@ -353,82 +354,59 @@ class MarketSimulator {
     };
   }
 
-  // Get market statistics including all coins and market highs/lows
+  // Get market statistics market highs/lows
   async getMarketStats(timeRange = '30M') {
     try {
       const timeRangeMs = TIME_RANGES[timeRange] || TIME_RANGES['30M'];
       const now = new Date();
       const timeFilter = timeRangeMs ? `AND created_at >= NOW() - INTERVAL '${timeRangeMs / 1000} seconds'` : '';
 
-      // Get current values and price history of all coins
-      const currentValues = await db.query(`
-        WITH recent_prices AS (
-          SELECT 
-            coin_id,
-            price,
-            created_at,
-            ROW_NUMBER() OVER (PARTITION BY coin_id ORDER BY created_at DESC) as rn
-          FROM price_history
-          WHERE 1=1 ${timeFilter}
-        )
-        SELECT 
-          c.*,
-          COALESCE(
-            (SELECT json_agg(
-              json_build_object(
-                'price', rp.price,
-                'timestamp', rp.created_at
-              ) ORDER BY rp.created_at
-            )
-            FROM recent_prices rp
-            WHERE rp.coin_id = c.coin_id
-            ), '[]'::json
-          ) as price_history,
-          COALESCE(
-            (SELECT price 
-             FROM recent_prices 
-             WHERE coin_id = c.coin_id AND rn = 1
-            ),
-            c.current_price
-          ) as latest_price
-        FROM coins c
-      `);
-
-      // Get market high and low for the selected time range
+      // Get market statistics including total value, highs, and lows
       const marketStats = await db.query(`
         WITH market_totals AS (
           SELECT 
-            created_at,
-            SUM(price) as total_market_value
-          FROM price_history
+            DATE_TRUNC('minute', ph.created_at) as timestamp,
+            SUM(ph.price * c.circulating_supply) as total_value
+          FROM price_history ph
+          JOIN coins c ON c.coin_id = ph.coin_id
           WHERE 1=1 ${timeFilter}
-          GROUP BY created_at
+          GROUP BY DATE_TRUNC('minute', ph.created_at)
+        ),
+        current_market AS (
+          SELECT SUM(current_price * circulating_supply) as current_value
+          FROM coins
         )
         SELECT 
-          MAX(total_market_value) as period_high,
-          MIN(total_market_value) as period_low,
-          (
-            SELECT total_market_value 
-            FROM market_totals 
-            ORDER BY created_at DESC 
-            LIMIT 1
-          ) as current_market_value
+          (SELECT current_value FROM current_market) as current_value,
+          COALESCE(MAX(total_value), 0) as all_time_high,
+          COALESCE(MIN(NULLIF(total_value, 0)), 0) as all_time_low,
+          COALESCE(
+            (SELECT total_value 
+             FROM market_totals 
+             ORDER BY timestamp DESC 
+             LIMIT 1
+            ),
+            (SELECT current_value FROM current_market)
+          ) as latest_value
         FROM market_totals
       `);
 
+      // Get current market status
+      const marketStatus = await this.getMarketStatus();
+
       return {
-        timeRange,
-        coins: currentValues.rows.map(coin => ({
-          ...coin,
-          price_history: coin.price_history || []
-        })),
-        market_stats: {
-          ...marketStats.rows[0],
-          time_range_ms: timeRangeMs
-        }
+        currentValue: parseFloat(marketStats.rows[0].current_value) || 0,
+        allTimeHigh: parseFloat(marketStats.rows[0].all_time_high) || 0,
+        allTimeLow: parseFloat(marketStats.rows[0].all_time_low) || 0,
+        latestValue: parseFloat(marketStats.rows[0].latest_value) || 0,
+        status: marketStatus.status || 'STOPPED',
+        currentCycle: marketStatus.currentCycle || { type: 'NONE', timeRemaining: '00:00:00' },
+        events: marketStatus.events || [],
+        timestamp: now.toISOString()
       };
+
     } catch (error) {
-      console.error('[MARKET] Error getting market stats:', error);
+      console.error('Error getting market stats:', error);
       throw error;
     }
   }

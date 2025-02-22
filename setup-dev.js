@@ -1,21 +1,24 @@
-const { execSync } = require('child_process');
-const path = require('path');
+const { exec } = require('child_process');
+const util = require('util');
+const execPromise = util.promisify(exec);
 
-try {
-  // Set environment to development
-  process.env.NODE_ENV = 'development';
+const setupDev = async () => {
+  try {
+    console.log('Setting up development environment...');
 
-  console.log('Setting up development environment...');
-  
-  // Run database setup
-  console.log('\nCreating databases...');
-  execSync('psql -f ./db/setup.sql', { stdio: 'inherit' });
+    // Create databases
+    console.log('\nCreating databases...');
+    await execPromise('node setup-dbs.js');
 
-  // Run seed script
-  console.log('\nSeeding development database...');
-  require('./db/seed.js');
+    // Seed development database
+    console.log('\nSeeding development database...');
+    process.env.NODE_ENV = 'development';
+    await execPromise('node db/seed.js');
 
-} catch (error) {
-  console.error('Error during setup:', error);
-  process.exit(1);
-}
+  } catch (error) {
+    console.error('Error setting up development environment:', error);
+    process.exit(1);
+  }
+};
+
+setupDev();

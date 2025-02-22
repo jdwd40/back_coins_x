@@ -1,199 +1,231 @@
 const db = require('../db/connection');
+const { CurrencyFormatter } = require('../utils/currency-formatter');
 
+// Fields to return in responses (excluding date_added)
+const COIN_FIELDS = [
+  'coin_id',
+  'name',
+  'symbol',
+  'current_price',
+  'market_cap',
+  'circulating_supply',
+  'price_change_24h',
+  'founder'
+].join(', ');
+
+/**
+ * Format coin data for response
+ */
+function formatCoinResponse(coin) {
+  return {
+    ...coin,
+    current_price: CurrencyFormatter.formatGBP(coin.current_price),
+    market_cap: CurrencyFormatter.formatGBP(coin.market_cap)
+  };
+}
+
+/**
+ * Calculate price change percentage
+ */
+function calculatePriceChange(oldPrice, newPrice) {
+  if (!oldPrice || oldPrice === 0) return 0;
+  return Number(((newPrice - oldPrice) / oldPrice * 100).toFixed(2));
+}
+
+/**
+ * Select all coins from the database
+ */
 exports.selectAllCoins = async () => {
-  try {
-    console.log('Starting selectAllCoins');
-    const result = await db.query('SELECT * FROM coins');
-    console.log('Successfully retrieved all coins:', result.rows);
-    return result.rows;
-  } catch (error) {
-    console.error('Error in selectAllCoins:', error);
-    throw error;
-  }
+  const result = await db.query(`
+    SELECT ${COIN_FIELDS} FROM coins 
+    ORDER BY coin_id ASC;
+  `);
+  return result.rows.map(formatCoinResponse);
 };
 
+/**
+ * Select a single coin by ID
+ */
 exports.selectCoinById = async (coinId) => {
-  try {
-    console.log('Starting selectCoinById with:', { coinId });
-    const result = await db.query('SELECT * FROM coins WHERE coin_id = $1', [coinId]);
-    console.log('Successfully retrieved coin by id:', result.rows[0]);
-    return result.rows[0];
-  } catch (error) {
-    console.error('Error in selectCoinById:', error);
-    throw error;
+  const result = await db.query(`
+    SELECT ${COIN_FIELDS}
+    FROM coins 
+    WHERE coin_id = $1::integer;
+  `, [coinId]);
+
+  if (result.rows.length === 0) {
+    return null;
   }
+
+  return formatCoinResponse(result.rows[0]);
 };
 
-exports.updateCoinPrice = async (coinId, currentPrice) => {
+/**
+ * Update a coin's price and record the change in price history
+ * @param {number} coinId - The ID of the coin to update
+ * @param {number} numericPrice - The new price value
+ * @returns {Promise<Object|null>} The updated coin object or null if not found
+ * @throws {Error} If there's a database error
+ */
+exports.updateCoinPrice = async (coinId, numericPrice) => {
   try {
-    console.log('Starting updateCoinPrice with:', { coinId, currentPrice });
-    
-    // Validate price format (should be a valid decimal number)
-    if (!/^\d+(\.\d{1,2})?$/.test(currentPrice.toString())) {
-      console.log('Invalid price format:', currentPrice);
-      throw new Error('Invalid price format');
+    console.log('DEBUG: Starting updateCoinPrice transaction with:', {
+      coinId,
+      numericPrice,
+      type: typeof numericPrice
+    });
+
+    // Start transaction
+    await db.query('BEGIN');
+
+    // First check if coin exists and get current price
+    console.log('DEBUG: Checking if coin exists');
+    const currentResult = await db.query(`
+      SELECT current_price 
+      FROM coins 
+      WHERE coin_id = $1::integer
+    `, [coinId]);
+
+    if (currentResult.rows.length === 0) {
+      console.log('DEBUG: Coin not found:', coinId);
+      await db.query('ROLLBACK');
+      return null;
     }
 
-    const result = await db.query(
-      `UPDATE coins 
-       SET current_price = $1, 
-           price_change_24h = (($1 - current_price) / current_price * 100)
-       WHERE coin_id = $2 
-       RETURNING *`,
-      [currentPrice, coinId]
-    );
+    console.log('DEBUG: Found existing coin:', currentResult.rows[0]);
+
+    const oldPrice = parseFloat(currentResult.rows[0].current_price);
+    // Calculate price change as a number, not string
+    const priceChange = calculatePriceChange(oldPrice, numericPrice);
+
+    console.log('DEBUG: Calculated values:', {
+      oldPrice,
+      numericPrice,
+      priceChange
+    });
+
+    // Update the coin with new price and calculated change
+    console.log('DEBUG: Executing UPDATE query');
+    const result = await db.query(`
+      UPDATE coins 
+      SET 
+        current_price = CAST($1 AS numeric),
+        price_change_24h = CAST($2 AS numeric)
+      WHERE coin_id = CAST($3 AS integer)
+      RETURNING ${COIN_FIELDS};
+    `, [numericPrice, priceChange, coinId]);
 
     if (result.rows.length === 0) {
-      throw new Error('Coin not found');
+      console.error('DEBUG: Failed to update coin - no rows affected');
+      await db.query('ROLLBACK');
+      throw new Error('Failed to update coin price - database update failed');
     }
 
-    // Insert into price history
-    await db.query(
-      'INSERT INTO price_history (coin_id, price) VALUES ($1, $2)',
-      [coinId, currentPrice]
-    );
+    console.log('DEBUG: Successfully updated coin:', result.rows[0]);
 
-    console.log('Successfully updated coin:', result.rows[0]);
-    return result.rows[0];
-  } catch (error) {
-    console.error('Error in updateCoinPrice:', error);
-    throw error;
+    // Log price history
+    console.log('DEBUG: Recording price history');
+    await db.query(`
+      INSERT INTO price_history (coin_id, price, created_at)
+      VALUES (CAST($1 AS integer), CAST($2 AS numeric), CURRENT_TIMESTAMP);
+    `, [coinId, numericPrice]);
+
+    await db.query('COMMIT');
+    console.log('DEBUG: Transaction committed successfully');
+
+    return formatCoinResponse(result.rows[0]);
+
+  } catch (err) {
+    console.error('DEBUG: Error in updateCoinPrice:', {
+      message: err.message,
+      stack: err.stack,
+      code: err.code,
+      detail: err.detail,
+      coinId,
+      numericPrice
+    });
+    await db.query('ROLLBACK');
+    throw err;
   }
 };
 
-exports.getCoinPriceHistory = async (coinId, page = null, limit = null) => {
+/**
+ * Get a coin's price history
+ */
+exports.getCoinPriceHistory = async (coinId, page = 1, limit = 10) => {
+  console.log('DEBUG: Getting price history for:', { coinId, page, limit });
+  
   try {
-    console.log('Starting getCoinPriceHistory with:', { coinId, page, limit });
-    
-    // Base query without pagination
-    let query = `
-      SELECT 
-        history_id,
-        coin_id,
-        price,
-        created_at,
-        TO_CHAR(created_at, 'YYYY-MM-DD HH24:MI:SS') as formatted_timestamp
-      FROM price_history 
-      WHERE coin_id = $1 
-      ORDER BY created_at DESC
-    `;
-    
-    const params = [coinId];
-    
-    // Add pagination if both page and limit are provided
-    if (page !== null && limit !== null) {
-      const offset = (page - 1) * limit;
-      query += ` LIMIT $2 OFFSET $3`;
-      params.push(limit, offset);
+    const offset = (page - 1) * limit;
+    console.log('DEBUG: Calculated offset:', offset);
+
+    // First check if the price_history table exists
+    const tableCheck = await db.query(`
+      SELECT EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_schema = 'public' 
+        AND table_name = 'price_history'
+      );
+    `);
+    console.log('DEBUG: Price history table exists:', tableCheck.rows[0].exists);
+
+    if (!tableCheck.rows[0].exists) {
+      throw new Error('Price history table does not exist');
     }
-    
-    const result = await db.query(query, params);
-    
-    // Get total count for pagination metadata
-    const countResult = await db.query(
-      'SELECT COUNT(*) FROM price_history WHERE coin_id = $1',
-      [coinId]
-    );
-    
-    const totalCount = parseInt(countResult.rows[0].count);
-    const totalPages = limit ? Math.ceil(totalCount / limit) : 1;
-    
-    console.log('Successfully retrieved price history:', result.rows);
+
+    const [countResult, dataResult] = await Promise.all([
+      db.query('SELECT COUNT(*) FROM price_history WHERE coin_id = $1::integer', [coinId]),
+      db.query(`
+        SELECT 
+          ph.history_id as price_history_id,
+          ph.coin_id,
+          ph.price,
+          ph.created_at as timestamp,
+          c.name,
+          c.symbol
+        FROM price_history ph
+        JOIN coins c ON ph.coin_id = c.coin_id
+        WHERE ph.coin_id = $1::integer
+        ORDER BY ph.created_at DESC
+        LIMIT $2 OFFSET $3;
+      `, [coinId, limit, offset])
+    ]);
+
+    console.log('DEBUG: Query results:', {
+      countRows: countResult.rows,
+      dataRows: dataResult.rows
+    });
+
+    const totalItems = parseInt(countResult.rows[0].count);
+    const totalPages = Math.ceil(totalItems / limit);
+
+    // If no price history exists, return empty data with pagination
+    if (totalItems === 0) {
+      return {
+        data: [],
+        pagination: {
+          currentPage: page,
+          totalPages: 0,
+          totalItems: 0,
+          hasMore: false
+        }
+      };
+    }
+
     return {
-      data: result.rows,
+      data: dataResult.rows.map(item => ({
+        ...item,
+        price: CurrencyFormatter.formatGBP(item.price)
+      })),
       pagination: {
-        total_items: totalCount,
-        total_pages: totalPages,
-        current_page: page || 1,
-        items_per_page: limit || totalCount
+        currentPage: page,
+        totalPages,
+        totalItems,
+        hasMore: page < totalPages
       }
     };
   } catch (error) {
-    console.error('Error in getCoinPriceHistory:', error);
-    throw error;
-  }
-};
-
-// Time range options for market history
-const TIME_RANGES = {
-  '10M': '10 minutes',
-  '30M': '30 minutes',
-  '1H': '1 hour',
-  '24H': '24 hours'
-};
-
-exports.getMarketHistory = async (timeRange = '30M') => {
-  try {
-    console.log('Starting getMarketHistory with timeRange:', timeRange);
-    
-    // Validate time range
-    if (!TIME_RANGES[timeRange]) {
-      throw new Error(`Invalid time range. Must be one of: ${Object.keys(TIME_RANGES).join(', ')}`);
-    }
-    
-    // Base query for market snapshots with time range filter
-    const snapshotsQuery = `
-      WITH market_snapshots AS (
-        SELECT 
-          ph.created_at,
-          SUM(ph.price * c.circulating_supply) as total_market_value,
-          array_agg(json_build_object(
-            'coin_id', c.coin_id,
-            'symbol', c.symbol,
-            'price', ph.price,
-            'market_cap', (ph.price * c.circulating_supply)
-          )) as coin_data
-        FROM price_history ph
-        JOIN coins c ON ph.coin_id = c.coin_id
-        WHERE ph.created_at >= NOW() - INTERVAL '${TIME_RANGES[timeRange]}'
-        GROUP BY ph.created_at
-        ORDER BY ph.created_at DESC
-      ),
-      period_stats AS (
-        SELECT 
-          MAX(total_market_value) as period_high,
-          MIN(total_market_value) as period_low,
-          AVG(total_market_value) as period_average,
-          (
-            SELECT total_market_value 
-            FROM market_snapshots 
-            ORDER BY created_at DESC 
-            LIMIT 1
-          ) as current_value,
-          COUNT(*) as data_points
-        FROM market_snapshots
-      )
-      SELECT 
-        ps.*,
-        json_agg(
-          json_build_object(
-            'timestamp', TO_CHAR(ms.created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
-            'total_market_value', ms.total_market_value,
-            'coins', ms.coin_data
-          ) ORDER BY ms.created_at DESC
-        ) as history
-      FROM period_stats ps, market_snapshots ms
-      GROUP BY ps.period_high, ps.period_low, ps.period_average, ps.current_value, ps.data_points`;
-    
-    const result = await db.query(snapshotsQuery);
-    
-    const response = {
-      timeRange,
-      interval: TIME_RANGES[timeRange],
-      stats: {
-        period_high: result.rows[0].period_high,
-        period_low: result.rows[0].period_low,
-        period_average: result.rows[0].period_average,
-        current_value: result.rows[0].current_value,
-        data_points: result.rows[0].data_points
-      },
-      history: result.rows[0].history
-    };
-    
-    console.log('Successfully retrieved market history');
-    return response;
-  } catch (error) {
-    console.error('Error in getMarketHistory:', error);
-    throw error;
+    console.error('DEBUG: Error in getCoinPriceHistory:', error);
+    throw error; // Re-throw to be handled by controller
   }
 };

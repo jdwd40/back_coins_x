@@ -26,13 +26,7 @@
     "pg-format": "^1.0.4"
   },
   "devDependencies": {
-    "jest": "^27.5.1",
     "nodemon": "^2.0.15",
     "supertest": "^6.2.2"
-  },
-  "jest": {
-    "setupFilesAfterEnv": [
-      "./jest.setup.js"
-    ]
   }
 }

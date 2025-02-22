@@ -1,6 +1,7 @@
 const db = require('../db/connection');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
+const logger = require('../utils/logger');
 
 exports.createUser = async (username, email, password) => {
   const hashedPassword = await bcrypt.hash(password, 10);
