@@ -164,7 +164,7 @@ const updatePrice = async (req, res) => {
 const getPriceHistory = async (req, res, next) => {
   try {
     const { coin_id } = req.params;
-    const { page = 1, limit = 10 } = req.query;
+    const { page = 1, limit = 10, range = '30M' } = req.query;
 
     // Validate coin_id
     const numericId = parseInt(coin_id);
@@ -184,13 +184,21 @@ const getPriceHistory = async (req, res, next) => {
       return res.status(400).json({ msg: 'Limit must be a positive integer between 1 and 100' });
     }
 
+    // Validate range parameter
+    const validRanges = ['10M', '30M', '1H', '2H', '12H', '24H', 'ALL'];
+    if (!validRanges.includes(range)) {
+      return res.status(400).json({ 
+        msg: `Invalid range parameter. Must be one of: ${validRanges.join(', ')}` 
+      });
+    }
+
     // Check if coin exists first
     const coin = await coinsModel.selectCoinById(numericId);
     if (!coin) {
       return res.status(404).json({ msg: 'Coin not found' });
     }
     
-    const priceHistory = await coinsModel.getCoinPriceHistory(numericId, pageNum, limitNum);
+    const priceHistory = await coinsModel.getCoinPriceHistory(numericId, pageNum, limitNum, range);
     res.status(200).json(priceHistory);
   } catch (error) {
     logger.error('Error in getPriceHistory:', error);

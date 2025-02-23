@@ -13,6 +13,17 @@ const COIN_FIELDS = [
   'founder'
 ].join(', ');
 
+// Time range definitions in milliseconds
+const TIME_RANGES = {
+  '10M': 10 * 60 * 1000,        // 10 minutes in ms
+  '30M': 30 * 60 * 1000,        // 30 minutes in ms
+  '1H': 60 * 60 * 1000,         // 1 hour in ms
+  '2H': 2 * 60 * 60 * 1000,     // 2 hours in ms
+  '12H': 12 * 60 * 60 * 1000,   // 12 hours in ms
+  '24H': 24 * 60 * 60 * 1000,   // 24 hours in ms
+  'ALL': null                    // No time limit
+};
+
 /**
  * Format coin data for response
  */
@@ -243,12 +254,13 @@ exports.updateCoinPrice = async (coinId, numericPrice) => {
 /**
  * Get a coin's price history
  */
-exports.getCoinPriceHistory = async (coinId, page = 1, limit = 10) => {
-  console.log('DEBUG: Getting price history for:', { coinId, page, limit });
+exports.getCoinPriceHistory = async (coinId, page = 1, limit = 10, timeRange = '30M') => {
+  console.log('DEBUG: Getting price history for:', { coinId, page, limit, timeRange });
   
   try {
     const offset = (page - 1) * limit;
-    console.log('DEBUG: Calculated offset:', offset);
+    const timeRangeMs = TIME_RANGES[timeRange] || TIME_RANGES['30M'];
+    console.log('DEBUG: Calculated offset:', offset, 'timeRangeMs:', timeRangeMs);
 
     // First check if the price_history table exists
     const tableCheck = await db.query(`
@@ -264,8 +276,16 @@ exports.getCoinPriceHistory = async (coinId, page = 1, limit = 10) => {
       throw new Error('Price history table does not exist');
     }
 
+    // Build the time filter condition
+    const timeFilter = timeRangeMs ? `AND ph.created_at >= NOW() - INTERVAL '${timeRangeMs / 1000} seconds'` : '';
+
     const [countResult, dataResult] = await Promise.all([
-      db.query('SELECT COUNT(*) FROM price_history WHERE coin_id = $1::integer', [coinId]),
+      db.query(`
+        SELECT COUNT(*) 
+        FROM price_history ph
+        WHERE coin_id = $1::integer
+        ${timeFilter}
+      `, [coinId]),
       db.query(`
         SELECT 
           ph.price_history_id,
@@ -277,6 +297,7 @@ exports.getCoinPriceHistory = async (coinId, page = 1, limit = 10) => {
         FROM price_history ph
         JOIN coins c ON ph.coin_id = c.coin_id
         WHERE ph.coin_id = $1::integer
+        ${timeFilter}
         ORDER BY ph.created_at DESC
         LIMIT $2 OFFSET $3;
       `, [coinId, limit, offset])
