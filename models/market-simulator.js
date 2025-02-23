@@ -275,30 +275,35 @@ class MarketSimulator {
 
   // Update prices for all coins based on current market conditions
   async updateAllPrices() {
-    if (!this.isRunning) return;
-
     try {
       const result = await db.query('SELECT coin_id, current_price FROM coins');
       const coins = result.rows;
+      const updates = [];
+      let totalMarketValue = 0;
 
       for (const coin of coins) {
-        const currentPrice = parseFloat(coin.current_price);
-        const newPrice = this.calculateNewPrice(currentPrice, coin.coin_id);
-        
-        // Update current price in coins table and add to price history
-        await db.query(
+        const newPrice = this.calculateNewPrice(parseFloat(coin.current_price), coin.coin_id);
+        updates.push(db.query(
           'UPDATE coins SET current_price = $1 WHERE coin_id = $2',
           [newPrice, coin.coin_id]
-        );
+        ));
         
-        await db.query(
+        updates.push(db.query(
           'INSERT INTO price_history (coin_id, price) VALUES ($1, $2)',
           [coin.coin_id, newPrice]
-        );
-
-        // Only store last price in memory for calculations
-        this.lastPrices.set(coin.coin_id, newPrice);
+        ));
+        
+        totalMarketValue += newPrice;
       }
+
+      // Store the total market value and current trend
+      updates.push(db.query(
+        'INSERT INTO market_history (total_value, market_trend) VALUES ($1, $2)',
+        [totalMarketValue, this.currentCycle?.type || 'STABLE']
+      ));
+
+      await Promise.all(updates);
+      
     } catch (error) {
       logger.error('[MARKET] Error updating prices:', error);
     }
@@ -361,39 +366,31 @@ class MarketSimulator {
       const now = new Date();
       const timeFilter = timeRangeMs ? `AND created_at >= NOW() - INTERVAL '${timeRangeMs / 1000} seconds'` : '';
 
-      // Get market statistics including total value, highs, and lows
+      // Get market statistics from market_history table
       const marketStats = await db.query(`
         WITH current_market AS (
           SELECT SUM(current_price) as current_value
           FROM coins
           WHERE current_price > 0
         ),
-        market_history AS (
+        market_history_stats AS (
           SELECT 
-            DATE_TRUNC('minute', created_at) as timestamp,
-            SUM(price) as total_value
-          FROM (
-            SELECT DISTINCT ON (coin_id, DATE_TRUNC('minute', created_at))
-              coin_id, price, created_at
-            FROM price_history
-            WHERE 1=1 ${timeFilter}
-            ORDER BY coin_id, DATE_TRUNC('minute', created_at), created_at DESC
-          ) ph
-          GROUP BY DATE_TRUNC('minute', created_at)
+            MAX(total_value) as all_time_high,
+            MIN(total_value) as all_time_low,
+            (SELECT total_value 
+             FROM market_history 
+             WHERE created_at >= NOW() - INTERVAL '1 minute'
+             ORDER BY created_at DESC 
+             LIMIT 1) as latest_value
+          FROM market_history
+          WHERE 1=1 ${timeFilter}
         )
         SELECT 
           (SELECT current_value FROM current_market) as current_value,
-          COALESCE(MAX(total_value), 0) as all_time_high,
-          COALESCE(MIN(NULLIF(total_value, 0)), 0) as all_time_low,
-          COALESCE(
-            (SELECT total_value 
-             FROM market_history 
-             ORDER BY timestamp DESC 
-             LIMIT 1
-            ),
-            (SELECT current_value FROM current_market)
-          ) as latest_value
-        FROM market_history
+          COALESCE(all_time_high, 0) as all_time_high,
+          COALESCE(all_time_low, 0) as all_time_low,
+          COALESCE(latest_value, (SELECT current_value FROM current_market)) as latest_value
+        FROM market_history_stats
       `);
 
       // Get current market status

@@ -13,6 +13,7 @@ const seed = async (shouldEnd = false) => {
     // Drop existing tables and sequences
     await db.query(`
       DROP TABLE IF EXISTS "price_history" CASCADE;
+      DROP TABLE IF EXISTS "market_history" CASCADE;
       DROP TABLE IF EXISTS "transactions" CASCADE;
       DROP TABLE IF EXISTS "portfolios" CASCADE;
       DROP TABLE IF EXISTS "coins" CASCADE;
@@ -82,9 +83,16 @@ const seed = async (shouldEnd = false) => {
       );
 
       CREATE TABLE IF NOT EXISTS price_history (
-        history_id INTEGER PRIMARY KEY DEFAULT nextval('price_history_price_history_id_seq'),
+        price_history_id SERIAL PRIMARY KEY,
         coin_id INTEGER REFERENCES coins(coin_id) ON DELETE CASCADE,
-        price DECIMAL(18, 2) NOT NULL,
+        price DECIMAL(20, 2) NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE TABLE IF NOT EXISTS market_history (
+        id SERIAL PRIMARY KEY,
+        total_value DECIMAL(20, 2) NOT NULL,
+        market_trend VARCHAR(20) NOT NULL CHECK (market_trend IN ('STRONG_BOOM', 'MILD_BOOM', 'STRONG_BUST', 'MILD_BUST', 'STABLE')),
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
 

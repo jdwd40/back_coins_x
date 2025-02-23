@@ -177,7 +177,7 @@ exports.getCoinPriceHistory = async (coinId, page = 1, limit = 10) => {
       db.query('SELECT COUNT(*) FROM price_history WHERE coin_id = $1::integer', [coinId]),
       db.query(`
         SELECT 
-          ph.history_id as price_history_id,
+          ph.price_history_id,
           ph.coin_id,
           ph.price,
           ph.created_at as timestamp,

@@ -85,6 +85,29 @@ This document explains the structure and behavior of the Coins API endpoints for
 }
 ```
 
+### 5. Get Market Price History
+- **Endpoint**: `GET /api/market/price-history`
+- **Description**: Returns the overall market price history including total market value and trends.
+- **Query Parameters**:
+  - `timeRange` (optional): Time range for history data
+    - Options: '10M', '30M', '1H', '2H', '12H', '24H', 'ALL'
+    - Default: '30M'
+- **Response Format**:
+```json
+{
+  "history": [
+    {
+      "total_value": "422.54",
+      "market_trend": "STABLE",
+      "created_at": "2025-02-23T12:00:00.000Z",
+      "timestamp": 1740484800000
+    }
+  ],
+  "timeRange": "30M",
+  "count": 1
+}
+```
+
 ## Important Notes
 
 1. **Number Formatting**:
