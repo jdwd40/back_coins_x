@@ -107,6 +107,55 @@ const allTimeStats = await allTimeResponse.json();
 - `RUMOR_POSITIVE`: +1% price effect
 - `RUMOR_NEGATIVE`: -1% price effect
 
+## Market Price History Endpoint
+
+### GET /api/market/price-history
+
+Returns the overall market price history including total market value and trends.
+
+#### Query Parameters
+- `timeRange` (optional): Time range for history data
+  - Options: '10M', '30M', '1H', '2H', '12H', '24H', 'ALL'
+  - Default: '30M'
+
+#### Response Format
+```json
+{
+  "history": [
+    {
+      "total_value": number,
+      "market_trend": string,
+      "created_at": string,
+      "timestamp": number
+    }
+  ],
+  "timeRange": string,
+  "count": number
+}
+```
+
+#### Response Example
+```json
+{
+  "history": [
+    {
+      "total_value": 422.54,
+      "market_trend": "STABLE",
+      "created_at": "2025-02-23T12:00:00.000Z",
+      "timestamp": 1740484800000
+    },
+    {
+      "total_value": 425.30,
+      "market_trend": "MILD_BOOM",
+      "created_at": "2025-02-23T12:00:30.000Z",
+      "timestamp": 1740484830000
+    }
+  ],
+  "timeRange": "30M",
+  "count": 2
+}
+```
+
 ## Usage Example
 
 ```javascript
@@ -124,6 +173,13 @@ async function getMarketStats(timeRange = '30M') {
   return data;
 }
 
+// Fetch market price history
+async function getMarketPriceHistory(timeRange = '30M') {
+  const response = await fetch(`/api/market/price-history?timeRange=${timeRange}`);
+  const data = await response.json();
+  return data;
+}
+
 // Example usage with error handling
 try {
   const marketStatus = await getMarketStatus();
@@ -132,6 +188,9 @@ try {
   const marketStats = await getMarketStats();
   console.log('Total coins:', marketStats.marketStats.current_market_value);
   console.log('Active events:', marketStats.coins[0].activeEvents.length);
+  
+  const marketPriceHistory = await getMarketPriceHistory();
+  console.log('Market price history:', marketPriceHistory.history);
 } catch (error) {
   console.error('Error fetching market data:', error);
 }
