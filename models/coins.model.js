@@ -28,8 +28,80 @@ function formatCoinResponse(coin) {
  * Calculate price change percentage
  */
 function calculatePriceChange(oldPrice, newPrice) {
+  console.log('Calculating price change:', { oldPrice, newPrice });
   if (!oldPrice || oldPrice === 0) return 0;
-  return Number(((newPrice - oldPrice) / oldPrice * 100).toFixed(2));
+  const change = Number(((newPrice - oldPrice) / oldPrice * 100).toFixed(2));
+  console.log('Calculated change:', change);
+  return change;
+}
+
+/**
+ * Get the earliest price within the last 24 hours for a coin
+ */
+async function get24HourPriceChange(coinId) {
+  try {
+    const now = new Date();
+    const twentyFourHoursAgo = new Date(now - 24 * 60 * 60 * 1000);
+    console.log('Fetching prices for coin:', coinId, {
+      now: now.toISOString(),
+      twentyFourHoursAgo: twentyFourHoursAgo.toISOString()
+    });
+
+    // First get the current price
+    const currentPriceResult = await db.query(`
+      SELECT price, created_at
+      FROM price_history
+      WHERE coin_id = $1
+      ORDER BY created_at DESC
+      LIMIT 1
+    `, [coinId]);
+
+    console.log('Current price result:', currentPriceResult.rows[0]);
+
+    if (currentPriceResult.rows.length === 0) {
+      console.log('No current price found');
+      return 0;
+    }
+    const currentPrice = parseFloat(currentPriceResult.rows[0].price);
+
+    // Then get the price from ~24 hours ago
+    const oldPriceResult = await db.query(`
+      SELECT price, created_at
+      FROM price_history
+      WHERE coin_id = $1
+      AND created_at <= $2
+      ORDER BY created_at DESC
+      LIMIT 1
+    `, [coinId, twentyFourHoursAgo.toISOString()]);
+
+    console.log('Old price result:', oldPriceResult.rows[0]);
+
+    // If no old price found, try to get the earliest price
+    if (oldPriceResult.rows.length === 0) {
+      console.log('No 24h old price found, getting earliest price');
+      const earliestPriceResult = await db.query(`
+        SELECT price, created_at
+        FROM price_history
+        WHERE coin_id = $1
+        ORDER BY created_at ASC
+        LIMIT 1
+      `, [coinId]);
+
+      if (earliestPriceResult.rows.length === 0) {
+        console.log('No earliest price found');
+        return 0;
+      }
+      console.log('Using earliest price:', earliestPriceResult.rows[0]);
+      const oldPrice = parseFloat(earliestPriceResult.rows[0].price);
+      return calculatePriceChange(oldPrice, currentPrice);
+    }
+
+    const oldPrice = parseFloat(oldPriceResult.rows[0].price);
+    return calculatePriceChange(oldPrice, currentPrice);
+  } catch (error) {
+    console.error('Error calculating 24h price change:', error);
+    return 0;
+  }
 }
 
 /**
@@ -40,7 +112,20 @@ exports.selectAllCoins = async () => {
     SELECT ${COIN_FIELDS} FROM coins 
     ORDER BY coin_id ASC;
   `);
-  return result.rows.map(formatCoinResponse);
+
+  // Calculate 24h price change for each coin
+  const coinsWithPriceChange = await Promise.all(
+    result.rows.map(async (coin) => {
+      const priceChange = await get24HourPriceChange(coin.coin_id);
+      console.log(`Price change for coin ${coin.coin_id}:`, priceChange);
+      return {
+        ...coin,
+        price_change_24h: priceChange
+      };
+    })
+  );
+
+  return coinsWithPriceChange.map(formatCoinResponse);
 };
 
 /**
@@ -57,7 +142,13 @@ exports.selectCoinById = async (coinId) => {
     return null;
   }
 
-  return formatCoinResponse(result.rows[0]);
+  const coin = result.rows[0];
+  const priceChange = await get24HourPriceChange(coin.coin_id);
+  
+  return formatCoinResponse({
+    ...coin,
+    price_change_24h: priceChange
+  });
 };
 
 /**
@@ -180,7 +271,7 @@ exports.getCoinPriceHistory = async (coinId, page = 1, limit = 10) => {
           ph.price_history_id,
           ph.coin_id,
           ph.price,
-          ph.created_at as timestamp,
+          ph.created_at,
           c.name,
           c.symbol
         FROM price_history ph

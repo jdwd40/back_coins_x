@@ -6,4 +6,5 @@ export class MarketStatsDto {
   readonly allTimeLow: number;
   readonly currentValue: number;
   readonly marketTrend: string;
+  readonly priceChange24h: number;
 }
