@@ -376,7 +376,7 @@ class MarketSimulator {
         market_history_stats AS (
           SELECT 
             MAX(total_value) as all_time_high,
-            MIN(total_value) as all_time_low,
+            (SELECT MIN(total_value) FROM market_history) as all_time_low,
             (SELECT total_value 
              FROM market_history 
              WHERE created_at >= NOW() - INTERVAL '1 minute'
