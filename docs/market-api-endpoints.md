@@ -2,8 +2,9 @@
 
 ## Market Status Endpoint
 
-### GET /api/market/status
+api url address: https://jdwd40.com/api-2/
 
+### GET /api/market/status
 Returns the current market cycle and its effect on coin prices.
 
 #### Response Format
@@ -205,101 +206,104 @@ try {
 - The default time range of 30 minutes provides a good balance between detail and performance
 - Use the 'ALL' time range sparingly as it may return large amounts of data
 
+# Coins API Quick Reference
 
-## Market Price History Endpoint
+## Available Endpoints
 
-### GET /api/market/price-history
+### 1. List All Coins
+`GET /coins`
 
-Returns the overall market price history including total market value and trends.
-
-#### Query Parameters
-- `timeRange` (optional): Time range for history data
-  - Options: '10M', '30M', '1H', '2H', '12H', '24H', 'ALL'
-  - Default: '30M'
-
-#### Response Format
+Returns list of all coins with their current market data:
 ```json
 {
-  "history": [
+  "coins": [
     {
-      "total_value": number,
-      "market_trend": string,
-      "created_at": string,
-      "timestamp": number
+      "coin_id": 1,
+      "name": "Bitcoin",
+      "symbol": "BTC",
+      "current_price": 45000.00,
+      "market_cap": 800000000.00
     }
-  ],
-  "timeRange": string,
-  "count": number
+  ]
 }
 ```
 
-#### Response Example
+### 2. Get Single Coin
+`GET /coins/:coin_id`
+
+Returns detailed info for specific coin:
+```json
+{
+  "coin": {
+    "coin_id": 1,
+    "name": "Bitcoin",
+    "symbol": "BTC",
+    "current_price": 45000.00,
+    "market_cap": 800000000.00,
+    "circulating_supply": 19000000,
+    "price_change_24h": 2.5,
+    "founder": "Satoshi Nakamoto"
+  }
+}
+```
+
+### 3. Update Coin Price
+`PATCH /coins/:coin_id`
+
+Update a coin's price:
+```json
+// Request
+{
+  "price": 46000.00
+}
+```
+
+### 4. Get Coin Price History
+`GET /coins/:coin_id/history?page=1&limit=10`
+
+Returns paginated price history:
 ```json
 {
   "history": [
     {
-      "total_value": 422.54,
+      "price": 45000.00,
+      "timestamp": "2025-02-28T16:00:00Z",
+      "price_change_percentage": 1.2
+    }
+  ],
+  "pagination": {
+    "currentPage": 1,
+    "totalPages": 5,
+    "totalItems": 50,
+    "itemsPerPage": 10
+  }
+}
+```
+
+### 5. Get Market Price History
+`GET /api/market/price-history?timeRange=30M`
+
+Returns overall market history:
+```json
+{
+  "history": [
+    {
+      "total_value": "422.54",
       "market_trend": "STABLE",
       "created_at": "2025-02-23T12:00:00.000Z",
       "timestamp": 1740484800000
-    },
-    {
-      "total_value": 425.30,
-      "market_trend": "MILD_BOOM",
-      "created_at": "2025-02-23T12:00:30.000Z",
-      "timestamp": 1740484830000
     }
   ],
   "timeRange": "30M",
-  "count": 2
+  "count": 1
 }
 ```
 
-## Usage Example
-
-```javascript
-// Fetch market status
-async function getMarketStatus() {
-  const response = await fetch('/api/market/status');
-  const data = await response.json();
-  return data;
-}
-
-// Fetch market stats
-async function getMarketStats(timeRange = '30M') {
-  const response = await fetch(`/api/market/stats?timeRange=${timeRange}`);
-  const data = await response.json();
-  return data;
-}
-
-// Fetch market price history
-async function getMarketPriceHistory(timeRange = '30M') {
-  const response = await fetch(`/api/market/price-history?timeRange=${timeRange}`);
-  const data = await response.json();
-  return data;
-}
-
-// Example usage with error handling
-try {
-  const marketStatus = await getMarketStatus();
-  console.log('Current market cycle:', marketStatus.currentCycle.type);
-  
-  const marketStats = await getMarketStats();
-  console.log('Total coins:', marketStats.marketStats.current_market_value);
-  console.log('Active events:', marketStats.coins[0].activeEvents.length);
-  
-  const marketPriceHistory = await getMarketPriceHistory();
-  console.log('Market price history:', marketPriceHistory.history);
-} catch (error) {
-  console.error('Error fetching market data:', error);
-}
-```
-
-## Notes
-- All endpoints update every 5 seconds
-- Timestamps are in ISO 8601 format
-- Price history is filtered based on the selected time range
-- Base volatility is assigned per coin and remains relatively stable
-- Event durations vary by event type (7-45 seconds)
-- The default time range of 30 minutes provides a good balance between detail and performance
-- Use the 'ALL' time range sparingly as it may return large amounts of data
+## Time Range Options
+- 10M (10 minutes)
+- 30M (30 minutes)
+- 1H (1 hour)
+- 2H (2 hours)
+- 12H (12 hours)
+- 24H (24 hours)
+- ALL (All history)

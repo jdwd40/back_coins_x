@@ -375,13 +375,14 @@ class MarketSimulator {
         ),
         market_history_stats AS (
           SELECT 
-            MAX(total_value) as all_time_high,
+            (SELECT MAX(total_value) FROM market_history) as all_time_high,
             (SELECT MIN(total_value) FROM market_history) as all_time_low,
             (SELECT total_value 
              FROM market_history 
              WHERE created_at >= NOW() - INTERVAL '1 minute'
              ORDER BY created_at DESC 
-             LIMIT 1) as latest_value
+             LIMIT 1) as latest_value,
+            MAX(total_value) as period_high
           FROM market_history
           WHERE 1=1 ${timeFilter}
         )
@@ -389,7 +390,8 @@ class MarketSimulator {
           (SELECT current_value FROM current_market) as current_value,
           COALESCE(all_time_high, 0) as all_time_high,
           COALESCE(all_time_low, 0) as all_time_low,
-          COALESCE(latest_value, (SELECT current_value FROM current_market)) as latest_value
+          COALESCE(latest_value, (SELECT current_value FROM current_market)) as latest_value,
+          COALESCE(period_high, 0) as period_high
         FROM market_history_stats
       `);
 
@@ -401,6 +403,7 @@ class MarketSimulator {
         allTimeHigh: parseFloat(marketStats.rows[0].all_time_high) || 0,
         allTimeLow: parseFloat(marketStats.rows[0].all_time_low) || 0,
         latestValue: parseFloat(marketStats.rows[0].latest_value) || 0,
+        periodHigh: parseFloat(marketStats.rows[0].period_high) || 0,
         status: marketStatus.status || 'STOPPED',
         currentCycle: marketStatus.currentCycle || { type: 'NONE', timeRemaining: '00:00:00' },
         events: marketStatus.events || [],
