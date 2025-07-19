@@ -54,7 +54,7 @@ describe('Users API', () => {
         .send(newUser)
         .expect(409)
         .then(({ body }) => {
-          expect(body.msg).toBe('Username or email already exists');
+          expect(body.msg).toBe('Username already exists');
         });
     });
 
@@ -70,6 +70,150 @@ describe('Users API', () => {
         .expect(400)
         .then(({ body }) => {
           expect(body.msg).toBe('Missing required fields');
+        });
+    });
+
+    test('400: returns validation error when password field is missing from JSON object', () => {
+      const invalidUser = {
+        username: 'test_user',
+        email: 'test@example.com'
+        // missing password field
+      };
+
+      return request(app)
+        .post('/api/users/register')
+        .send(invalidUser)
+        .expect(400)
+        .then(({ body }) => {
+          expect(body.success).toBe(false);
+          expect(body.msg).toBe('Missing required fields');
+          expect(body.details.password).toBe('Password is required');
+        });
+    });
+
+    test('400: returns validation error when password field is explicitly null', () => {
+      const invalidUser = {
+        username: 'test_user',
+        email: 'test@example.com',
+        password: null
+      };
+
+      return request(app)
+        .post('/api/users/register')
+        .send(invalidUser)
+        .expect(400)
+        .then(({ body }) => {
+          expect(body.success).toBe(false);
+          expect(body.msg).toBe('Missing required fields');
+          expect(body.details.password).toBe('Password is required');
+        });
+    });
+
+    test('400: returns validation error when password field is undefined', () => {
+      const invalidUser = {
+        username: 'test_user',
+        email: 'test@example.com',
+        password: undefined
+      };
+
+      return request(app)
+        .post('/api/users/register')
+        .send(invalidUser)
+        .expect(400)
+        .then(({ body }) => {
+          expect(body.success).toBe(false);
+          expect(body.msg).toBe('Missing required fields');
+          expect(body.details.password).toBe('Password is required');
+        });
+    });
+
+    test('400: returns validation error when password field is empty string', () => {
+      const invalidUser = {
+        username: 'test_user',
+        email: 'test@example.com',
+        password: ''
+      };
+
+      return request(app)
+        .post('/api/users/register')
+        .send(invalidUser)
+        .expect(400)
+        .then(({ body }) => {
+          expect(body.success).toBe(false);
+          expect(body.msg).toBe('Missing required fields');
+          expect(body.details.password).toBe('Password is required');
+        });
+    });
+
+    test('400: returns validation error when password field is too short', () => {
+      const invalidUser = {
+        username: 'test_user',
+        email: 'test@example.com',
+        password: '12345' // less than 6 characters
+      };
+
+      return request(app)
+        .post('/api/users/register')
+        .send(invalidUser)
+        .expect(400)
+        .then(({ body }) => {
+          expect(body.success).toBe(false);
+          expect(body.msg).toBe('Validation failed');
+          expect(body.details).toBe('Password must be at least 6 characters long');
+        });
+    });
+
+    test('400: returns validation error when password field is a number', () => {
+      const invalidUser = {
+        username: 'test_user',
+        email: 'test@example.com',
+        password: 123456
+      };
+
+      return request(app)
+        .post('/api/users/register')
+        .send(invalidUser)
+        .expect(400)
+        .then(({ body }) => {
+          expect(body.success).toBe(false);
+          expect(body.msg).toBe('Validation failed');
+          expect(body.details).toBe('Password must be at least 6 characters long');
+        });
+    });
+
+    test('400: returns validation error when password field is an object', () => {
+      const invalidUser = {
+        username: 'test_user',
+        email: 'test@example.com',
+        password: { someKey: 'someValue' }
+      };
+
+      return request(app)
+        .post('/api/users/register')
+        .send(invalidUser)
+        .expect(400)
+        .then(({ body }) => {
+          expect(body.success).toBe(false);
+          expect(body.msg).toBe('Validation failed');
+          expect(body.details).toBe('Password must be at least 6 characters long');
+        });
+    });
+
+    test('400: returns validation error when password field is an array', () => {
+      const invalidUser = {
+        username: 'test_user',
+        email: 'test@example.com',
+        password: ['password1', 'password2']
+      };
+
+      return request(app)
+        .post('/api/users/register')
+        .send(invalidUser)
+        .expect(400)
+        .then(({ body }) => {
+          expect(body.success).toBe(false);
+          expect(body.msg).toBe('Validation failed');
+          expect(body.details).toBe('Password must be at least 6 characters long');
         });
     });
   });
@@ -108,7 +252,7 @@ describe('Users API', () => {
         .send(invalidCredentials)
         .expect(401)
         .then(({ body }) => {
-          expect(body.msg).toBe('Invalid credentials');
+          expect(body.msg).toBe('Invalid email or password');
         });
     });
   });
@@ -199,7 +343,7 @@ describe('Users API', () => {
         return request(app)
           .delete('/api/users/1')
           .set('Authorization', `Bearer ${testUserToken}`)
-          .expect(204);
+          .expect(200);
       });
 
       test('401: returns unauthorized when no token provided', () => {

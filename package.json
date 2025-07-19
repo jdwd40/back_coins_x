@@ -6,8 +6,8 @@
   "scripts": {
     "setup-dbs": "node setup-dbs.js",
     "setup-dev": "node setup-dev.js",
-    "test": "NODE_ENV=test jest --runInBand",
-    "test-watch": "NODE_ENV=test jest --watch --runInBand",
+    "test": "NODE_ENV=test npx jest --runInBand",
+    "test-watch": "NODE_ENV=test npx jest --watch --runInBand",
     "start": "NODE_OPTIONS='--max-old-space-size=512' node server.js",
     "dev": "NODE_OPTIONS='--max-old-space-size=512' nodemon server.js",
     "seed": "node db/seed.js",
@@ -26,6 +26,7 @@
     "pg-format": "^1.0.4"
   },
   "devDependencies": {
+    "jest": "^30.0.4",
     "nodemon": "^2.0.15",
     "supertest": "^6.2.2"
   }

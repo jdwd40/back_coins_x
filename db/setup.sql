@@ -1,0 +1,2 @@
+CREATE DATABASE coins;
+CREATE DATABASE coins_test;
