@@ -7,8 +7,8 @@ exports.insertTransaction = async (user_id, coin_id, type, amount, price_at_tran
   }
 
   // Ensure type is either 'buy' or 'sell'
-  const normalizedType = type.toLowerCase();
-  if (!['buy', 'sell'].includes(normalizedType)) {
+  const normalizedType = type.toUpperCase();
+  if (!['BUY', 'SELL'].includes(normalizedType)) {
     throw new Error('Invalid transaction type');
   }
 
@@ -25,7 +25,7 @@ exports.insertTransaction = async (user_id, coin_id, type, amount, price_at_tran
          quantity,
          price,
          total_amount,
-         transaction_date`,
+         created_at`,
       [user_id, coin_id, normalizedType, amount, price_at_transaction, amount * price_at_transaction]
     );
     
@@ -43,16 +43,16 @@ exports.selectUserTransactions = async (user_id) => {
          t.user_id,
          t.coin_id,
          c.name as coin_name,
-         c.symbol as coin_symbol,
+         c.symbol,
          t.type,
          t.quantity,
          t.price,
          t.total_amount,
-         t.transaction_date
+         t.created_at
        FROM transactions t
        JOIN coins c ON t.coin_id = c.coin_id
        WHERE t.user_id = $1
-       ORDER BY t.transaction_date DESC`,
+       ORDER BY t.created_at DESC`,
       [user_id]
     );
     
@@ -70,12 +70,12 @@ exports.selectTransactionById = async (transaction_id) => {
          t.user_id,
          t.coin_id,
          c.name as coin_name,
-         c.symbol as coin_symbol,
+         c.symbol,
          t.type,
          t.quantity,
          t.price,
          t.total_amount,
-         t.transaction_date
+         t.created_at
        FROM transactions t
        JOIN coins c ON t.coin_id = c.coin_id
        WHERE t.transaction_id = $1`,

@@ -28,9 +28,10 @@ CREATE TABLE Transactions (
     transaction_id SERIAL PRIMARY KEY,
     user_id INT REFERENCES Users(user_id) ON DELETE CASCADE,
     coin_id INT REFERENCES Coins(coin_id) ON DELETE CASCADE,
-    type VARCHAR(10) CHECK (type IN ('buy', 'sell')) NOT NULL,
-    amount DECIMAL(18, 2) NOT NULL,
-    price_at_transaction DECIMAL(18, 2) NOT NULL,
+    type VARCHAR(10) CHECK (type IN ('BUY', 'SELL', 'buy', 'sell')) NOT NULL,
+    quantity DECIMAL(18, 2) NOT NULL,
+    price DECIMAL(18, 2) NOT NULL,
+    total_amount DECIMAL(18, 2) NOT NULL,
     transaction_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 

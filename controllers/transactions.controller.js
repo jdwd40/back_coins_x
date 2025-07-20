@@ -12,9 +12,9 @@ const { getUserBalance } = require('../models/users.model');
 
 exports.createTransaction = async (req, res, next) => {
   try {
-    const { user_id, coin_id, type, amount } = req.body;
+    const { user_id, coin_id, type, amount, price_at_transaction } = req.body;
     
-    if (!user_id || !coin_id || !type || !amount) {
+    if (!user_id || !coin_id || !type || !amount || !price_at_transaction) {
       return res.status(400).json({ msg: 'Missing required fields' });
     }
 
@@ -32,8 +32,38 @@ exports.createTransaction = async (req, res, next) => {
       return res.status(400).json({ msg: 'Amount must be greater than 0' });
     }
 
-    const transaction = await insertTransaction(user_id, coin_id, type, amount);
-    res.status(201).json(transaction);
+    // Validate price
+    if (price_at_transaction <= 0) {
+      return res.status(400).json({ msg: 'Price must be greater than 0' });
+    }
+
+    // Check if coin exists
+    const coin = await selectCoinById(coin_id);
+    if (!coin) {
+      return res.status(404).json({ msg: 'Coin not found' });
+    }
+
+    // For SELL transactions, check if user has sufficient balance
+    if (type.toUpperCase() === 'SELL') {
+      const userTransactions = await selectUserTransactions(user_id);
+      const coinTransactions = userTransactions.filter(t => t.coin_id === coin_id);
+      
+      let totalBalance = 0;
+      for (const t of coinTransactions) {
+        if (t.type === 'BUY') {
+          totalBalance += parseFloat(t.quantity);
+        } else if (t.type === 'SELL') {
+          totalBalance -= parseFloat(t.quantity);
+        }
+      }
+      
+      if (totalBalance < amount) {
+        return res.status(400).json({ msg: 'Insufficient balance for this transaction' });
+      }
+    }
+
+    const transaction = await insertTransaction(user_id, coin_id, type, amount, price_at_transaction);
+    res.status(201).json({ transaction });
   } catch (err) {
     next(err);
   }
@@ -41,8 +71,13 @@ exports.createTransaction = async (req, res, next) => {
 
 exports.getUserTransactions = async (req, res, next) => {
   try {
+    // Check if the authenticated user matches the user_id in the request
+    if (req.user.user_id !== parseInt(req.params.user_id)) {
+      return res.status(401).json({ msg: 'Unauthorized' });
+    }
+
     const transactions = await selectUserTransactions(req.params.user_id);
-    res.status(200).json(transactions);
+    res.status(200).json({ transactions });
   } catch (err) {
     next(err);
   }
@@ -62,8 +97,13 @@ exports.getTransactionById = async (req, res, next) => {
 
 exports.getPortfolioByUserId = async (req, res, next) => {
   try {
+    // Check if the authenticated user matches the user_id in the request
+    if (req.user.user_id !== parseInt(req.params.user_id)) {
+      return res.status(401).json({ msg: 'Unauthorized' });
+    }
+
     const portfolio = await selectUserPortfolio(req.params.user_id);
-    res.status(200).json(portfolio);
+    res.status(200).json({ portfolio });
   } catch (err) {
     next(err);
   }
