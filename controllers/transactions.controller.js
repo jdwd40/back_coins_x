@@ -8,7 +8,7 @@ const {
   processSellTransaction
 } = require('../models/transactions.model');
 const { selectCoinById } = require('../models/coins.model');
-const { getUserBalance } = require('../models/users.model');
+const { getUserFunds } = require('../models/users.model');
 
 exports.createTransaction = async (req, res, next) => {
   try {
@@ -102,8 +102,16 @@ exports.getPortfolioByUserId = async (req, res, next) => {
       return res.status(401).json({ msg: 'Unauthorized' });
     }
 
-    const portfolio = await selectUserPortfolio(req.params.user_id);
-    res.status(200).json({ portfolio });
+    const user_id = parseInt(req.params.user_id);
+    const [portfolio, userFunds] = await Promise.all([
+      selectUserPortfolio(user_id),
+      getUserFunds(user_id)
+    ]);
+    
+    res.status(200).json({ 
+      portfolio,
+      user_funds: userFunds
+    });
   } catch (err) {
     next(err);
   }
