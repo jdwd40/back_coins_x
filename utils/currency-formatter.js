@@ -3,15 +3,24 @@
  */
 class CurrencyFormatter {
   /**
-   * Format a number with 2 decimal places
+   * Format a number as GBP currency string
    * @param {number} value - The number to format
-   * @returns {number} Formatted number with 2 decimal places
+   * @returns {string} Formatted currency string (e.g., "£123.45" or "£1,234.56")
    */
   static formatGBP(value) {
     if (value === null || value === undefined) {
-      return 0.00;
+      return '£0.00';
     }
-    return Number(Number(value).toFixed(2));
+    const num = Number(value);
+    if (isNaN(num)) {
+      return '£0.00';
+    }
+    
+    // Format with comma separators if >= 1000
+    const formatted = num.toFixed(2);
+    const parts = formatted.split('.');
+    parts[0] = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+    return '£' + parts.join('.');
   }
 
   /**

@@ -1,16 +1,17 @@
 const request = require('supertest');
 const app = require('../app');
-const { db } = require('../db/connection');
+const db = require('../db/connection');
 const jwt = require('jsonwebtoken');
+const seed = require('../db/seed');
 
 describe('User Funds Management', () => {
   let testUser;
   let authToken;
 
-  beforeAll(async () => {
-    // Create a test user
+  beforeEach(async () => {
+    // Create a test user (jest.setup.js seeds before each test)
     const userResult = await db.query(
-      'INSERT INTO Users (username, email, password_hash, funds) VALUES ($1, $2, $3, $4) RETURNING *',
+      'INSERT INTO users (username, email, password_hash, funds) VALUES ($1, $2, $3, $4) RETURNING *',
       ['testuser', 'test@example.com', 'hashedpassword', 1000.00]
     );
     testUser = userResult.rows[0];
@@ -23,8 +24,6 @@ describe('User Funds Management', () => {
   });
 
   afterAll(async () => {
-    // Clean up test user
-    await db.query('DELETE FROM Users WHERE user_id = $1', [testUser.user_id]);
     await db.end();
   });
 
@@ -36,8 +35,9 @@ describe('User Funds Management', () => {
         .send({ amount: 500 });
 
       expect(response.status).toBe(200);
-      expect(response.body.funds).toBe('1500.00');
-      expect(response.body.user_id).toBe(testUser.user_id);
+      expect(response.body.success).toBe(true);
+      expect(parseFloat(response.body.user.funds)).toBe(1500.00);
+      expect(response.body.user.user_id).toBe(testUser.user_id);
     });
 
     test('should successfully subtract funds from user account', async () => {
@@ -47,7 +47,8 @@ describe('User Funds Management', () => {
         .send({ amount: -200 });
 
       expect(response.status).toBe(200);
-      expect(response.body.funds).toBe('1300.00');
+      expect(response.body.success).toBe(true);
+      expect(parseFloat(response.body.user.funds)).toBe(800.00);
     });
 
     test('should not allow funds to go below 0', async () => {
@@ -57,7 +58,8 @@ describe('User Funds Management', () => {
         .send({ amount: -2000 });
 
       expect(response.status).toBe(400);
-      expect(response.body.error).toBe('Insufficient funds');
+      expect(response.body.success).toBe(false);
+      expect(response.body.msg).toBe('Insufficient funds');
     });
 
     test('should reject invalid amount formats', async () => {
@@ -67,7 +69,8 @@ describe('User Funds Management', () => {
         .send({ amount: 'invalid' });
 
       expect(response.status).toBe(400);
-      expect(response.body.error).toBe('Invalid amount provided');
+      expect(response.body.success).toBe(false);
+      expect(response.body.msg).toBe('Invalid amount provided');
     });
 
     test('should require authentication', async () => {

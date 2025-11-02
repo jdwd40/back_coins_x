@@ -55,7 +55,7 @@ const seed = async (shouldEnd = false) => {
         current_price DECIMAL(18, 2) NOT NULL,
         market_cap DECIMAL(18, 2) NOT NULL,
         circulating_supply INT NOT NULL,
-        price_change_24h DECIMAL(5, 2),
+        price_change_24h DECIMAL(10, 2),
         founder VARCHAR(50) NOT NULL,
         date_added TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
@@ -86,7 +86,7 @@ const seed = async (shouldEnd = false) => {
         price_history_id SERIAL PRIMARY KEY,
         coin_id INTEGER REFERENCES coins(coin_id) ON DELETE CASCADE,
         price DECIMAL(20, 2) NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
       );
 
       CREATE TABLE IF NOT EXISTS market_history (
@@ -113,8 +113,17 @@ const seed = async (shouldEnd = false) => {
       CREATE INDEX IF NOT EXISTS idx_transactions_coin_id ON transactions(coin_id);
       CREATE INDEX IF NOT EXISTS idx_portfolios_user_id ON portfolios(user_id);
       CREATE INDEX IF NOT EXISTS idx_portfolios_coin_id ON portfolios(coin_id);
-      CREATE INDEX IF NOT EXISTS idx_price_history_coin_id ON price_history(coin_id);
-      CREATE INDEX IF NOT EXISTS idx_price_history_created_at ON price_history(created_at);
+      -- Phase 1 improvement: Use covering index for price_history
+      CREATE INDEX IF NOT EXISTS idx_price_history_covering ON price_history(coin_id, created_at DESC) INCLUDE (price);
+    `);
+
+    // Create cleanup function for price history (Phase 1 improvement)
+    await db.query(`
+      CREATE OR REPLACE FUNCTION cleanup_price_history() RETURNS void AS $$
+      BEGIN
+          DELETE FROM price_history WHERE created_at < NOW() - INTERVAL '7 days';
+      END;
+      $$ LANGUAGE plpgsql;
     `);
 
     console.log('📦 Inserting coins data...');

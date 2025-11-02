@@ -31,7 +31,9 @@ function formatCoinResponse(coin) {
   return {
     ...coin,
     current_price: CurrencyFormatter.formatGBP(coin.current_price),
-    market_cap: CurrencyFormatter.formatGBP(coin.market_cap)
+    market_cap: CurrencyFormatter.formatGBP(coin.market_cap),
+    // Convert price_change_24h from string to number (PostgreSQL NUMERIC returns as string)
+    price_change_24h: coin.price_change_24h === null ? null : Number(coin.price_change_24h)
   };
 }
 
@@ -71,7 +73,7 @@ async function get24HourPriceChange(coinId) {
 
     if (currentPriceResult.rows.length === 0) {
       console.log('No current price found');
-      return 0;
+      return null;
     }
     const currentPrice = parseFloat(currentPriceResult.rows[0].price);
 
@@ -100,7 +102,7 @@ async function get24HourPriceChange(coinId) {
 
       if (earliestPriceResult.rows.length === 0) {
         console.log('No earliest price found');
-        return 0;
+        return null;
       }
       console.log('Using earliest price:', earliestPriceResult.rows[0]);
       const oldPrice = parseFloat(earliestPriceResult.rows[0].price);
@@ -111,32 +113,70 @@ async function get24HourPriceChange(coinId) {
     return calculatePriceChange(oldPrice, currentPrice);
   } catch (error) {
     console.error('Error calculating 24h price change:', error);
-    return 0;
+    return null;
   }
 }
 
 /**
  * Select all coins from the database
+ * Fixed N+1 query problem by using a single query with CTEs
  */
 exports.selectAllCoins = async () => {
   const result = await db.query(`
-    SELECT ${COIN_FIELDS} FROM coins 
-    ORDER BY coin_id ASC;
+    WITH latest_prices AS (
+      SELECT DISTINCT ON (coin_id)
+        coin_id,
+        price AS current_price,
+        created_at
+      FROM price_history
+      ORDER BY coin_id, created_at DESC
+    ),
+    old_prices_24h AS (
+      SELECT DISTINCT ON (coin_id)
+        coin_id,
+        price AS old_price
+      FROM price_history
+      WHERE created_at <= NOW() - INTERVAL '24 hours'
+      ORDER BY coin_id, created_at DESC
+    ),
+    earliest_prices AS (
+      SELECT DISTINCT ON (coin_id)
+        coin_id,
+        price AS earliest_price
+      FROM price_history
+      ORDER BY coin_id, created_at ASC
+    )
+    SELECT 
+      c.coin_id,
+      c.name,
+      c.symbol,
+      c.current_price,
+      c.market_cap,
+      c.circulating_supply,
+      c.price_change_24h,
+      c.founder,
+      CASE 
+        WHEN lp.current_price IS NULL OR (op.old_price IS NULL AND ep.earliest_price IS NULL) THEN NULL
+        ELSE ROUND(((lp.current_price - COALESCE(op.old_price, ep.earliest_price)) / 
+                    NULLIF(COALESCE(op.old_price, ep.earliest_price), 0) * 100)::numeric, 2)
+      END AS calculated_price_change_24h
+    FROM coins c
+    LEFT JOIN latest_prices lp ON c.coin_id = lp.coin_id
+    LEFT JOIN old_prices_24h op ON c.coin_id = op.coin_id
+    LEFT JOIN earliest_prices ep ON c.coin_id = ep.coin_id
+    ORDER BY c.coin_id ASC;
   `);
 
-  // Calculate 24h price change for each coin
-  const coinsWithPriceChange = await Promise.all(
-    result.rows.map(async (coin) => {
-      const priceChange = await get24HourPriceChange(coin.coin_id);
-      console.log(`Price change for coin ${coin.coin_id}:`, priceChange);
-      return {
-        ...coin,
-        price_change_24h: priceChange
-      };
-    })
-  );
-
-  return coinsWithPriceChange.map(formatCoinResponse);
+  // Use the calculated price change and format response
+  return result.rows.map(coin => {
+    // Convert calculated_price_change_24h from string to number or null
+    const priceChange = coin.calculated_price_change_24h === null ? null : Number(coin.calculated_price_change_24h);
+    console.log(`Price change for coin ${coin.coin_id}:`, priceChange);
+    return formatCoinResponse({
+      ...coin,
+      price_change_24h: priceChange
+    });
+  });
 };
 
 /**
