@@ -1,5 +1,6 @@
 const db = require('../db/connection');
 const logger = require('../utils/logger');
+const rollupService = require('../services/rollup-service');
 
 // Market cycle types with more balanced effects
 const MARKET_CYCLES = {
@@ -147,6 +148,10 @@ class MarketSimulator {
       await this.startNewMarketCycle();
       this.isRunning = true;
       this.startPriceUpdates();
+      
+      // Start rollup service for aggregated price history
+      rollupService.start();
+      
       logger.log('[MARKET] Successfully started');
     } catch (error) {
       logger.error('[MARKET] Failed to start:', error);
@@ -168,6 +173,9 @@ class MarketSimulator {
       clearTimeout(this.cycleTimeout);
       this.cycleTimeout = null;
     }
+    
+    // Stop rollup service
+    rollupService.stop();
     
     logger.log('[MARKET] Simulation stopped');
   }

@@ -381,3 +381,84 @@ exports.getCoinPriceHistory = async (coinId, page = 1, limit = 10, timeRange = '
     throw error; // Re-throw to be handled by controller
   }
 };
+
+/**
+ * Get price history v2 - Returns aggregated OHLC data from rollups or raw data
+ * Phase 2 & 3 implementation
+ * @param {Object} params - Query parameters
+ * @param {number} params.coinId - Coin ID
+ * @param {string} params.interval - Time interval: 'raw', '1m', '5m', '15m', '1h'
+ * @param {number} params.minutes - How many minutes of data to retrieve (1-10080)
+ * @param {string} params.format - Response format: 'ohlc' or 'line'
+ * @returns {Object} Chart-ready price history data
+ */
+exports.getPriceHistoryV2 = async ({ coinId, interval, minutes, format }) => {
+  try {
+    let query, params;
+
+    if (interval === 'raw') {
+      // Query raw ticks for high-resolution real-time data
+      query = `
+        SELECT 
+          created_at AS t, 
+          price AS c
+        FROM price_history
+        WHERE coin_id = $1 
+          AND created_at >= NOW() - INTERVAL '${minutes} minutes'
+        ORDER BY created_at ASC
+      `;
+      params = [coinId];
+    } else {
+      // Query pre-computed rollups for aggregated candles
+      query = `
+        SELECT 
+          bucket_start AS t, 
+          open AS o, 
+          high AS h, 
+          low AS l, 
+          close AS c, 
+          tick_count AS n
+        FROM price_history_rollups
+        WHERE coin_id = $1 
+          AND interval_type = $2
+          AND bucket_start >= NOW() - INTERVAL '${minutes} minutes'
+        ORDER BY bucket_start ASC
+      `;
+      params = [coinId, interval];
+    }
+
+    const result = await db.query(query, params);
+
+    // Get coin metadata (only once, not repeated per row)
+    const coin = await this.selectCoinById(coinId);
+
+    // Format response based on requested format
+    if (format === 'line') {
+      // Simplified line format: [[timestamp, close_price], ...]
+      return {
+        coin_id: coin.coin_id,
+        symbol: coin.symbol,
+        interval,
+        data: result.rows.map(row => [row.t, parseFloat(row.c)])
+      };
+    }
+
+    // Default OHLC format: [{t, o, h, l, c, n}, ...]
+    return {
+      coin_id: coin.coin_id,
+      symbol: coin.symbol,
+      interval,
+      data: result.rows.map(row => ({
+        t: row.t,
+        o: parseFloat(row.o || row.c), // For raw data, use close as open
+        h: parseFloat(row.h || row.c), // For raw data, use close as high
+        l: parseFloat(row.l || row.c), // For raw data, use close as low
+        c: parseFloat(row.c),
+        n: parseInt(row.n || 1) // For raw data, tick count is 1
+      }))
+    };
+  } catch (error) {
+    console.error('Error in getPriceHistoryV2:', error);
+    throw error;
+  }
+};

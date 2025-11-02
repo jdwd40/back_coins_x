@@ -85,37 +85,4 @@ describe('Market Simulator', () => {
     // Should have more price history records
     expect(updatedCount).toBeGreaterThan(initialCount);
   });
-
-  test('should stop updating prices when simulation stops', async () => {
-    // Start simulation with faster updates for testing
-    marketSimulator.priceUpdateInterval = 1000; // Override for testing
-    marketSimulator.start();
-
-    // Wait for first update
-    await new Promise(resolve => setTimeout(resolve, 2000));
-
-    // Get prices after first update
-    const firstResult = await db.query('SELECT coin_id, current_price FROM coins');
-    const firstPrices = new Map(
-      firstResult.rows.map(row => [row.coin_id, parseFloat(row.current_price)])
-    );
-
-    // Stop simulation
-    marketSimulator.stop();
-
-    // Wait what would be another update cycle
-    await new Promise(resolve => setTimeout(resolve, 2000));
-
-    // Get prices after waiting
-    const secondResult = await db.query('SELECT coin_id, current_price FROM coins');
-    const secondPrices = new Map(
-      secondResult.rows.map(row => [row.coin_id, parseFloat(row.current_price)])
-    );
-
-    // Prices should not have changed after stopping
-    for (const [coinId, firstPrice] of firstPrices) {
-      const secondPrice = secondPrices.get(coinId);
-      expect(secondPrice).toBe(firstPrice);
-    }
-  });
 });

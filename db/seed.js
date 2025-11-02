@@ -12,6 +12,7 @@ const seed = async (shouldEnd = false) => {
     console.log('📦 Dropping existing tables...');
     // Drop existing tables and sequences
     await db.query(`
+      DROP TABLE IF EXISTS "price_history_rollups" CASCADE;
       DROP TABLE IF EXISTS "price_history" CASCADE;
       DROP TABLE IF EXISTS "market_history" CASCADE;
       DROP TABLE IF EXISTS "transactions" CASCADE;
@@ -96,6 +97,18 @@ const seed = async (shouldEnd = false) => {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
 
+      CREATE TABLE IF NOT EXISTS price_history_rollups (
+        coin_id INT NOT NULL REFERENCES coins(coin_id) ON DELETE CASCADE,
+        interval_type VARCHAR(10) NOT NULL CHECK (interval_type IN ('1m', '5m', '15m', '1h')),
+        bucket_start TIMESTAMPTZ NOT NULL,
+        open NUMERIC(12, 4) NOT NULL,
+        high NUMERIC(12, 4) NOT NULL,
+        low NUMERIC(12, 4) NOT NULL,
+        close NUMERIC(12, 4) NOT NULL,
+        tick_count INT NOT NULL,
+        PRIMARY KEY (coin_id, interval_type, bucket_start)
+      );
+
       CREATE TABLE IF NOT EXISTS coin_statistics (
         stat_id SERIAL PRIMARY KEY,
         coin_id INTEGER REFERENCES coins(coin_id) ON DELETE CASCADE,
@@ -115,6 +128,8 @@ const seed = async (shouldEnd = false) => {
       CREATE INDEX IF NOT EXISTS idx_portfolios_coin_id ON portfolios(coin_id);
       -- Phase 1 improvement: Use covering index for price_history
       CREATE INDEX IF NOT EXISTS idx_price_history_covering ON price_history(coin_id, created_at DESC) INCLUDE (price);
+      -- Phase 2 improvement: Index for rollups
+      CREATE INDEX IF NOT EXISTS idx_rollups_coin_interval ON price_history_rollups(coin_id, interval_type, bucket_start DESC);
     `);
 
     // Create cleanup function for price history (Phase 1 improvement)
