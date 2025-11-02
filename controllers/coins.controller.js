@@ -258,12 +258,13 @@ const getPriceHistoryV2 = async (req, res, next) => {
       return res.status(404).json({ error: 'Coin not found' });
     }
 
-    // Fetch data
+    // Fetch data (pass coin metadata to avoid duplicate query)
     const result = await coinsModel.getPriceHistoryV2({
       coinId,
       interval,
       minutes: minutesNum,
-      format
+      format,
+      coinMetadata: coin
     });
 
     // Cache headers (30s for recent data)

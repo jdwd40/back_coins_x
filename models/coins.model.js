@@ -392,7 +392,7 @@ exports.getCoinPriceHistory = async (coinId, page = 1, limit = 10, timeRange = '
  * @param {string} params.format - Response format: 'ohlc' or 'line'
  * @returns {Object} Chart-ready price history data
  */
-exports.getPriceHistoryV2 = async ({ coinId, interval, minutes, format }) => {
+exports.getPriceHistoryV2 = async ({ coinId, interval, minutes, format, coinMetadata = null }) => {
   try {
     let query, params;
 
@@ -404,10 +404,10 @@ exports.getPriceHistoryV2 = async ({ coinId, interval, minutes, format }) => {
           price AS c
         FROM price_history
         WHERE coin_id = $1 
-          AND created_at >= NOW() - INTERVAL '${minutes} minutes'
+          AND created_at >= NOW() - ($2 || ' minutes')::INTERVAL
         ORDER BY created_at ASC
       `;
-      params = [coinId];
+      params = [coinId, minutes];
     } else {
       // Query pre-computed rollups for aggregated candles
       query = `
@@ -421,16 +421,16 @@ exports.getPriceHistoryV2 = async ({ coinId, interval, minutes, format }) => {
         FROM price_history_rollups
         WHERE coin_id = $1 
           AND interval_type = $2
-          AND bucket_start >= NOW() - INTERVAL '${minutes} minutes'
+          AND bucket_start >= NOW() - ($3 || ' minutes')::INTERVAL
         ORDER BY bucket_start ASC
       `;
-      params = [coinId, interval];
+      params = [coinId, interval, minutes];
     }
 
     const result = await db.query(query, params);
 
-    // Get coin metadata (only once, not repeated per row)
-    const coin = await this.selectCoinById(coinId);
+    // Use provided coin metadata or fetch if not provided (avoid duplicate query)
+    const coin = coinMetadata || await this.selectCoinById(coinId);
 
     // Format response based on requested format
     if (format === 'line') {
@@ -458,7 +458,8 @@ exports.getPriceHistoryV2 = async ({ coinId, interval, minutes, format }) => {
       }))
     };
   } catch (error) {
-    console.error('Error in getPriceHistoryV2:', error);
+    const logger = require('../utils/logger');
+    logger.error('Error in getPriceHistoryV2:', error);
     throw error;
   }
 };

@@ -1,6 +1,17 @@
 const db = require('../db/connection');
 const logger = require('../utils/logger');
 
+// Configuration constants
+const ROLLUP_INTERVALS = {
+  ONE_MINUTE: 60000,        // 1 minute in milliseconds
+  FIVE_MINUTES: 300000,     // 5 minutes in milliseconds
+  FIFTEEN_MINUTES: 900000,  // 15 minutes in milliseconds
+  ONE_HOUR: 3600000,        // 1 hour in milliseconds
+  CLEANUP: 21600000         // 6 hours in milliseconds
+};
+
+const INITIAL_ROLLUP_DELAY = 65000; // 65 seconds - wait for initial data accumulation
+
 /**
  * RollupService - Manages periodic aggregation of price history into rollup buckets
  * Computes OHLC (Open, High, Low, Close) candles for multiple time intervals
@@ -29,48 +40,48 @@ class RollupService {
     logger.log('[ROLLUP] Starting rollup service...');
     this.isRunning = true;
 
-    // Start 1-minute rollups (every 60 seconds)
+    // Start 1-minute rollups
     this.intervalIds['1m'] = setInterval(() => {
       this.compute1mRollups().catch(err => {
         logger.error('[ROLLUP] Error in 1m rollup:', err);
       });
-    }, 60000);
+    }, ROLLUP_INTERVALS.ONE_MINUTE);
 
-    // Start 5-minute rollups (every 5 minutes)
+    // Start 5-minute rollups
     this.intervalIds['5m'] = setInterval(() => {
       this.compute5mRollups().catch(err => {
         logger.error('[ROLLUP] Error in 5m rollup:', err);
       });
-    }, 300000);
+    }, ROLLUP_INTERVALS.FIVE_MINUTES);
 
-    // Start 15-minute rollups (every 15 minutes)
+    // Start 15-minute rollups
     this.intervalIds['15m'] = setInterval(() => {
       this.compute15mRollups().catch(err => {
         logger.error('[ROLLUP] Error in 15m rollup:', err);
       });
-    }, 900000);
+    }, ROLLUP_INTERVALS.FIFTEEN_MINUTES);
 
-    // Start 1-hour rollups (every hour)
+    // Start 1-hour rollups
     this.intervalIds['1h'] = setInterval(() => {
       this.compute1hRollups().catch(err => {
         logger.error('[ROLLUP] Error in 1h rollup:', err);
       });
-    }, 3600000);
+    }, ROLLUP_INTERVALS.ONE_HOUR);
 
-    // Start cleanup (every 6 hours)
+    // Start cleanup
     this.intervalIds['cleanup'] = setInterval(() => {
       this.cleanupOldRollups().catch(err => {
         logger.error('[ROLLUP] Error in cleanup:', err);
       });
-    }, 21600000); // 6 hours
+    }, ROLLUP_INTERVALS.CLEANUP);
 
-    // Run initial computations after 65 seconds (let some data accumulate)
+    // Run initial computations after delay (let some data accumulate)
     setTimeout(() => {
       if (this.isRunning) {
         logger.log('[ROLLUP] Running initial rollup computations...');
         this.compute1mRollups().catch(err => logger.error('[ROLLUP] Initial 1m error:', err));
       }
-    }, 65000);
+    }, INITIAL_ROLLUP_DELAY);
 
     logger.log('[ROLLUP] Rollup service started successfully');
     logger.log('[ROLLUP] - 1m rollups: every 60 seconds');
@@ -131,7 +142,7 @@ class RollupService {
       }
     } catch (error) {
       logger.error('[ROLLUP] Error computing 1m rollups:', error);
-      throw error;
+      // Don't throw - log and continue to keep service running
     }
   }
 
@@ -169,7 +180,7 @@ class RollupService {
       }
     } catch (error) {
       logger.error('[ROLLUP] Error computing 5m rollups:', error);
-      throw error;
+      // Don't throw - log and continue to keep service running
     }
   }
 
@@ -207,7 +218,7 @@ class RollupService {
       }
     } catch (error) {
       logger.error('[ROLLUP] Error computing 15m rollups:', error);
-      throw error;
+      // Don't throw - log and continue to keep service running
     }
   }
 
@@ -240,7 +251,7 @@ class RollupService {
       }
     } catch (error) {
       logger.error('[ROLLUP] Error computing 1h rollups:', error);
-      throw error;
+      // Don't throw - log and continue to keep service running
     }
   }
 
@@ -260,7 +271,7 @@ class RollupService {
       }
     } catch (error) {
       logger.error('[ROLLUP] Error cleaning up rollups:', error);
-      throw error;
+      // Don't throw - log and continue to keep service running
     }
   }
 
