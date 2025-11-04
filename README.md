@@ -62,10 +62,31 @@ See the migration files for detailed schema information.
 
 ---
 
-create .env.development
+## Environment Configuration
+
+Create a `.env.development` file for development:
+```
 PGDATABASE=coins_x
+```
 
+For production deployment on VPS, also set:
+```
+FRONTEND_URL=https://yourdomain.com
+# or http://your-vps-ip:port if using IP address
+```
 
+## Installation
+
+```bash
 npm install
 npm run setup-dbs
-npm run seed    
+npm run seed
+```
+
+## CORS Configuration
+
+The backend is configured to accept requests from:
+- Local development environments (localhost:3000, 5173, 5174, 8080, etc.)
+- Your production frontend (set via `FRONTEND_URL` environment variable)
+
+This allows you to develop the frontend locally while connecting to the backend on your VPS.    
