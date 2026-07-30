@@ -1,7 +1,5 @@
 const db = require('../db/connection');
 const logger = require('../utils/logger');
-const rollupService = require('../services/rollup-service');
-
 // Market cycle types with more balanced effects
 const MARKET_CYCLES = {
   STRONG_BOOM: { type: 'STRONG_BOOM', baseEffect: 0.005 },    // 0.5% max
@@ -149,9 +147,6 @@ class MarketSimulator {
       this.isRunning = true;
       this.startPriceUpdates();
       
-      // Start rollup service for aggregated price history
-      rollupService.start();
-      
       logger.log('[MARKET] Successfully started');
     } catch (error) {
       logger.error('[MARKET] Failed to start:', error);
@@ -173,9 +168,6 @@ class MarketSimulator {
       clearTimeout(this.cycleTimeout);
       this.cycleTimeout = null;
     }
-    
-    // Stop rollup service
-    rollupService.stop();
     
     logger.log('[MARKET] Simulation stopped');
   }
@@ -283,37 +275,44 @@ class MarketSimulator {
 
   // Update prices for all coins based on current market conditions
   async updateAllPrices() {
+    let client;
     try {
-      const result = await db.query('SELECT coin_id, current_price FROM coins');
+      client = await db.getClient();
+      await client.query('BEGIN');
+      // Lock coins for consistent snapshot + atomic writes to coins + price_history + market_history
+      const result = await client.query('SELECT coin_id, current_price FROM coins FOR UPDATE');
       const coins = result.rows;
-      const updates = [];
       let totalMarketValue = 0;
 
       for (const coin of coins) {
         const newPrice = this.calculateNewPrice(parseFloat(coin.current_price), coin.coin_id);
-        updates.push(db.query(
+        await client.query(
           'UPDATE coins SET current_price = $1 WHERE coin_id = $2',
           [newPrice, coin.coin_id]
-        ));
-        
-        updates.push(db.query(
-          'INSERT INTO price_history (coin_id, price) VALUES ($1, $2)',
+        );
+        await client.query(
+          'INSERT INTO price_history (coin_id, price, created_at) VALUES ($1, $2, CURRENT_TIMESTAMP)',
           [coin.coin_id, newPrice]
-        ));
-        
+        );
         totalMarketValue += newPrice;
       }
 
-      // Store the total market value and current trend
-      updates.push(db.query(
+      // Insert market_history from the same snapshot
+      await client.query(
         'INSERT INTO market_history (total_value, market_trend) VALUES ($1, $2)',
         [totalMarketValue, this.currentCycle?.type || 'STABLE']
-      ));
+      );
 
-      await Promise.all(updates);
-      
+      await client.query('COMMIT');
     } catch (error) {
+      if (client) {
+        try { await client.query('ROLLBACK'); } catch (_) {}
+      }
       logger.error('[MARKET] Error updating prices:', error);
+    } finally {
+      if (client) {
+        client.release();
+      }
     }
   }
 

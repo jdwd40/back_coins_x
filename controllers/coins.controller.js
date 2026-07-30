@@ -164,123 +164,45 @@ const updatePrice = async (req, res) => {
 const getPriceHistory = async (req, res, next) => {
   try {
     const { coin_id } = req.params;
-    const { page = 1, limit = 10, range = '30M' } = req.query;
+    const { range = '1H' } = req.query;
 
-    // Validate coin_id
+    // Validate coin_id (page/limit ignored per redesign)
     const numericId = parseInt(coin_id);
     if (!Number.isInteger(numericId) || numericId <= 0) {
       return res.status(400).json({ msg: 'Invalid coin ID - must be a positive integer' });
     }
 
-    // Validate pagination parameters
-    const pageNum = parseInt(page);
-    const limitNum = parseInt(limit);
-
-    if (!Number.isInteger(pageNum) || pageNum < 1) {
-      return res.status(400).json({ msg: 'Page must be a positive integer' });
-    }
-
-    if (!Number.isInteger(limitNum) || limitNum < 1 || limitNum > 100) {
-      return res.status(400).json({ msg: 'Limit must be a positive integer between 1 and 100' });
-    }
-
-    // Validate range parameter
-    const validRanges = ['10M', '30M', '1H', '2H', '12H', '24H', 'ALL'];
+    const validRanges = ['10M', '30M', '1H', '2H', '24H'];
     if (!validRanges.includes(range)) {
       return res.status(400).json({ 
         msg: `Invalid range parameter. Must be one of: ${validRanges.join(', ')}` 
       });
     }
 
-    // Check if coin exists first
-    const coin = await coinsModel.selectCoinById(numericId);
-    if (!coin) {
+    const priceHistoryModel = require('../models/priceHistory.model');
+    const history = await priceHistoryModel.getPriceHistory(numericId, range);
+
+    // Cache per design (10s)
+    res.set('Cache-Control', 'public, max-age=10');
+    res.status(200).json(history);
+  } catch (error) {
+    if (error.status === 400) {
+      return res.status(400).json({ msg: error.message });
+    }
+    if (error.status === 404 || (error.message && error.message.includes('Coin not found'))) {
       return res.status(404).json({ msg: 'Coin not found' });
     }
-    
-    const priceHistory = await coinsModel.getCoinPriceHistory(numericId, pageNum, limitNum, range);
-    res.status(200).json(priceHistory);
-  } catch (error) {
     logger.error('Error in getPriceHistory:', error);
     res.status(500).json({ msg: 'Internal server error' });
   }
 };
 
-/**
- * Get price history v2 - Returns aggregated OHLC data from rollups
- * Phase 3 API endpoint
- * GET /api/coins/:coin_id/price-history-v2?interval=5m&minutes=60&format=ohlc
- */
-const getPriceHistoryV2 = async (req, res, next) => {
-  try {
-    const { coin_id } = req.params;
-    const { 
-      interval = '5m',      // 1m, 5m, 15m, 1h, raw
-      minutes = 60,         // How far back (default 60 minutes)
-      format = 'ohlc'       // ohlc or line
-    } = req.query;
 
-    // Validate coin_id
-    const coinId = parseInt(coin_id);
-    if (isNaN(coinId) || coinId < 1) {
-      return res.status(400).json({ 
-        error: 'Invalid coin_id. Must be a positive integer.' 
-      });
-    }
 
-    // Validate interval
-    const validIntervals = ['raw', '1m', '5m', '15m', '1h'];
-    if (!validIntervals.includes(interval)) {
-      return res.status(400).json({ 
-        error: `Invalid interval. Must be one of: ${validIntervals.join(', ')}` 
-      });
-    }
-
-    // Validate format
-    const validFormats = ['ohlc', 'line'];
-    if (!validFormats.includes(format)) {
-      return res.status(400).json({ 
-        error: `Invalid format. Must be one of: ${validFormats.join(', ')}` 
-      });
-    }
-
-    // Validate minutes (max 7 days = 10080 minutes)
-    const minutesNum = parseInt(minutes);
-    if (isNaN(minutesNum) || minutesNum < 1 || minutesNum > 10080) {
-      return res.status(400).json({ 
-        error: 'Minutes must be between 1 and 10080 (7 days)' 
-      });
-    }
-
-    // Check coin exists
-    const coin = await coinsModel.selectCoinById(coinId);
-    if (!coin) {
-      return res.status(404).json({ error: 'Coin not found' });
-    }
-
-    // Fetch data (pass coin metadata to avoid duplicate query)
-    const result = await coinsModel.getPriceHistoryV2({
-      coinId,
-      interval,
-      minutes: minutesNum,
-      format,
-      coinMetadata: coin
-    });
-
-    // Cache headers (30s for recent data)
-    res.set('Cache-Control', 'public, max-age=30');
-    res.status(200).json(result);
-    
-  } catch (error) {
-    logger.error('Error in getPriceHistoryV2:', error);
-    next(error);
-  }
-};
 
 module.exports = {
   getCoins,
   getCoinById,
   updatePrice,
-  getPriceHistory,
-  getPriceHistoryV2
+  getPriceHistory
 };

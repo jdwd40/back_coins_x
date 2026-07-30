@@ -55,6 +55,9 @@ let isEnded = false;
 
 module.exports = {
   query: (...args) => pool.query(...args),
+  // Safe client acquisition for atomic transactions using a single pooled connection.
+  // Caller MUST release the client in finally block.
+  getClient: () => pool.connect(),
   end: () => {
     if (!isEnded) {
       isEnded = true;

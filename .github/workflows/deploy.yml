@@ -31,5 +31,5 @@ jobs:
             echo "Installing dependencies..."
             npm install
             echo "Restarting PM2..."
-            pm2 restart all
+            pm2 restart back_coins_x
             echo "Deployment complete"
