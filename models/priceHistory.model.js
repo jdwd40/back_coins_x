@@ -6,7 +6,10 @@ const TIME_RANGES_MS = {
   '30M': 30 * 60 * 1000,
   '1H': 60 * 60 * 1000,
   '2H': 2 * 60 * 60 * 1000,
-  '24H': 24 * 60 * 60 * 1000
+  '24H': 24 * 60 * 60 * 1000,
+  '7D': 7 * 24 * 60 * 60 * 1000,
+  '30D': 30 * 24 * 60 * 60 * 1000
+  // ALL is adaptive, handled specially (no fixed lookback)
 };
 
 const RANGE_CONFIG = {
@@ -14,7 +17,10 @@ const RANGE_CONFIG = {
   '30M': { resolution: '1m', bucketSeconds: 60, maxPoints: 30 },
   '1H': { resolution: '1m', bucketSeconds: 60, maxPoints: 60 },
   '2H': { resolution: '5m', bucketSeconds: 300, maxPoints: 24 },
-  '24H': { resolution: '15m', bucketSeconds: 900, maxPoints: 96 }
+  '24H': { resolution: '15m', bucketSeconds: 900, maxPoints: 96 },
+  '7D': { resolution: '1h', bucketSeconds: 3600, maxPoints: 168 },
+  '30D': { resolution: '6h', bucketSeconds: 21600, maxPoints: 120 }
+  // ALL resolution and bucket determined at runtime per §2.2
 };
 
 const MAX_POINTS_BUDGET = 200;
@@ -25,40 +31,76 @@ const MAX_POINTS_BUDGET = 200;
  * active bucket semantics and latestValue from coins.
  */
 exports.getPriceHistory = async (coinId, range) => {
-  if (!TIME_RANGES_MS[range]) {
+  const isAll = range === 'ALL';
+  if (!isAll && !TIME_RANGES_MS[range]) {
     const err = new Error('Invalid range');
     err.status = 400;
     throw err;
   }
 
-  const rangeMs = TIME_RANGES_MS[range];
-  const config = RANGE_CONFIG[range];
-  const { resolution, bucketSeconds } = config;
-
   const now = new Date();
-  const from = new Date(now.getTime() - rangeMs);
-  const lookbackMs = rangeMs;
-
+  const serverTime = now.toISOString();
   let rows;
-  if (bucketSeconds === 0) {
-    // Raw resolution for 10M: each tick is a point
-    const result = await db.query(
-      `SELECT
-        created_at AS time,
-        price AS open,
-        price AS high,
-        price AS low,
-        price AS close,
-        1::int AS samples
-      FROM price_history
-      WHERE coin_id = $1
-        AND created_at >= NOW() - ($2 || ' milliseconds')::INTERVAL
-      ORDER BY created_at ASC`,
-      [coinId, lookbackMs]
+  let resolution;
+  let bucketSeconds;
+  let from;
+
+  if (isAll) {
+    // §2.2 ALL adaptive bucketing (exact)
+    const oldestRes = await db.query(
+      'SELECT MIN(created_at) AS oldest FROM price_history WHERE coin_id = $1',
+      [coinId]
     );
-    rows = result.rows;
-  } else {
-    // Bucketed query-time aggregation
+    const oldest = oldestRes.rows[0] ? oldestRes.rows[0].oldest : null;
+
+    if (oldest === null) {
+      // empty history → 200 + points:[] , resolution raw, from=to=serverTime
+      const coinResult = await db.query(
+        'SELECT symbol, current_price FROM coins WHERE coin_id = $1',
+        [coinId]
+      );
+      if (coinResult.rows.length === 0) {
+        const err = new Error('Coin not found');
+        err.status = 404;
+        throw err;
+      }
+      const coinRow = coinResult.rows[0];
+      return {
+        range: {
+          requested: range,
+          from: serverTime,
+          to: serverTime
+        },
+        resolution: 'raw',
+        serverTime,
+        latestValue: Number(coinRow.current_price),
+        coin: {
+          coin_id: coinId,
+          symbol: coinRow.symbol
+        },
+        points: []
+      };
+    }
+
+    const oldestDate = new Date(oldest);
+    const spanMs = now.getTime() - oldestDate.getTime();
+    from = oldestDate;
+
+    if (spanMs <= 2 * 24 * 60 * 60 * 1000) {
+      bucketSeconds = 900; // 15m
+      resolution = '15m';
+    } else if (spanMs <= 7 * 24 * 60 * 60 * 1000) {
+      bucketSeconds = 3600; // 1h
+      resolution = '1h';
+    } else if (spanMs <= 31 * 24 * 60 * 60 * 1000) {
+      bucketSeconds = 21600; // 6h
+      resolution = '6h';
+    } else {
+      bucketSeconds = 43200; // 12h
+      resolution = '12h';
+    }
+
+    // Query using the *concrete oldest timestamp* as lower bound (not an interval)
     const result = await db.query(
       `SELECT
         to_timestamp(floor(extract(epoch from created_at) / $3) * $3) AS time,
@@ -69,12 +111,56 @@ exports.getPriceHistory = async (coinId, range) => {
         COUNT(*)::int AS samples
       FROM price_history
       WHERE coin_id = $1
-        AND created_at >= NOW() - ($2 || ' milliseconds')::INTERVAL
+        AND created_at >= $2
       GROUP BY floor(extract(epoch from created_at) / $3)
       ORDER BY time ASC`,
-      [coinId, lookbackMs, bucketSeconds]
+      [coinId, oldest, bucketSeconds]
     );
     rows = result.rows;
+  } else {
+    const rangeMs = TIME_RANGES_MS[range];
+    const config = RANGE_CONFIG[range];
+    resolution = config.resolution;
+    bucketSeconds = config.bucketSeconds;
+    from = new Date(now.getTime() - rangeMs);
+    const lookbackMs = rangeMs;
+
+    if (bucketSeconds === 0) {
+      // Raw resolution for 10M: each tick is a point
+      const result = await db.query(
+        `SELECT
+          created_at AS time,
+          price AS open,
+          price AS high,
+          price AS low,
+          price AS close,
+          1::int AS samples
+        FROM price_history
+        WHERE coin_id = $1
+          AND created_at >= NOW() - ($2 || ' milliseconds')::INTERVAL
+        ORDER BY created_at ASC`,
+        [coinId, lookbackMs]
+      );
+      rows = result.rows;
+    } else {
+      // Bucketed query-time aggregation
+      const result = await db.query(
+        `SELECT
+          to_timestamp(floor(extract(epoch from created_at) / $3) * $3) AS time,
+          (ARRAY_AGG(price ORDER BY created_at ASC))[1] AS open,
+          MAX(price) AS high,
+          MIN(price) AS low,
+          (ARRAY_AGG(price ORDER BY created_at DESC))[1] AS close,
+          COUNT(*)::int AS samples
+        FROM price_history
+        WHERE coin_id = $1
+          AND created_at >= NOW() - ($2 || ' milliseconds')::INTERVAL
+        GROUP BY floor(extract(epoch from created_at) / $3)
+        ORDER BY time ASC`,
+        [coinId, lookbackMs, bucketSeconds]
+      );
+      rows = result.rows;
+    }
   }
 
   // Map to numeric contract, chronological (query already orders ASC)
@@ -93,8 +179,12 @@ exports.getPriceHistory = async (coinId, range) => {
 
   // A trailing window can touch one extra boundary bucket. Keep the newest
   // configured number of points so every response stays within its chart budget.
-  if (points.length > config.maxPoints) {
-    points.splice(0, points.length - config.maxPoints);
+  // For ALL we skip the per-range trim (budget safety only)
+  if (!isAll) {
+    const config = RANGE_CONFIG[range];
+    if (points.length > config.maxPoints) {
+      points.splice(0, points.length - config.maxPoints);
+    }
   }
 
   if (points.length > MAX_POINTS_BUDGET) {
@@ -133,12 +223,10 @@ exports.getPriceHistory = async (coinId, range) => {
   const latestValue = Number(coinRow.current_price);
   const symbol = coinRow.symbol;
 
-  const serverTime = now.toISOString();
-
   return {
     range: {
       requested: range,
-      from: from.toISOString(),
+      from: from instanceof Date ? from.toISOString() : from,
       to: serverTime
     },
     resolution,

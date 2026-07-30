@@ -172,7 +172,7 @@ const getPriceHistory = async (req, res, next) => {
       return res.status(400).json({ msg: 'Invalid coin ID - must be a positive integer' });
     }
 
-    const validRanges = ['10M', '30M', '1H', '2H', '24H'];
+    const validRanges = ['10M', '30M', '1H', '2H', '24H', '7D', '30D', 'ALL'];
     if (!validRanges.includes(range)) {
       return res.status(400).json({ 
         msg: `Invalid range parameter. Must be one of: ${validRanges.join(', ')}` 
