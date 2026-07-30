@@ -91,7 +91,12 @@ exports.getPriceHistory = async (coinId, range) => {
     };
   });
 
-  // Enforce point budget (per design, chosen ranges should not hit, but guard)
+  // A trailing window can touch one extra boundary bucket. Keep the newest
+  // configured number of points so every response stays within its chart budget.
+  if (points.length > config.maxPoints) {
+    points.splice(0, points.length - config.maxPoints);
+  }
+
   if (points.length > MAX_POINTS_BUDGET) {
     const err = new Error('Range would exceed 200 points; reduce range');
     err.status = 400;

@@ -18,6 +18,14 @@ describe('Price History Redesign (v1 contract)', () => {
     '24H': '15m'
   };
 
+  const EXPECTED_MAX_POINTS = {
+    '10M': 20,
+    '30M': 30,
+    '1H': 60,
+    '2H': 24,
+    '24H': 96
+  };
+
   describe('GET /api/coins/:coin_id/price-history?range=...', () => {
     test('returns 200 with new contract shape for valid coin and each range', async () => {
       const coinsRes = await request(app).get('/api/coins').expect(200);
@@ -190,8 +198,7 @@ describe('Price History Redesign (v1 contract)', () => {
         const res = await request(app)
           .get(`/api/coins/${coin.coin_id}/price-history?range=${range}`)
           .expect(200);
-        // upper guard 200, actual expected per design much lower
-        expect(res.body.points.length).toBeLessThanOrEqual(200);
+        expect(res.body.points.length).toBeLessThanOrEqual(EXPECTED_MAX_POINTS[range]);
       }
     });
   });
