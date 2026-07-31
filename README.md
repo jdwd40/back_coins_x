@@ -67,13 +67,18 @@ See the migration files for detailed schema information.
 Create a `.env.development` file for development:
 ```
 PGDATABASE=coins_x
+JWT_SECRET=your-dev-secret   # used for both sign and verify (see shared config)
 ```
 
-For production deployment on VPS, also set:
+For production deployment on VPS, also set (JWT_SECRET is mandatory in prod):
 ```
+JWT_SECRET=your-strong-random-prod-secret   # REQUIRED; same value used for sign+verify. No fallback.
+PGDATABASE=coins_x   # or use DATABASE_URL for prod
 FRONTEND_URL=https://yourdomain.com
 # or http://your-vps-ip:port if using IP address
 ```
+
+In production (NODE_ENV=production) the server will fatal-exit before listening if JWT_SECRET missing/blank.
 
 ## Installation
 

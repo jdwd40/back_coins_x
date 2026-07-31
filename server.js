@@ -11,6 +11,19 @@ console.log('DB module loaded successfully');
 const logger = require('./utils/logger');
 console.log('Logger loaded successfully');
 
+// Top-level production JWT check (executes on require, before any listen or startServer).
+// Mirrors the root cause: prod only loads .env.production; sign+verify must share secret or protected routes 401.
+if ((process.env.NODE_ENV || 'development') === 'production') {
+  const jwtSecret = process.env.JWT_SECRET;
+  if (!jwtSecret || typeof jwtSecret !== 'string' || jwtSecret.trim() === '') {
+    logger.fatal('JWT_SECRET is missing or blank in production environment.');
+    logger.fatal('This is required for token signing AND verification to be consistent.');
+    logger.fatal('Set JWT_SECRET in .env.production (or equivalent env var) and redeploy.');
+    logger.fatal('No secret value is logged. Exiting non-zero.');
+    process.exit(1);
+  }
+}
+
 const PORT = process.env.PORT || 3000;
 
 // Test database connection before starting server

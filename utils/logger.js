@@ -6,10 +6,9 @@ const logger = {
       console.log(...args);
     }
   },
+  // Error and fatal always available in production (noisy dev logs kept dev-only)
   error: (...args) => {
-    if (isDev) {
-      console.error(...args);
-    }
+    console.error(...args);
   },
   // Always log fatal errors regardless of environment
   fatal: (...args) => {

@@ -257,6 +257,40 @@ describe('Users API', () => {
     });
   });
 
+  // Regression test for token contract per K3 auth repair.
+  // Proves: token from normal login (authenticateUser sign) succeeds on protected (200)
+  // and garbage token remains 401. This will fail (red) if sign/verify secrets diverge.
+  describe('Token contract regression (login token end-to-end)', () => {
+    test('login returned token must access protected route (200); garbage token must 401', async () => {
+      const loginRes = await request(app)
+        .post('/api/users/login')
+        .send({ email: 'john@example.com', password: 'password123' });
+
+      expect(loginRes.status).toBe(200);
+      const token = loginRes.body.token;
+      expect(typeof token).toBe('string');
+      expect(token.length).toBeGreaterThan(10);
+
+      // Valid token from authenticateUser must succeed on protected route
+      const protectedRes = await request(app)
+        .get('/api/users/1')
+        .set('Authorization', `Bearer ${token}`);
+      expect(protectedRes.status).toBe(200);
+      expect(protectedRes.body.success).toBe(true);
+      expect(protectedRes.body.user).toMatchObject({
+        user_id: 1,
+        username: 'john_doe'
+      });
+
+      // Garbage token must remain 401
+      const garbageRes = await request(app)
+        .get('/api/users/1')
+        .set('Authorization', 'Bearer this-token-is-garbage-and-will-not-verify');
+      expect(garbageRes.status).toBe(401);
+      expect(garbageRes.body.msg).toBe('Invalid token');
+    });
+  });
+
   describe('Protected Routes', () => {
     describe('GET /api/users/:user_id', () => {
       test('200: returns user profile when authenticated', () => {

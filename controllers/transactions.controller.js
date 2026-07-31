@@ -7,7 +7,7 @@ const {
   processBuyTransaction,
   processSellTransaction
 } = require('../models/transactions.model');
-const { selectCoinById } = require('../models/coins.model');
+const { selectCoinById, selectCoinRawById } = require('../models/coins.model');
 const { getUserFunds } = require('../models/users.model');
 
 exports.createTransaction = async (req, res, next) => {
@@ -121,9 +121,10 @@ exports.getPortfolioByUserId = async (req, res, next) => {
 exports.processBuyTransaction = async (req, res, next) => {
   try {
     const { user_id, coin_id, amount } = req.body;
+    const numericAmount = Number(amount);
 
     // Validate input
-    if (!user_id || !coin_id || !amount || amount <= 0) {
+    if (!user_id || !coin_id || !Number.isFinite(numericAmount) || numericAmount <= 0) {
       return res.status(400).json({ 
         status: 'error',
         message: 'Invalid input parameters. Please provide valid user_id, coin_id, and amount greater than 0.' 
@@ -139,16 +140,18 @@ exports.processBuyTransaction = async (req, res, next) => {
     }
 
     // Get current coin price and check if coin exists
-    const coin = await selectCoinById(coin_id);
+    // Use the unformatted row: selectCoinById returns a GBP display
+    // string that is invalid input for numeric SQL parameters.
+    const coin = await selectCoinRawById(coin_id);
     if (!coin) {
-      return res.status(404).json({ 
+      return res.status(404).json({
         status: 'error',
-        message: 'Coin not found. Please provide a valid coin_id.' 
+        message: 'Coin not found. Please provide a valid coin_id.'
       });
     }
 
     try {
-      const transaction = await processBuyTransaction(user_id, coin_id, amount, coin.current_price);
+      const transaction = await processBuyTransaction(user_id, coin_id, numericAmount, coin.current_price);
       res.status(201).json({
         status: 'success',
         message: 'Buy transaction completed successfully',
@@ -158,8 +161,8 @@ exports.processBuyTransaction = async (req, res, next) => {
       if (err.message === 'Insufficient funds') {
         return res.status(400).json({
           status: 'error',
-          message: `Insufficient funds. You need ${(amount * coin.current_price).toFixed(2)} to complete this purchase.`,
-          required_amount: amount * coin.current_price,
+          message: `Insufficient funds. You need ${(numericAmount * coin.current_price).toFixed(2)} to complete this purchase.`,
+          required_amount: numericAmount * coin.current_price,
           current_price: coin.current_price
         });
       }
@@ -174,9 +177,10 @@ exports.processBuyTransaction = async (req, res, next) => {
 exports.processSellTransaction = async (req, res, next) => {
   try {
     const { user_id, coin_id, amount } = req.body;
+    const numericAmount = Number(amount);
 
     // Validate input
-    if (!user_id || !coin_id || !amount || amount <= 0) {
+    if (!user_id || !coin_id || !Number.isFinite(numericAmount) || numericAmount <= 0) {
       return res.status(400).json({ 
         status: 'error',
         message: 'Invalid input parameters. Please provide valid user_id, coin_id, and amount greater than 0.' 
@@ -192,16 +196,18 @@ exports.processSellTransaction = async (req, res, next) => {
     }
 
     // Get current coin price and check if coin exists
-    const coin = await selectCoinById(coin_id);
+    // Use the unformatted row: selectCoinById returns a GBP display
+    // string that is invalid input for numeric SQL parameters.
+    const coin = await selectCoinRawById(coin_id);
     if (!coin) {
-      return res.status(404).json({ 
+      return res.status(404).json({
         status: 'error',
-        message: 'Coin not found. Please provide a valid coin_id.' 
+        message: 'Coin not found. Please provide a valid coin_id.'
       });
     }
 
     try {
-      const transaction = await processSellTransaction(user_id, coin_id, amount, coin.current_price);
+      const transaction = await processSellTransaction(user_id, coin_id, numericAmount, coin.current_price);
       res.status(201).json({
         status: 'success',
         message: 'Sell transaction completed successfully',

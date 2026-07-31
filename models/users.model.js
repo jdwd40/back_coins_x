@@ -2,6 +2,7 @@ const db = require('../db/connection');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const logger = require('../utils/logger');
+const { getJwtSecret } = require('../utils/jwtSecret');
 
 /**
  * Creates a new user in the database
@@ -91,7 +92,7 @@ exports.authenticateUser = async (email, password) => {
     
     const token = jwt.sign(
       { user_id: user.user_id },
-      process.env.JWT_SECRET || 'default_secret_for_development',
+      getJwtSecret(),
       { expiresIn: '24h' }
     );
     

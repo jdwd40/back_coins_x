@@ -180,6 +180,26 @@ exports.selectAllCoins = async () => {
 };
 
 /**
+ * Select a single coin by ID without display formatting.
+ * Transactional paths (buy/sell) must use this: formatCoinResponse
+ * renders current_price as a GBP display string (e.g. '£10,140.30'),
+ * which is not valid input for numeric SQL parameters.
+ */
+exports.selectCoinRawById = async (coinId) => {
+  const result = await db.query(`
+    SELECT ${COIN_FIELDS}
+    FROM coins
+    WHERE coin_id = $1::integer;
+  `, [coinId]);
+
+  if (result.rows.length === 0) {
+    return null;
+  }
+
+  return result.rows[0];
+};
+
+/**
  * Select a single coin by ID
  */
 exports.selectCoinById = async (coinId) => {
