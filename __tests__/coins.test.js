@@ -1,4 +1,5 @@
 const request = require('supertest');
+const jwt = require('jsonwebtoken');
 const app = require('../app');
 const db = require('../db/connection');
 const seed = require('../db/seed');
@@ -6,6 +7,8 @@ const { CurrencyFormatter } = require('../utils/currency-formatter');
 
 // Ensure test environment
 process.env.NODE_ENV = 'test';
+
+let authToken;
 
 // Setup and teardown
 beforeAll(async () => {
@@ -15,6 +18,15 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   await seed(false);
+  const userResult = await db.query(
+    'INSERT INTO users (username, email, password_hash, funds) VALUES ($1, $2, $3, $4) RETURNING *',
+    ['price_patcher', 'price_patcher@example.com', 'hashedpassword', 1000.00]
+  );
+  const user = userResult.rows[0];
+  authToken = jwt.sign(
+    { user_id: user.user_id, username: user.username },
+    process.env.JWT_SECRET
+  );
 });
 
 afterAll(async () => {
@@ -100,9 +112,19 @@ describe('Coins API', () => {
   });
 
   describe('PATCH /api/coins/:coin_id/price', () => {
+    test('401: rejects unauthenticated price updates', async () => {
+      const response = await request(app)
+        .patch('/api/coins/1/price')
+        .send({ current_price: "£150.00" })
+        .expect(401);
+
+      expect(response.body.msg).toBe('Authentication required');
+    });
+
     test('200: successfully updates coin price with GBP string', async () => {
       const response = await request(app)
         .patch('/api/coins/1/price')
+        .set('Authorization', `Bearer ${authToken}`)
         .send({ current_price: "£150.00" })
         .expect(200);
 
@@ -116,6 +138,7 @@ describe('Coins API', () => {
     test('200: successfully updates coin price with numeric string', async () => {
       const response = await request(app)
         .patch('/api/coins/1/price')
+        .set('Authorization', `Bearer ${authToken}`)
         .send({ current_price: "150.00" })
         .expect(200);
 
@@ -128,6 +151,7 @@ describe('Coins API', () => {
     test('200: successfully updates coin price with number', async () => {
       const response = await request(app)
         .patch('/api/coins/1/price')
+        .set('Authorization', `Bearer ${authToken}`)
         .send({ current_price: 150.00 })
         .expect(200);
 
@@ -140,6 +164,7 @@ describe('Coins API', () => {
     test('200: successfully updates coin price with formatted number string', async () => {
       const response = await request(app)
         .patch('/api/coins/1/price')
+        .set('Authorization', `Bearer ${authToken}`)
         .send({ current_price: "1,150.00" })
         .expect(200);
 
@@ -152,6 +177,7 @@ describe('Coins API', () => {
     test('400: returns bad request when price is missing', async () => {
       const response = await request(app)
         .patch('/api/coins/1/price')
+        .set('Authorization', `Bearer ${authToken}`)
         .send({})
         .expect(400);
 
@@ -161,6 +187,7 @@ describe('Coins API', () => {
     test('400: returns bad request when price is invalid string', async () => {
       const response = await request(app)
         .patch('/api/coins/1/price')
+        .set('Authorization', `Bearer ${authToken}`)
         .send({ current_price: 'invalid' })
         .expect(400);
 
@@ -170,6 +197,7 @@ describe('Coins API', () => {
     test('400: returns bad request when price is negative', async () => {
       const response = await request(app)
         .patch('/api/coins/1/price')
+        .set('Authorization', `Bearer ${authToken}`)
         .send({ current_price: -150.00 })
         .expect(400);
 
@@ -179,6 +207,7 @@ describe('Coins API', () => {
     test('404: returns not found for non-existent coin_id', async () => {
       const response = await request(app)
         .patch('/api/coins/999/price')
+        .set('Authorization', `Bearer ${authToken}`)
         .send({ current_price: "£150.00" })
         .expect(404);
 
@@ -188,6 +217,7 @@ describe('Coins API', () => {
     test('400: returns bad request for invalid coin_id', async () => {
       const response = await request(app)
         .patch('/api/coins/not-a-number/price')
+        .set('Authorization', `Bearer ${authToken}`)
         .send({ current_price: "£150.00" })
         .expect(400);
 

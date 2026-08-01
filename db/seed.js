@@ -132,11 +132,11 @@ const seed = async (shouldEnd = false) => {
       CREATE INDEX IF NOT EXISTS idx_rollups_coin_interval ON price_history_rollups(coin_id, interval_type, bucket_start DESC);
     `);
 
-    // Create cleanup function for price history (Phase 1 improvement)
+    // Create cleanup function for price history (90d retention for 30D/ALL ranges)
     await db.query(`
       CREATE OR REPLACE FUNCTION cleanup_price_history() RETURNS void AS $$
       BEGIN
-          DELETE FROM price_history WHERE created_at < NOW() - INTERVAL '7 days';
+          DELETE FROM price_history WHERE created_at < NOW() - INTERVAL '90 days';
       END;
       $$ LANGUAGE plpgsql;
     `);
