@@ -49,16 +49,19 @@ function parseCsvEnv(name) {
 }
 
 function systemKeyMatches(req) {
-  const configured = process.env.PRICE_ADMIN_API_KEY || process.env.SYSTEM_API_KEY;
-  if (!configured || !String(configured).trim()) return false;
+  // Honor either key when both are set (not only the first non-empty env).
+  const configured = [process.env.PRICE_ADMIN_API_KEY, process.env.SYSTEM_API_KEY]
+    .filter((k) => k && String(k).trim().length > 0);
+  if (configured.length === 0) return false;
   const provided =
     req.headers['x-system-key'] ||
     req.headers['x-admin-key'] ||
     null;
-  return Boolean(provided && provided === configured);
+  if (!provided) return false;
+  return configured.some((k) => provided === k);
 }
 
-function userIsPriceAdmin(user) {
+function userIsConfiguredAdmin(user) {
   if (!user) return false;
   const adminIds = parseCsvEnv('ADMIN_USER_IDS');
   const adminEmails = parseCsvEnv('ADMIN_EMAILS');
@@ -69,6 +72,9 @@ function userIsPriceAdmin(user) {
   return false;
 }
 
+// Alias used by price-admin middleware
+const userIsPriceAdmin = userIsConfiguredAdmin;
+
 /**
  * After authenticateToken: only allow configured admin users.
  * Does not accept system key (use requirePriceAdminOrSystem for that).
@@ -78,6 +84,34 @@ exports.requirePriceAdmin = (req, res, next) => {
     return next();
   }
   return res.status(403).json({ msg: 'Admin privileges required to update coin prices' });
+};
+
+/**
+ * After authenticateToken: require path :user_id to match the caller,
+ * or the caller to be a configured admin (ADMIN_USER_IDS / EMAILS / USERNAMES).
+ * Blocks cross-user password / profile / funds / delete attacks.
+ */
+exports.requireSelfOrAdmin = (req, res, next) => {
+  if (!req.user) {
+    return res.status(401).json({ msg: 'Authentication required' });
+  }
+  const targetId = parseInt(req.params.user_id, 10);
+  if (!Number.isInteger(targetId) || targetId <= 0) {
+    return res.status(400).json({
+      success: false,
+      msg: 'Invalid user ID',
+    });
+  }
+  if (Number(req.user.user_id) === targetId) {
+    return next();
+  }
+  if (userIsConfiguredAdmin(req.user)) {
+    return next();
+  }
+  return res.status(403).json({
+    success: false,
+    msg: 'Forbidden: you can only modify your own account',
+  });
 };
 
 /**
