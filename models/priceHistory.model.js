@@ -116,6 +116,16 @@ exports.getPriceHistory = async (coinId, range) => {
       resolution = `${Math.round(bucketSeconds / 60)}m`;
     }
 
+    // Only scan ticks that can land in the newest MAX_POINTS_BUDGET buckets
+    // (avoids aggregating full retention when the chart will discard older buckets).
+    const scanFrom = new Date(
+      Math.max(
+        oldestDate.getTime(),
+        now.getTime() - bucketSeconds * 1000 * MAX_POINTS_BUDGET
+      )
+    );
+    from = scanFrom;
+
     // Query-time bucketing with an in-SQL newest-N cap (never return > MAX_POINTS_BUDGET rows).
     const result = await db.query(
       `WITH buckets AS (
@@ -138,7 +148,7 @@ exports.getPriceHistory = async (coinId, range) => {
       )
       SELECT * FROM newest
       ORDER BY time ASC`,
-      [coinId, oldest, bucketSeconds, MAX_POINTS_BUDGET]
+      [coinId, scanFrom, bucketSeconds, MAX_POINTS_BUDGET]
     );
     rows = result.rows;
   } else {
