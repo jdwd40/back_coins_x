@@ -56,6 +56,25 @@ let lastSequence = null;   // last sequence confirmed by the DB
 let failures = 0;          // consecutive failures (circuit breaker)
 let circuitOpenUntil = 0;  // epoch ms while the breaker is open
 let shuttingDown = false;
+let ticksSinceCandleRefresh = 0;
+
+async function refreshCandles() {
+  // Idempotent upsert of recent buckets so charts stay current without
+  // dual-owning retention (retention stays gated on archive_confirmed).
+  await client.query(
+    `SELECT coins.refresh_price_candles('15m'::coins.candle_interval, now() - interval '6 hours', now())`,
+  );
+  await client.query(
+    `SELECT coins.refresh_price_candles('1h'::coins.candle_interval, now() - interval '2 days', now())`,
+  );
+  await client.query(
+    `SELECT coins.refresh_market_candles('1m'::coins.market_candle_interval, now() - interval '6 hours', now())`,
+  );
+  await client.query(
+    `SELECT coins.refresh_market_candles('15m'::coins.market_candle_interval, now() - interval '2 days', now())`,
+  );
+  log('info', 'candle refresh complete', {});
+}
 
 async function tickOnce() {
   const { rows } = await client.query(
@@ -70,6 +89,16 @@ async function tickOnce() {
     log('info', 'tick applied', {
       sequence: r.tick_sequence, assets: r.assets_updated, cycle: r.cycle,
     });
+    ticksSinceCandleRefresh += 1;
+    // Refresh candles about every 2 minutes at default 30s tick cadence.
+    if (ticksSinceCandleRefresh >= 4) {
+      ticksSinceCandleRefresh = 0;
+      try {
+        await refreshCandles();
+      } catch (err) {
+        log('error', 'candle refresh failed', { error: err.message });
+      }
+    }
   }
 }
 
