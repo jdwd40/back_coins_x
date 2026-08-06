@@ -7,9 +7,11 @@
 
 BEGIN;
 
--- Public asset catalogue with derived 24h change (numeric; UI formats)
-CREATE OR REPLACE VIEW coins.public_assets
-WITH (security_invoker = true) AS
+-- Public asset catalogue with derived 24h change (numeric; UI formats).
+-- DEFINER-owned (not security_invoker): the view only exposes non-user market
+-- data, and must read coins.price_ticks which browser roles correctly cannot
+-- SELECT. Same safe-ownership pattern as market_status_view.
+CREATE OR REPLACE VIEW coins.public_assets AS
 SELECT
   a.id,
   a.legacy_coin_id,
