@@ -1,0 +1,13 @@
+# Supabase project config — Coins migration (self-hosted at supabase.jdwd40.xyz)
+#
+# This file exists so the standard `supabase` CLI layout is honoured and
+# local tooling knows where migrations/seed live. The target instance is an
+# EXISTING self-hosted Supabase — do not reinstall, do not run
+# `supabase init/start` against production. Migrations are applied with psql
+# (see docs/MIGRATION_RUNBOOK.md) after the read-only inventory passes.
+project_id = "coins-migration"
+
+[db]
+# Local disposable testing uses plain PostgreSQL 18 via
+# scripts/test/run-sql-tests.sh (no supabase CLI required).
+major_version = 15
