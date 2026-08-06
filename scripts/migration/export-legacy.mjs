@@ -19,7 +19,8 @@ import { join } from 'node:path';
 import pg from 'pg';
 
 const outdir = process.argv[2];
-if (!outdir) { console.error('usage: export-legacy.mjs <outdir>'); process.exit(2); }
+const redactEmails = process.argv.includes('--redact-emails');
+if (!outdir) { console.error('usage: export-legacy.mjs <outdir> [--redact-emails]'); process.exit(2); }
 mkdirSync(outdir, { recursive: true });
 
 const config = process.env.COINS_SOURCE_DATABASE_URL
@@ -64,11 +65,17 @@ try {
   manifest.source_database = info.db;
 
   // Identities: NO password_hash. bcrypt format was validated in place by the
-  // inventory script; hashes are never exported.
+  // inventory script; hashes are never exported. --redact-emails replaces
+  // emails with deterministic placeholders for unencrypted dry-run artifacts.
   await exportTable('users',
-    `SELECT user_id AS legacy_user_id, username, lower(trim(email)) AS email,
-            funds AS cash_balance, created_at, updated_at
-       FROM users ORDER BY user_id`);
+    redactEmails
+      ? `SELECT user_id AS legacy_user_id, username,
+                'user-' || user_id || '@redacted.invalid' AS email,
+                funds AS cash_balance, created_at, updated_at
+           FROM users ORDER BY user_id`
+      : `SELECT user_id AS legacy_user_id, username, lower(trim(email)) AS email,
+                funds AS cash_balance, created_at, updated_at
+           FROM users ORDER BY user_id`);
   await exportTable('coins',
     `SELECT coin_id AS legacy_coin_id, name, symbol, current_price, market_cap,
             circulating_supply, price_change_24h, founder, date_added AS listed_at
