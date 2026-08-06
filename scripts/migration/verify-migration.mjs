@@ -54,11 +54,16 @@ const counts = await q(`SELECT
   (SELECT count(*) FROM coins.market_snapshots) AS snapshots,
   (SELECT count(*) FROM coins.legacy_identity_map) AS map`);
 const c = counts[0];
+const exceptionsEarly = await q(
+  `SELECT legacy_id FROM coins.migration_exceptions WHERE legacy_table = 'transactions'`)
+  .catch(() => []);
+const exSet = new Set(exceptionsEarly.map((e) => Number(e.legacy_id)));
 gate(Number(c.profiles) === users.length, 'profiles count', `${c.profiles}/${users.length}`);
 gate(Number(c.wallets) === users.length, 'wallets count', `${c.wallets}/${users.length}`);
 gate(Number(c.assets) === coins.length, 'assets count', `${c.assets}/${coins.length}`);
 gate(Number(c.holdings) === portfolios.length, 'holdings count', `${c.holdings}/${portfolios.length}`);
-gate(Number(c.trades) === transactions.length, 'trades count', `${c.trades}/${transactions.length}`);
+gate(Number(c.trades) + exSet.size === transactions.length, 'trades count (+quarantine)',
+  `${c.trades}+${exSet.size}/${transactions.length}`);
 gate(Number(c.ticks) === priceHistory.length, 'price_ticks count', `${c.ticks}/${priceHistory.length}`);
 gate(Number(c.snapshots) === marketHistory.length, 'market_snapshots count', `${c.snapshots}/${marketHistory.length}`);
 gate(Number(c.map) === users.length, 'identity map count', `${c.map}/${users.length}`);
@@ -84,13 +89,18 @@ const qtyMismatch = portfolios.filter(
 gate(qtyMismatch.length === 0, 'exact per-user/per-asset quantities',
   qtyMismatch.length ? `${qtyMismatch.length} mismatches` : '');
 
-// 4. Legacy transaction ID coverage + totals
+// 4. Legacy transaction ID coverage + totals (quarantined rows count as
+//    covered — they are preserved in migration_exceptions)
 const tradeIds = await q(
   `SELECT legacy_transaction_id FROM coins.trades WHERE legacy_transaction_id IS NOT NULL`);
 const idSet = new Set(tradeIds.map((t) => Number(t.legacy_transaction_id)));
-const missingTx = transactions.filter((t) => !idSet.has(t.legacy_transaction_id));
+const missingTx = transactions.filter((t) => !idSet.has(t.legacy_transaction_id) && !exSet.has(t.legacy_transaction_id));
 gate(missingTx.length === 0, 'legacy transaction ID coverage',
-  missingTx.length ? `missing: ${missingTx.map((t) => t.legacy_transaction_id)}` : '');
+  missingTx.length ? `missing: ${missingTx.map((t) => t.legacy_transaction_id)}` :
+    (exSet.size ? `${exSet.size} quarantined in migration_exceptions` : ''));
+if (exSet.size) {
+  console.log(`NOTE: ${exSet.size} legacy transactions quarantined (require adjudication before prod cutover)`);
+}
 
 // 5. Asset metadata / current price equality
 const assets = await q(`SELECT legacy_coin_id, current_price, symbol FROM coins.assets`);
@@ -104,8 +114,17 @@ gate(priceMismatch.length === 0, 'asset current-price equality',
 const bounds = await q(
   `SELECT min(captured_at) mn, max(captured_at) mx FROM coins.price_ticks`);
 if (priceHistory.length) {
-  const srcMn = new Date(`${priceHistory[0].created_at}+00`.replace(' ', 'T')).getTime();
-  const srcMx = Math.max(...priceHistory.map((p) => new Date(`${p.created_at}+00`.replace(' ', 'T')).getTime()));
+  const ts = (s) => {
+    const str = String(s);
+    return new Date(str.endsWith('Z') || /[+-][0-9][0-9](:?[0-9][0-9])?$/.test(str)
+      ? str : `${str.replace(' ', 'T')}Z`).getTime();
+  };
+  let srcMn = Infinity; let srcMx = -Infinity;
+  for (const p of priceHistory) {
+    const v = ts(p.created_at);
+    if (v < srcMn) srcMn = v;
+    if (v > srcMx) srcMx = v;
+  }
   gate(new Date(bounds[0].mn).getTime() === srcMn, 'price history min timestamp');
   gate(new Date(bounds[0].mx).getTime() === srcMx, 'price history max timestamp');
 }

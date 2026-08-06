@@ -25,6 +25,13 @@ import pg from 'pg';
 // timestamp without time zone (1114): treat source bytes as UTC.
 pg.types.setTypeParser(1114, (s) => `${s}+00`);
 
+/** Normalise a JSONL timestamp to an ISO instant string PG parses as UTC. */
+const asUtc = (s) => {
+  if (s == null) return null;
+  const str = String(s);
+  return str.endsWith('Z') || /[+-][0-9][0-9](:?[0-9][0-9])?$/.test(str) ? str : `${str.replace(' ', 'T')}Z`;
+};
+
 const [exportdir, mapFile] = process.argv.slice(2);
 if (!exportdir || !mapFile) {
   console.error('usage: import-coins.mjs <exportdir> <identity-map.json>');
@@ -73,7 +80,7 @@ try {
       const b = params.length;
       params.push(row.legacy_coin_id, row.legacy_coin_id, row.name, row.symbol,
         row.current_price, row.market_cap, row.circulating_supply,
-        row.price_change_24h, row.founder, row.listed_at);
+        row.price_change_24h, row.founder, asUtc(row.listed_at));
       return `($${b + 1}, $${b + 2}, $${b + 3}, $${b + 4}, $${b + 5}, $${b + 6}, $${b + 7}, $${b + 8}, $${b + 9}, $${b + 10})`;
     },
   );
@@ -95,7 +102,7 @@ try {
     (row, params) => {
       const b = params.length;
       params.push(identityMap[String(row.legacy_user_id)], row.legacy_user_id,
-        row.username, row.email, row.created_at, row.updated_at ?? row.created_at);
+        row.username, row.email, asUtc(row.created_at), asUtc(row.updated_at ?? row.created_at));
       return `($${b + 1}, $${b + 2}, $${b + 3}, $${b + 4}, $${b + 5}, $${b + 6})`;
     },
   );
@@ -105,7 +112,7 @@ try {
     (row, params) => {
       const b = params.length;
       params.push(identityMap[String(row.legacy_user_id)], row.cash_balance,
-        row.created_at, row.updated_at ?? row.created_at);
+        asUtc(row.created_at), asUtc(row.updated_at ?? row.created_at));
       return `($${b + 1}, $${b + 2}, $${b + 3}, $${b + 4})`;
     },
   );
@@ -132,25 +139,50 @@ try {
       const qty = Number(row.quantity ?? 0);
       const costBasis = Math.round(qty * Number(row.average_purchase_price ?? 0) * 100) / 100;
       params.push(identityMap[String(row.legacy_user_id)], row.legacy_coin_id,
-        qty, costBasis, row.created_at, row.updated_at ?? row.created_at);
+        qty, costBasis, asUtc(row.created_at), asUtc(row.updated_at ?? row.created_at));
       return `($${b + 1}, $${b + 2}, $${b + 3}, $${b + 4}, $${b + 5}, $${b + 6})`;
     },
   );
 
-  // 5. trades (immutable legacy history)
+  // 5. trades (immutable legacy history). Rows that cannot satisfy target
+  // constraints (e.g. legacy numeric(18,2) zero-quantity artefacts) are NOT
+  // silently repaired: they go to coins.migration_exceptions for
+  // adjudication (plan §7.3).
   const transactions = readJsonl('transactions');
+  const validTx = [];
+  const exceptionTx = [];
+  for (const row of transactions) {
+    if (Number(row.quantity) > 0 && Number(row.price) > 0 && Number(row.total_amount) > 0) {
+      validTx.push(row);
+    } else {
+      exceptionTx.push(row);
+    }
+  }
   await batchInsert(
     `coins.trades (legacy_transaction_id, user_id, asset_id, side, quantity,
                    unit_price, total_amount, executed_at, source)`,
-    transactions,
+    validTx,
     (row, params) => {
       const b = params.length;
       params.push(row.legacy_transaction_id, identityMap[String(row.legacy_user_id)],
         row.legacy_coin_id, String(row.type).toUpperCase(), row.quantity,
-        row.price, row.total_amount, row.created_at, 'legacy_import');
+        row.price, row.total_amount, asUtc(row.created_at), 'legacy_import');
       return `($${b + 1}, $${b + 2}, $${b + 3}, $${b + 4}::coins.trade_side, $${b + 5}, $${b + 6}, $${b + 7}, $${b + 8}, $${b + 9})`;
     },
   );
+  if (exceptionTx.length) {
+    await batchInsert(
+      'coins.migration_exceptions (legacy_table, legacy_id, payload, reason)',
+      exceptionTx,
+      (row, params) => {
+        const b = params.length;
+        params.push('transactions', row.legacy_transaction_id,
+          JSON.stringify(row), 'violates target CHECK (non-positive quantity/price/total)');
+        return `($${b + 1}, $${b + 2}, $${b + 3}, $${b + 4})`;
+      },
+    );
+    console.log(`WARNING: ${exceptionTx.length} legacy transactions quarantined to migration_exceptions`);
+  }
 
   // 6. price ticks — per-asset sequence from source order (deterministic)
   const priceHistory = readJsonl('price_history');
@@ -162,7 +194,7 @@ try {
       const b = params.length;
       const seq = (seqByAsset.get(row.legacy_coin_id) ?? 0) + 1;
       seqByAsset.set(row.legacy_coin_id, seq);
-      params.push(row.legacy_coin_id, row.price, row.created_at, seq, 'legacy_import');
+      params.push(row.legacy_coin_id, row.price, asUtc(row.created_at), seq, 'legacy_import');
       return `($${b + 1}, $${b + 2}, $${b + 3}, $${b + 4}, $${b + 5})`;
     },
     1000,
@@ -177,7 +209,7 @@ try {
     (row, params) => {
       const b = params.length;
       snapSeq += 1;
-      params.push(snapSeq, row.total_value, 'STABLE', row.created_at);
+      params.push(snapSeq, row.total_value, 'STABLE', asUtc(row.created_at));
       return `($${b + 1}, $${b + 2}, $${b + 3}::coins.market_cycle, $${b + 4})`;
     },
     1000,

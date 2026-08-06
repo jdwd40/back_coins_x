@@ -18,6 +18,11 @@ import { createWriteStream, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import pg from 'pg';
 
+// timestamp without time zone (1114): the legacy convention is UTC
+// (confirmed by inventory). Emit a true UTC ISO string instead of letting
+// node-pg interpret it in the server-local timezone.
+pg.types.setTypeParser(1114, (s) => `${s.replace(' ', 'T')}Z`);
+
 const outdir = process.argv[2];
 const redactEmails = process.argv.includes('--redact-emails');
 if (!outdir) { console.error('usage: export-legacy.mjs <outdir> [--redact-emails]'); process.exit(2); }
