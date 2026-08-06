@@ -84,18 +84,32 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
   process.exit(2);
 }
 
-let created = 0; let skipped = 0; let failed = 0;
+const authHeaders = {
+  apikey: SUPABASE_SERVICE_ROLE_KEY,
+  Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+  'Content-Type': 'application/json',
+};
+
+async function findAuthUserIdByEmail(email) {
+  // Prefer filter endpoint when available; fall back to paging list.
+  const filterUrl = `${SUPABASE_URL}/auth/v1/admin/users?page=1&per_page=200`;
+  const res = await fetch(filterUrl, { headers: authHeaders });
+  if (!res.ok) return null;
+  const body = await res.json();
+  const list = Array.isArray(body) ? body : body.users || [];
+  const want = String(email).toLowerCase();
+  const hit = list.find((u) => String(u.email || '').toLowerCase() === want);
+  return hit?.id || null;
+}
+
+let created = 0; let skipped = 0; let linked = 0; let failed = 0;
 for (const u of users) {
   const key = String(u.legacy_user_id);
   if (map[key]) { skipped += 1; continue; }
   const password = randomBytes(32).toString('base64url'); // unusable; reset flow later
   const res = await fetch(`${SUPABASE_URL}/auth/v1/admin/users`, {
     method: 'POST',
-    headers: {
-      apikey: SUPABASE_SERVICE_ROLE_KEY,
-      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
-      'Content-Type': 'application/json',
-    },
+    headers: authHeaders,
     body: JSON.stringify({
       email: u.email,
       password,
@@ -104,6 +118,34 @@ for (const u of users) {
     }),
   });
   if (!res.ok) {
+    // Email already registered (common on shared Auth): link the existing UUID.
+    if (res.status === 422 || res.status === 409) {
+      const existingId = await findAuthUserIdByEmail(u.email);
+      if (existingId) {
+        // Merge Coins metadata into existing Auth user (preserve other apps' keys).
+        const getRes = await fetch(`${SUPABASE_URL}/auth/v1/admin/users/${existingId}`, {
+          headers: authHeaders,
+        });
+        const existingUser = getRes.ok ? await getRes.json() : {};
+        const prevMeta = (existingUser && existingUser.user_metadata) || {};
+        await fetch(`${SUPABASE_URL}/auth/v1/admin/users/${existingId}`, {
+          method: 'PUT',
+          headers: authHeaders,
+          body: JSON.stringify({
+            user_metadata: {
+              ...prevMeta,
+              product: 'coins',
+              legacy_user_id: u.legacy_user_id,
+              username: u.username,
+            },
+          }),
+        });
+        map[key] = existingId;
+        linked += 1;
+        writeFileSync(outFile, JSON.stringify(map, null, 2));
+        continue;
+      }
+    }
     failed += 1;
     console.error(`create failed for legacy user ${u.legacy_user_id}: HTTP ${res.status}`);
     continue;
@@ -115,5 +157,5 @@ for (const u of users) {
   writeFileSync(outFile, JSON.stringify(map, null, 2));
 }
 writeFileSync(outFile, JSON.stringify(map, null, 2));
-console.log(`admin: created=${created} skipped=${skipped} failed=${failed}`);
+console.log(`admin: created=${created} linked_existing=${linked} skipped=${skipped} failed=${failed}`);
 process.exit(failed ? 1 : 0);
