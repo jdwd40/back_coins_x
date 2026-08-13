@@ -32,9 +32,13 @@ const corsOptions = {
       'http://127.0.0.1:8080',
     ];
     
-    // Add VPS domain if specified in environment variable
+    // Add VPS domain(s) if specified in environment variable.
+    // FRONTEND_URL may be a comma-separated list (e.g. apex + www).
     if (process.env.FRONTEND_URL) {
-      allowedOrigins.push(process.env.FRONTEND_URL);
+      process.env.FRONTEND_URL.split(',')
+        .map(o => o.trim())
+        .filter(Boolean)
+        .forEach(o => allowedOrigins.push(o));
     }
     
     // Check if the origin is in the allowed list

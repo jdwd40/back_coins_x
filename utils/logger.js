@@ -10,6 +10,10 @@ const logger = {
   error: (...args) => {
     console.error(...args);
   },
+  // Warnings always available (used by CORS rejection path in production)
+  warn: (...args) => {
+    console.warn(...args);
+  },
   // Always log fatal errors regardless of environment
   fatal: (...args) => {
     console.error('[FATAL]', ...args);
