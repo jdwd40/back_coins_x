@@ -1,4 +1,5 @@
 const request = require('supertest');
+const jwt = require('jsonwebtoken');
 const app = require('../app');
 const db = require('../db/connection');
 const seed = require('../db/seed');
@@ -6,6 +7,10 @@ const { CurrencyFormatter } = require('../utils/currency-formatter');
 
 // Ensure test environment
 process.env.NODE_ENV = 'test';
+
+let authToken; // admin JWT
+let nonAdminToken;
+let adminUserId;
 
 // Setup and teardown
 beforeAll(async () => {
@@ -15,6 +20,30 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   await seed(false);
+  delete process.env.PRICE_ADMIN_API_KEY;
+  delete process.env.SYSTEM_API_KEY;
+
+  const adminResult = await db.query(
+    'INSERT INTO users (username, email, password_hash, funds) VALUES ($1, $2, $3, $4) RETURNING *',
+    ['price_admin', 'price_admin@example.com', 'hashedpassword', 1000.00]
+  );
+  const admin = adminResult.rows[0];
+  adminUserId = admin.user_id;
+  process.env.ADMIN_USER_IDS = String(admin.user_id);
+  authToken = jwt.sign(
+    { user_id: admin.user_id, username: admin.username },
+    process.env.JWT_SECRET
+  );
+
+  const regularResult = await db.query(
+    'INSERT INTO users (username, email, password_hash, funds) VALUES ($1, $2, $3, $4) RETURNING *',
+    ['regular_user', 'regular@example.com', 'hashedpassword', 1000.00]
+  );
+  const regular = regularResult.rows[0];
+  nonAdminToken = jwt.sign(
+    { user_id: regular.user_id, username: regular.username },
+    process.env.JWT_SECRET
+  );
 });
 
 afterAll(async () => {
@@ -100,9 +129,44 @@ describe('Coins API', () => {
   });
 
   describe('PATCH /api/coins/:coin_id/price', () => {
-    test('200: successfully updates coin price with GBP string', async () => {
+    test('401: rejects unauthenticated price updates', async () => {
       const response = await request(app)
         .patch('/api/coins/1/price')
+        .send({ current_price: "£150.00" })
+        .expect(401);
+
+      expect(response.body.msg).toBe('Authentication required');
+    });
+
+    test('403: rejects authenticated non-admin users', async () => {
+      const response = await request(app)
+        .patch('/api/coins/1/price')
+        .set('Authorization', `Bearer ${nonAdminToken}`)
+        .send({ current_price: "£150.00" })
+        .expect(403);
+
+      expect(response.body.msg).toBe('Admin privileges required to update coin prices');
+    });
+
+    test('200: system key can update price without user JWT', async () => {
+      process.env.PRICE_ADMIN_API_KEY = 'test-system-key';
+      const response = await request(app)
+        .patch('/api/coins/1/price')
+        .set('X-System-Key', 'test-system-key')
+        .send({ current_price: "£160.00" })
+        .expect(200);
+
+      expect(response.body.coin).toMatchObject({
+        coin_id: 1,
+        current_price: "£160.00",
+      });
+    });
+
+    test('200: successfully updates coin price with GBP string', async () => {
+      expect(process.env.ADMIN_USER_IDS).toBe(String(adminUserId));
+      const response = await request(app)
+        .patch('/api/coins/1/price')
+        .set('Authorization', `Bearer ${authToken}`)
         .send({ current_price: "£150.00" })
         .expect(200);
 
@@ -116,6 +180,7 @@ describe('Coins API', () => {
     test('200: successfully updates coin price with numeric string', async () => {
       const response = await request(app)
         .patch('/api/coins/1/price')
+        .set('Authorization', `Bearer ${authToken}`)
         .send({ current_price: "150.00" })
         .expect(200);
 
@@ -128,6 +193,7 @@ describe('Coins API', () => {
     test('200: successfully updates coin price with number', async () => {
       const response = await request(app)
         .patch('/api/coins/1/price')
+        .set('Authorization', `Bearer ${authToken}`)
         .send({ current_price: 150.00 })
         .expect(200);
 
@@ -140,6 +206,7 @@ describe('Coins API', () => {
     test('200: successfully updates coin price with formatted number string', async () => {
       const response = await request(app)
         .patch('/api/coins/1/price')
+        .set('Authorization', `Bearer ${authToken}`)
         .send({ current_price: "1,150.00" })
         .expect(200);
 
@@ -152,6 +219,7 @@ describe('Coins API', () => {
     test('400: returns bad request when price is missing', async () => {
       const response = await request(app)
         .patch('/api/coins/1/price')
+        .set('Authorization', `Bearer ${authToken}`)
         .send({})
         .expect(400);
 
@@ -161,6 +229,7 @@ describe('Coins API', () => {
     test('400: returns bad request when price is invalid string', async () => {
       const response = await request(app)
         .patch('/api/coins/1/price')
+        .set('Authorization', `Bearer ${authToken}`)
         .send({ current_price: 'invalid' })
         .expect(400);
 
@@ -170,6 +239,7 @@ describe('Coins API', () => {
     test('400: returns bad request when price is negative', async () => {
       const response = await request(app)
         .patch('/api/coins/1/price')
+        .set('Authorization', `Bearer ${authToken}`)
         .send({ current_price: -150.00 })
         .expect(400);
 
@@ -179,6 +249,7 @@ describe('Coins API', () => {
     test('404: returns not found for non-existent coin_id', async () => {
       const response = await request(app)
         .patch('/api/coins/999/price')
+        .set('Authorization', `Bearer ${authToken}`)
         .send({ current_price: "£150.00" })
         .expect(404);
 
@@ -188,6 +259,7 @@ describe('Coins API', () => {
     test('400: returns bad request for invalid coin_id', async () => {
       const response = await request(app)
         .patch('/api/coins/not-a-number/price')
+        .set('Authorization', `Bearer ${authToken}`)
         .send({ current_price: "£150.00" })
         .expect(400);
 

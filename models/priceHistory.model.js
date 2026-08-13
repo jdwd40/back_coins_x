@@ -100,21 +100,55 @@ exports.getPriceHistory = async (coinId, range) => {
       resolution = '12h';
     }
 
-    // Query using the *concrete oldest timestamp* as lower bound (not an interval)
+    // Bound bucket count before SQL so long retention cannot materialize unbounded groups.
+    // Grow bucket size until estimated buckets fit the chart budget (max 200).
+    const maxBucketSeconds = 7 * 24 * 3600; // 7d buckets as hard ceiling
+    let estimatedBuckets = Math.ceil(spanMs / (bucketSeconds * 1000)) + 1;
+    while (estimatedBuckets > MAX_POINTS_BUDGET && bucketSeconds < maxBucketSeconds) {
+      bucketSeconds = Math.min(bucketSeconds * 2, maxBucketSeconds);
+      estimatedBuckets = Math.ceil(spanMs / (bucketSeconds * 1000)) + 1;
+    }
+    if (bucketSeconds >= 86400) {
+      resolution = bucketSeconds >= 7 * 86400 ? '7d' : `${Math.round(bucketSeconds / 86400)}d`;
+    } else if (bucketSeconds >= 3600) {
+      resolution = `${Math.round(bucketSeconds / 3600)}h`;
+    } else if (bucketSeconds >= 60) {
+      resolution = `${Math.round(bucketSeconds / 60)}m`;
+    }
+
+    // Only scan ticks that can land in the newest MAX_POINTS_BUDGET buckets
+    // (avoids aggregating full retention when the chart will discard older buckets).
+    const scanFrom = new Date(
+      Math.max(
+        oldestDate.getTime(),
+        now.getTime() - bucketSeconds * 1000 * MAX_POINTS_BUDGET
+      )
+    );
+    from = scanFrom;
+
+    // Query-time bucketing with an in-SQL newest-N cap (never return > MAX_POINTS_BUDGET rows).
     const result = await db.query(
-      `SELECT
-        to_timestamp(floor(extract(epoch from created_at) / $3) * $3) AS time,
-        (ARRAY_AGG(price ORDER BY created_at ASC))[1] AS open,
-        MAX(price) AS high,
-        MIN(price) AS low,
-        (ARRAY_AGG(price ORDER BY created_at DESC))[1] AS close,
-        COUNT(*)::int AS samples
-      FROM price_history
-      WHERE coin_id = $1
-        AND created_at >= $2
-      GROUP BY floor(extract(epoch from created_at) / $3)
+      `WITH buckets AS (
+        SELECT
+          to_timestamp(floor(extract(epoch from created_at) / $3) * $3) AS time,
+          (ARRAY_AGG(price ORDER BY created_at ASC))[1] AS open,
+          MAX(price) AS high,
+          MIN(price) AS low,
+          (ARRAY_AGG(price ORDER BY created_at DESC))[1] AS close,
+          COUNT(*)::int AS samples
+        FROM price_history
+        WHERE coin_id = $1
+          AND created_at >= $2
+        GROUP BY floor(extract(epoch from created_at) / $3)
+      ),
+      newest AS (
+        SELECT * FROM buckets
+        ORDER BY time DESC
+        LIMIT $4
+      )
+      SELECT * FROM newest
       ORDER BY time ASC`,
-      [coinId, oldest, bucketSeconds]
+      [coinId, scanFrom, bucketSeconds, MAX_POINTS_BUDGET]
     );
     rows = result.rows;
   } else {
@@ -179,7 +213,7 @@ exports.getPriceHistory = async (coinId, range) => {
 
   // A trailing window can touch one extra boundary bucket. Keep the newest
   // configured number of points so every response stays within its chart budget.
-  // For ALL we skip the per-range trim (budget safety only)
+  // ALL is already bounded in SQL; still enforce the global budget by trimming newest.
   if (!isAll) {
     const config = RANGE_CONFIG[range];
     if (points.length > config.maxPoints) {
@@ -188,9 +222,7 @@ exports.getPriceHistory = async (coinId, range) => {
   }
 
   if (points.length > MAX_POINTS_BUDGET) {
-    const err = new Error('Range would exceed 200 points; reduce range');
-    err.status = 400;
-    throw err;
+    points.splice(0, points.length - MAX_POINTS_BUDGET);
   }
 
   // Calculate bucket completeness:

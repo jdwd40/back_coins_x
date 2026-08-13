@@ -7,7 +7,7 @@ const {
   deleteUser,
   updateUserFunds
 } = require('../controllers/users.controller');
-const { authenticateToken } = require('../middleware/auth.middleware');
+const { authenticateToken, requireSelfOrAdmin } = require('../middleware/auth.middleware');
 
 const usersRouter = express.Router();
 
@@ -17,8 +17,9 @@ usersRouter.post('/login', loginUser);
 
 // Protected routes
 usersRouter.get('/:user_id', authenticateToken, getUserProfile);
-usersRouter.put('/:user_id', authenticateToken, updateUserProfile);
-usersRouter.delete('/:user_id', authenticateToken, deleteUser);
-usersRouter.patch('/:user_id/funds', authenticateToken, updateUserFunds);
+// Mutating routes: self or configured admin only (blocks cross-user password takeover)
+usersRouter.put('/:user_id', authenticateToken, requireSelfOrAdmin, updateUserProfile);
+usersRouter.delete('/:user_id', authenticateToken, requireSelfOrAdmin, deleteUser);
+usersRouter.patch('/:user_id/funds', authenticateToken, requireSelfOrAdmin, updateUserFunds);
 
 module.exports = { usersRouter };

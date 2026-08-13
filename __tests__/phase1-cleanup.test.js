@@ -6,104 +6,73 @@ describe('Phase 1: Cleanup and Timestamp Fixes', () => {
     await seed();
   });
 
-  describe('7-day data retention', () => {
-    test('cleanup_price_history should keep data from last 7 days', async () => {
-      // Insert test data with different ages
+  describe('90-day data retention (supports 30D/ALL chart ranges)', () => {
+    test('cleanup_price_history should drop data older than 90 days and keep 30D-window data', async () => {
       const testCoinId = 1;
-      
-      // Insert price 8 days ago (should be deleted)
+
+      // Outside retention window
       await db.query(`
         INSERT INTO price_history (coin_id, price, created_at)
-        VALUES ($1, 100.00, NOW() - INTERVAL '8 days')
-      `, [testCoinId]);
-      
-      // Insert price 6 days ago (should be kept)
-      await db.query(`
-        INSERT INTO price_history (coin_id, price, created_at)
-        VALUES ($1, 105.00, NOW() - INTERVAL '6 days')
-      `, [testCoinId]);
-      
-      // Insert price 3 days ago (should be kept)
-      await db.query(`
-        INSERT INTO price_history (coin_id, price, created_at)
-        VALUES ($1, 110.00, NOW() - INTERVAL '3 days')
-      `, [testCoinId]);
-      
-      // Insert price 1 day ago (should be kept)
-      await db.query(`
-        INSERT INTO price_history (coin_id, price, created_at)
-        VALUES ($1, 115.00, NOW() - INTERVAL '1 day')
+        VALUES ($1, 100.00, NOW() - INTERVAL '91 days')
       `, [testCoinId]);
 
-      // Count before cleanup
+      // Inside 30D / 90D windows (must survive)
+      await db.query(`
+        INSERT INTO price_history (coin_id, price, created_at)
+        VALUES
+          ($1, 105.00, NOW() - INTERVAL '29 days'),
+          ($1, 110.00, NOW() - INTERVAL '14 days'),
+          ($1, 115.00, NOW() - INTERVAL '3 days'),
+          ($1, 120.00, NOW() - INTERVAL '1 day')
+      `, [testCoinId]);
+
       const beforeResult = await db.query(`
         SELECT COUNT(*) FROM price_history WHERE coin_id = $1
       `, [testCoinId]);
-      const beforeCount = parseInt(beforeResult.rows[0].count);
-      
-      expect(beforeCount).toBeGreaterThanOrEqual(4);
+      expect(parseInt(beforeResult.rows[0].count)).toBeGreaterThanOrEqual(5);
 
-      // Run cleanup function
       await db.query('SELECT cleanup_price_history()');
 
-      // Count after cleanup
-      const afterResult = await db.query(`
-        SELECT COUNT(*) FROM price_history WHERE coin_id = $1
-      `, [testCoinId]);
-      const afterCount = parseInt(afterResult.rows[0].count);
-
-      // Verify data older than 7 days was deleted
       const oldDataResult = await db.query(`
-        SELECT COUNT(*) 
-        FROM price_history 
-        WHERE coin_id = $1 
-        AND created_at < NOW() - INTERVAL '7 days'
+        SELECT COUNT(*)
+        FROM price_history
+        WHERE coin_id = $1
+          AND created_at < NOW() - INTERVAL '90 days'
       `, [testCoinId]);
-      const oldDataCount = parseInt(oldDataResult.rows[0].count);
-      
-      expect(oldDataCount).toBe(0);
+      expect(parseInt(oldDataResult.rows[0].count)).toBe(0);
 
-      // Verify data within 7 days is still there
       const recentDataResult = await db.query(`
-        SELECT COUNT(*) 
-        FROM price_history 
-        WHERE coin_id = $1 
-        AND created_at >= NOW() - INTERVAL '7 days'
+        SELECT COUNT(*)
+        FROM price_history
+        WHERE coin_id = $1
+          AND created_at >= NOW() - INTERVAL '30 days'
       `, [testCoinId]);
-      const recentDataCount = parseInt(recentDataResult.rows[0].count);
-      
-      expect(recentDataCount).toBeGreaterThanOrEqual(3);
+      expect(parseInt(recentDataResult.rows[0].count)).toBeGreaterThanOrEqual(4);
     });
 
-    test('cleanup_price_history should not delete data within 7 days', async () => {
+    test('cleanup_price_history should not delete data within 90 days', async () => {
       const testCoinId = 2;
-      
-      // Insert only recent data (last 3 days)
+
       await db.query(`
         INSERT INTO price_history (coin_id, price, created_at)
-        VALUES 
-          ($1, 100.00, NOW() - INTERVAL '3 days'),
-          ($1, 105.00, NOW() - INTERVAL '2 days'),
+        VALUES
+          ($1, 100.00, NOW() - INTERVAL '45 days'),
+          ($1, 105.00, NOW() - INTERVAL '20 days'),
           ($1, 110.00, NOW() - INTERVAL '1 day'),
           ($1, 115.00, NOW() - INTERVAL '6 hours')
       `, [testCoinId]);
 
-      // Count before cleanup
       const beforeResult = await db.query(`
         SELECT COUNT(*) FROM price_history WHERE coin_id = $1
       `, [testCoinId]);
       const beforeCount = parseInt(beforeResult.rows[0].count);
 
-      // Run cleanup function
       await db.query('SELECT cleanup_price_history()');
 
-      // Count after cleanup - should be the same
       const afterResult = await db.query(`
         SELECT COUNT(*) FROM price_history WHERE coin_id = $1
       `, [testCoinId]);
-      const afterCount = parseInt(afterResult.rows[0].count);
-
-      expect(afterCount).toBe(beforeCount);
+      expect(parseInt(afterResult.rows[0].count)).toBe(beforeCount);
     });
   });
 

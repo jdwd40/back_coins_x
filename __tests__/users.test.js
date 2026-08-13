@@ -340,7 +340,7 @@ describe('Users API', () => {
     });
 
     describe('PUT /api/users/:user_id', () => {
-      test('200: updates user profile when authenticated', () => {
+      test('200: updates user profile when authenticated as self', () => {
         const updates = {
           username: 'john_updated',
           email: 'john_updated@example.com'
@@ -369,6 +369,49 @@ describe('Users API', () => {
           .then(({ body }) => {
             expect(body.msg).toBe('Authentication required');
           });
+      });
+
+      test('403: rejects cross-user password change (cannot takeover admin/other accounts)', async () => {
+        // user 1 (john) must not change user 2 (jane) password — regression for price-admin bypass
+        const before = await db.query(
+          'SELECT password_hash FROM users WHERE user_id = $1',
+          [2]
+        );
+        const beforeHash = before.rows[0].password_hash;
+
+        const response = await request(app)
+          .put('/api/users/2')
+          .set('Authorization', `Bearer ${testUserToken}`)
+          .send({ password: 'hacked-password-999' })
+          .expect(403);
+
+        expect(response.body.msg).toMatch(/own account/i);
+
+        const after = await db.query(
+          'SELECT password_hash FROM users WHERE user_id = $1',
+          [2]
+        );
+        expect(after.rows[0].password_hash).toBe(beforeHash);
+
+        // Victim can still authenticate with original seed password path: hash unchanged
+        // (login uses bcrypt compare against seed hash; we only assert no mutation here)
+      });
+
+      test('403: rejects cross-user profile field updates', async () => {
+        const response = await request(app)
+          .put('/api/users/2')
+          .set('Authorization', `Bearer ${testUserToken}`)
+          .send({ username: 'hijacked_jane' })
+          .expect(403);
+
+        expect(response.body.success).toBe(false);
+        expect(response.body.msg).toMatch(/own account/i);
+
+        const jane = await db.query(
+          'SELECT username FROM users WHERE user_id = $1',
+          [2]
+        );
+        expect(jane.rows[0].username).toBe('jane_smith');
       });
     });
 

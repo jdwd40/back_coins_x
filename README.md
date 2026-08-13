@@ -76,9 +76,26 @@ JWT_SECRET=your-strong-random-prod-secret   # REQUIRED; same value used for sign
 PGDATABASE=coins_x   # or use DATABASE_URL for prod
 FRONTEND_URL=https://yourdomain.com
 # or http://your-vps-ip:port if using IP address
+
+# PATCH /api/coins/:id/price is admin/system only (fail-closed):
+ADMIN_USER_IDS=1                 # comma-separated user_ids allowed to mutate prices
+# ADMIN_EMAILS=admin@example.com
+# ADMIN_USERNAMES=admin_user
+PRICE_ADMIN_API_KEY=long-random  # optional: X-System-Key / X-Admin-Key for internal tooling
 ```
 
 In production (NODE_ENV=production) the server will fatal-exit before listening if JWT_SECRET missing/blank.
+
+### Price-history retention migration (staging)
+
+`db/migrations/007_extend_price_history_retention.sql` is portable (no `\c` switches). Apply against the **connected** app DB and the test DB:
+
+```bash
+# Confirm real DB name on the host first (README uses coins_x; some locals use coins)
+psql -U jd -d coins_x -c '\conninfo'
+psql -U jd -d coins_x -f db/migrations/007_extend_price_history_retention.sql
+psql -U jd -d coins_x_test -f db/migrations/007_extend_price_history_retention.sql
+```
 
 ## Installation
 
