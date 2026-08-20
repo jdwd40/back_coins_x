@@ -77,6 +77,17 @@ async function refreshCandles() {
 }
 
 async function tickOnce() {
+  // Advance the global apocalypse cycle on every wake-up — even when the
+  // market is halted — so the game never depends on a logged-in user or
+  // browser polling (Crypto Chaos Core 1). Idempotent: no-op while a valid
+  // active round exists.
+  const { rows: [g] } = await client.query('SELECT coins.ensure_active_cycle() AS r');
+  if (g.r.created) {
+    log('info', 'apocalypse cycle advanced', {
+      apocalypse_id: g.r.apocalypse_id, cycle_number: g.r.cycle_number,
+      completed: g.r.completed_count,
+    });
+  }
   const { rows } = await client.query(
     'SELECT coins.run_market_tick($1, $2) AS r',
     [MARKET_WORKER_ID, lastSequence],
