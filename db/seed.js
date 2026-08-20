@@ -4,6 +4,13 @@ const bcrypt = require('bcrypt');
 const { CurrencyFormatter } = require('../utils/currency-formatter');
 
 const seed = async (shouldEnd = false) => {
+  // Hard safety stop: the seed script is destructive (it drops and recreates
+  // every table) and must never run against a production database. Production
+  // schema changes go through db/migrate.js only.
+  if ((process.env.NODE_ENV || 'development') === 'production') {
+    throw new Error('db/seed.js is destructive and must never run with NODE_ENV=production. Use db/migrate.js for production schema changes.');
+  }
+
   console.log('🌱 Starting database seeding...');
   
   try {
@@ -20,6 +27,9 @@ const seed = async (shouldEnd = false) => {
       DROP TABLE IF EXISTS "coins" CASCADE;
       DROP TABLE IF EXISTS "users" CASCADE;
       DROP TABLE IF EXISTS "coin_statistics" CASCADE;
+      DROP TABLE IF EXISTS "coin_collapse_schedule" CASCADE;
+      DROP TABLE IF EXISTS "apocalypse_cycles" CASCADE;
+      DROP TABLE IF EXISTS "schema_migrations" CASCADE;
       DROP SEQUENCE IF EXISTS users_user_id_seq CASCADE;
       DROP SEQUENCE IF EXISTS coins_coin_id_seq CASCADE;
       DROP SEQUENCE IF EXISTS portfolios_portfolio_id_seq CASCADE;
@@ -141,6 +151,23 @@ const seed = async (shouldEnd = false) => {
       $$ LANGUAGE plpgsql;
     `);
 
+    console.log('📦 Applying game-cycle migration (db/migrations/007_create_apocalypse_cycles.sql)...');
+    // Keep the test schema's game-cycle DDL sourced from the production migration.
+    const gameCycleMigration = require('fs').readFileSync(
+      require('path').join(__dirname, 'migrations', '007_create_apocalypse_cycles.sql'),
+      'utf8'
+    );
+    await db.query(gameCycleMigration);
+
+    console.log('📦 Applying coin-collapse migration (db/migrations/008_create_coin_collapse_schedule.sql)...');
+    // Keep the test schema's Core 3 collapse DDL sourced from the production
+    // migration as well; no duplicated DDL here.
+    const coinCollapseMigration = require('fs').readFileSync(
+      require('path').join(__dirname, 'migrations', '008_create_coin_collapse_schedule.sql'),
+      'utf8'
+    );
+    await db.query(coinCollapseMigration);
+
     console.log('📦 Inserting coins data...');
     // Insert coins data
     const coinsData = require(process.env.NODE_ENV === 'test' 
@@ -159,13 +186,16 @@ const seed = async (shouldEnd = false) => {
         marketCap,
         coin.circulating_supply,
         priceChange,
-        coin.founder
+        coin.founder,
+        // Core 3: seed the durable restoration baseline with the initial
+        // price (mirrors the migration 008 backfill for existing rows).
+        currentPrice
       ];
     });
 
     const insertedCoins = await db.query(
       format(
-        'INSERT INTO coins (name, symbol, current_price, market_cap, circulating_supply, price_change_24h, founder) VALUES %L RETURNING *',
+        'INSERT INTO coins (name, symbol, current_price, market_cap, circulating_supply, price_change_24h, founder, cycle_baseline_price) VALUES %L RETURNING *',
         coinValues
       )
     );

@@ -9,6 +9,7 @@ const {
 } = require('../models/transactions.model');
 const { selectCoinById, selectCoinRawById } = require('../models/coins.model');
 const { getUserFunds } = require('../models/users.model');
+const { isCoinCollapsed } = require('../game/collapseScheduleService');
 
 exports.createTransaction = async (req, res, next) => {
   try {
@@ -147,6 +148,20 @@ exports.processBuyTransaction = async (req, res, next) => {
       return res.status(404).json({
         status: 'error',
         message: 'Coin not found. Please provide a valid coin_id.'
+      });
+    }
+
+    // Core 3 narrow price-zero compatibility guard: a coin collapsed in the
+    // ACTIVE apocalypse cycle is permanently dead for the rest of the cycle
+    // (live price exactly £0). Reject new purchases with a clear domain error —
+    // buying at £0 would hand out free coins for nothing. Death is read from
+    // the persisted collapse schedule execution state, not inferred from the
+    // price. Selling an existing dead holding remains possible and cannot
+    // create cash: its £0 live price values the sale at exactly £0.
+    if (await isCoinCollapsed(coin_id)) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'This coin has collapsed to £0 in the current apocalypse cycle and cannot be purchased.'
       });
     }
 

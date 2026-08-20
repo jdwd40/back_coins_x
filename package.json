@@ -11,6 +11,8 @@
     "start": "NODE_OPTIONS='--max-old-space-size=512' node server.js",
     "dev": "NODE_OPTIONS='--max-old-space-size=512' nodemon server.js",
     "seed": "node db/seed.js",
+    "migrate": "node db/migrate.js",
+    "verify:game-schema": "node db/verify-game-schema.js",
     "clear-price-history": "node clear-price-history.js"
   },
   "keywords": [],

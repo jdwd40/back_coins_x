@@ -1,5 +1,8 @@
 const db = require('../db/connection');
 const logger = require('../utils/logger');
+const gameCycleService = require('../game/gameCycleService');
+const { getApocalypseVolatility } = require('../game/apocalypseVolatility');
+const collapseScheduleService = require('../game/collapseScheduleService');
 // Market cycle types with more balanced effects
 const MARKET_CYCLES = {
   STRONG_BOOM: { type: 'STRONG_BOOM', baseEffect: 0.005 },    // 0.5% max
@@ -71,24 +74,35 @@ class MarketSimulator {
     });
   }
 
-  // Calculate new price with mean reversion and damping
-  calculateNewPrice(currentPrice, coinId) {
+  // Calculate new price with mean reversion and damping.
+  // volatilityMultiplier is the Core 2 apocalypse factor, resolved ONCE per
+  // updateAllPrices() batch from authoritative Core 1 state. It scales the
+  // volatility-sensitive directional movement amplitude (market-cycle, random
+  // and trend components); the event effect and the protective mean-reversion
+  // pull are intentionally not scaled. Any invalid multiplier (NaN, Infinity,
+  // zero, negative, missing) safely falls back to normal volatility (1).
+  calculateNewPrice(currentPrice, coinId, volatilityMultiplier = 1) {
     const volatilityProfile = this.coinVolatility.get(coinId);
     if (!volatilityProfile) return currentPrice;
 
+    const apocalypseFactor =
+      typeof volatilityMultiplier === 'number' && Number.isFinite(volatilityMultiplier) && volatilityMultiplier > 0
+        ? volatilityMultiplier
+        : 1;
+
     const { baseVolatility, trendDirection, trendStrength } = volatilityProfile;
     const initialPrice = this.initialPrices.get(coinId);
-    
+
     // Market cycle effect (reduced impact)
-    const marketEffect = this.currentCycle ? 
-      (this.currentCycle.type === 'STABLE' ? 0 : this.currentCycle.baseEffect * baseVolatility) : 0;
+    const marketEffect = this.currentCycle ?
+      (this.currentCycle.type === 'STABLE' ? 0 : this.currentCycle.baseEffect * baseVolatility * apocalypseFactor) : 0;
 
     // Coin-specific event effect
     const coinEvent = this.coinEvents.get(coinId);
     const eventEffect = coinEvent ? (coinEvent.multiplier - 1) * 0.1 * baseVolatility : 0;
 
-    // Reduced random component (-0.2% to +0.2% * volatility)
-    const randomEffect = ((Math.random() * 0.004) - 0.002) * baseVolatility;
+    // Reduced random component (-0.2% to +0.2% * volatility), apocalypse-scaled
+    const randomEffect = ((Math.random() * 0.004) - 0.002) * baseVolatility * apocalypseFactor;
 
     // Trend component with duration check
     let trendEffect = 0;
@@ -101,7 +115,7 @@ class MarketSimulator {
       volatilityProfile.trendStartTime = now;
       this.coinVolatility.set(coinId, volatilityProfile);
     }
-    trendEffect = trendDirection * trendStrength;
+    trendEffect = trendDirection * trendStrength * apocalypseFactor;
 
     // Mean reversion effect (pulls price back towards initial price)
     const priceDeviation = (currentPrice - initialPrice) / initialPrice;
@@ -277,6 +291,22 @@ class MarketSimulator {
   async updateAllPrices() {
     let client;
     try {
+      // Core 2: resolve the authoritative Core 1 apocalypse state ONCE per
+      // batch (before opening the write transaction so the cycle advisory
+      // lock and the coin row locks can never interleave), then translate
+      // progress into a single bounded volatility multiplier shared by every
+      // coin calculation in this batch. If Core 1 state is unreadable this
+      // throws here and the batch aborts before any write.
+      const gameState = await gameCycleService.getGameState();
+      const volatilityMultiplier = getApocalypseVolatility(gameState.apocalypsePercent);
+
+      // Core 3: the getGameState() call above has already reconciled any due
+      // collapses (they execute inside the Core 1 lifecycle transaction, before
+      // this batch calculates prices). Read the persisted execution state of
+      // the ACTIVE cycle — never inferred from current_price === 0, never held
+      // in memory — so collapsed coins are excluded from this batch.
+      const collapsedCoinIds = await collapseScheduleService.getCollapsedCoinIds();
+
       client = await db.getClient();
       await client.query('BEGIN');
       // Lock coins for consistent snapshot + atomic writes to coins + price_history + market_history
@@ -285,7 +315,32 @@ class MarketSimulator {
       let totalMarketValue = 0;
 
       for (const coin of coins) {
-        const newPrice = this.calculateNewPrice(parseFloat(coin.current_price), coin.coin_id);
+        // A coin collapsed in the ACTIVE cycle is dead for the rest of the
+        // cycle: the simulator must not calculate or write a new positive
+        // price for it. It stays exactly £0 (Core 2 multiplier and restarts
+        // cannot revive it); its £0 transition was already appended to
+        // price_history by the collapse execution, so no history row is
+        // written here either. Zero itself therefore never reaches the
+        // invalid-write guard below and never causes a batch rollback.
+        if (collapsedCoinIds.has(coin.coin_id)) {
+          if (parseFloat(coin.current_price) !== 0) {
+            // Malformed persisted state: a collapsed coin with a non-zero
+            // price. Fail the whole batch safely — write nothing, revive
+            // nothing — rather than corrupt state further.
+            throw new Error(
+              `[MARKET] Collapsed coin ${coin.coin_id} has non-zero price ${coin.current_price}; aborting batch to fail safe`
+            );
+          }
+          continue;
+        }
+        const newPrice = this.calculateNewPrice(parseFloat(coin.current_price), coin.coin_id, volatilityMultiplier);
+        // Never persist a corrupt value: an invalid price aborts the whole
+        // batch (rollback below) instead of silently writing bad data.
+        if (typeof newPrice !== 'number' || !Number.isFinite(newPrice) || newPrice <= 0) {
+          throw new Error(
+            `[MARKET] Refusing to write invalid price ${String(newPrice)} for coin ${coin.coin_id}; aborting batch`
+          );
+        }
         await client.query(
           'UPDATE coins SET current_price = $1 WHERE coin_id = $2',
           [newPrice, coin.coin_id]

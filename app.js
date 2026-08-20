@@ -8,6 +8,7 @@ const { coinsRouter } = require('./routes/coins.routes');
 const { usersRouter } = require('./routes/users.routes');
 const { transactionsRouter } = require('./routes/transactions.routes');
 const { marketRouter } = require('./routes/market.routes');
+const { gameRouter } = require('./routes/game.routes');
 
 const marketSimulator = require('./models/market-simulator');
 
@@ -64,6 +65,7 @@ app.use('/api/coins', coinsRouter);
 app.use('/api/users', usersRouter);
 app.use('/api/transactions', transactionsRouter);
 app.use('/api/market', marketRouter);
+app.use('/api/game', gameRouter);
 
 // Error handling middleware
 app.use((err, req, res, next) => {
@@ -131,7 +133,9 @@ app.use((req, res) => {
   res.status(404).json({ message: 'Route not found' });
 });
 
-// Start market simulation in production
+// Keep the legacy market simulator lifecycle unchanged. The global game-cycle
+// worker is started explicitly by server.js only after the database check and
+// HTTP listener have completed, never as an application-module side effect.
 if (process.env.NODE_ENV === 'production') {
   marketSimulator.start();
 }
