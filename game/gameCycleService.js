@@ -1,6 +1,11 @@
 const crypto = require('crypto');
 const db = require('../db/connection');
 const collapseSchedule = require('./collapseScheduleService');
+// Core 4: round-state finalization hook. This module requires
+// gameRoundService at load time; gameRoundService never requires this module
+// at the top level (it lazy-requires reconcileCycle inside joinRound only),
+// so there is no circular import.
+const gameRoundService = require('./gameRoundService');
 
 // Default global apocalypse cycle length: 30 minutes.
 const DEFAULT_GAME_CYCLE_DURATION_MS = 30 * 60 * 1000;
@@ -155,6 +160,13 @@ async function reconcileCycle({ now = new Date(), durationMs, generateSeed = def
       // completed, so no scheduled collapse (including the final one,
       // scheduled exactly at cycle end) is lost to downtime.
       await collapseSchedule.executeDueCollapses(client, active.cycle_id, new Date(active.end_time));
+      // Core 4: with the final £0 collapses persisted, finalize every active
+      // participant of the expiring cycle — status FINALIZED, final_cash
+      // from authoritative current_cash — inside this same advisory-locked
+      // transaction, before the cycle becomes COMPLETED and its successor
+      // exists. Nothing transfers to the successor; a join there starts
+      // fresh at the game starting cash. The hook is idempotent.
+      await gameRoundService.finalizeCycleParticipants(client, active.cycle_id);
       await client.query(
         `UPDATE apocalypse_cycles SET status = 'COMPLETED', updated_at = $2 WHERE cycle_id = $1`,
         [active.cycle_id, new Date(nowMs).toISOString()]

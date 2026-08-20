@@ -3,6 +3,7 @@ const logger = require('../utils/logger');
 const gameCycleService = require('../game/gameCycleService');
 const { getApocalypseVolatility } = require('../game/apocalypseVolatility');
 const collapseScheduleService = require('../game/collapseScheduleService');
+const gameRoundService = require('../game/gameRoundService');
 // Market cycle types with more balanced effects
 const MARKET_CYCLES = {
   STRONG_BOOM: { type: 'STRONG_BOOM', baseEffect: 0.005 },    // 0.5% max
@@ -357,6 +358,12 @@ class MarketSimulator {
         'INSERT INTO market_history (total_value, market_trend) VALUES ($1, $2)',
         [totalMarketValue, this.currentCycle?.type || 'STABLE']
       );
+
+      // Core 4: set-based peak reconciliation. One SQL statement lifts every
+      // active participant's monotonic peak_wealth from the prices just
+      // written in this batch — atomically with the price update itself, and
+      // with no per-participant JavaScript loop.
+      await gameRoundService.reconcileActivePeaks(client);
 
       await client.query('COMMIT');
     } catch (error) {

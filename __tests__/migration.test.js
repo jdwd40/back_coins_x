@@ -14,6 +14,12 @@ const { assertDisposableTestDatabase } = require('./helpers/testDatabaseGuard');
 const MIGRATION_007 = '007_create_apocalypse_cycles.sql';
 
 async function dropGameSchema() {
+  // Core 4 round-state tables depend on apocalypse_cycles (FK); dropping the
+  // cycles table CASCADE would silently strip their FK constraints, so the
+  // pre-game-schema simulation must remove them explicitly first.
+  await db.query('DROP TABLE IF EXISTS apocalypse_transactions CASCADE');
+  await db.query('DROP TABLE IF EXISTS apocalypse_holdings CASCADE');
+  await db.query('DROP TABLE IF EXISTS apocalypse_participants CASCADE');
   await db.query('DROP TABLE IF EXISTS coin_collapse_schedule CASCADE');
   await db.query('DROP TABLE IF EXISTS apocalypse_cycles CASCADE');
   await db.query('ALTER TABLE coins DROP COLUMN IF EXISTS cycle_baseline_price');

@@ -27,6 +27,9 @@ const seed = async (shouldEnd = false) => {
       DROP TABLE IF EXISTS "coins" CASCADE;
       DROP TABLE IF EXISTS "users" CASCADE;
       DROP TABLE IF EXISTS "coin_statistics" CASCADE;
+      DROP TABLE IF EXISTS "apocalypse_transactions" CASCADE;
+      DROP TABLE IF EXISTS "apocalypse_holdings" CASCADE;
+      DROP TABLE IF EXISTS "apocalypse_participants" CASCADE;
       DROP TABLE IF EXISTS "coin_collapse_schedule" CASCADE;
       DROP TABLE IF EXISTS "apocalypse_cycles" CASCADE;
       DROP TABLE IF EXISTS "schema_migrations" CASCADE;
@@ -167,6 +170,14 @@ const seed = async (shouldEnd = false) => {
       'utf8'
     );
     await db.query(coinCollapseMigration);
+
+    console.log('📦 Applying round-state migration (db/migrations/009_create_apocalypse_round_state.sql)...');
+    // Core 4 round-state DDL sourced from the production migration only.
+    const roundStateMigration = require('fs').readFileSync(
+      require('path').join(__dirname, 'migrations', '009_create_apocalypse_round_state.sql'),
+      'utf8'
+    );
+    await db.query(roundStateMigration);
 
     console.log('📦 Inserting coins data...');
     // Insert coins data

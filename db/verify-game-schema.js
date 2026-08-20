@@ -15,6 +15,11 @@
 //     executed collapse with a non-zero live price in the ACTIVE cycle, no
 //     zero-priced coin without an executed collapse in the ACTIVE cycle, no
 //     execution before its scheduled time).
+//   * Core 4 round state: apocalypse_participants, apocalypse_holdings and
+//     apocalypse_transactions — columns, PKs, FKs (including the composite
+//     participant FKs), uniqueness, CHECK constraints, lookup indexes, and
+//     live-data invariants (no ACTIVE participant on a COMPLETED cycle,
+//     final_cash consistency, no negative cash/holdings).
 //
 // Exits non-zero with an explicit problem list on any mismatch.
 //
@@ -325,6 +330,230 @@ async function verifyCollapseSchedule(q, problems) {
   }
 }
 
+// --- Core 4: round state (participants / holdings / round transactions) ---
+
+// Generic shape verifier for one Core 4 table: columns (name/type/
+// nullability), sequence default on the PK, PK presence, required FK targets
+// and required UNIQUE/CHECK constraint definition patterns.
+async function verifyCore4Table(q, problems, table, pkColumn, expectedColumns, {
+  uniques = [],
+  fks = [],
+  checks = [],
+  nowDefaults = []
+}) {
+  const present = await q(`SELECT to_regclass('public.${table}') AS reg`);
+  if (!present.rows[0].reg) {
+    problems.push(`table public.${table} does not exist`);
+    return;
+  }
+
+  const cols = await q(
+    `SELECT column_name, data_type, is_nullable, column_default
+     FROM information_schema.columns
+     WHERE table_schema = 'public' AND table_name = '${table}'`
+  );
+  const byName = new Map(cols.rows.map((r) => [r.column_name, r]));
+  for (const [name, dtype, nullable] of expectedColumns) {
+    const col = byName.get(name);
+    if (!col) {
+      problems.push(`missing column: ${table}.${name}`);
+    } else {
+      if (col.data_type !== dtype) problems.push(`column ${table}.${name}: type ${col.data_type}, expected ${dtype}`);
+      if (col.is_nullable !== nullable) problems.push(`column ${table}.${name}: nullable=${col.is_nullable}, expected ${nullable}`);
+    }
+  }
+
+  const pk = byName.get(pkColumn);
+  if (pk && !(pk.column_default || '').startsWith('nextval(')) {
+    problems.push(`column ${table}.${pkColumn}: missing sequence default (nextval)`);
+  }
+  for (const name of nowDefaults) {
+    const col = byName.get(name);
+    if (col && !(col.column_default || '').startsWith('now()')) {
+      problems.push(`column ${table}.${name}: missing default now()`);
+    }
+  }
+
+  const pkCheck = await q(
+    `SELECT 1 FROM information_schema.table_constraints tc
+     JOIN information_schema.key_column_usage kcu
+       ON tc.constraint_name = kcu.constraint_name
+      AND tc.table_schema = kcu.table_schema
+      AND tc.table_name = kcu.table_name
+     WHERE tc.table_schema = 'public' AND tc.table_name = '${table}'
+       AND tc.constraint_type = 'PRIMARY KEY' AND kcu.column_name = '${pkColumn}'`
+  );
+  if (pkCheck.rowCount === 0) problems.push(`missing PRIMARY KEY on ${table}.${pkColumn}`);
+
+  const constraints = await q(
+    `SELECT contype, pg_get_constraintdef(oid) AS def, confrelid::regclass::text AS target
+     FROM pg_constraint WHERE conrelid = 'public.${table}'::regclass`
+  );
+  for (const pattern of uniques) {
+    if (!constraints.rows.some((r) => r.contype === 'u' && new RegExp(pattern, 'i').test(r.def))) {
+      problems.push(`missing UNIQUE constraint on ${table}: ${pattern}`);
+    }
+  }
+  for (const { target, pattern } of fks) {
+    if (!constraints.rows.some((r) => r.contype === 'f' && r.target === target && new RegExp(pattern, 'i').test(r.def))) {
+      problems.push(`missing FOREIGN KEY on ${table} -> ${target}: ${pattern}`);
+    }
+  }
+  for (const { label, pattern } of checks) {
+    if (!constraints.rows.some((r) => r.contype === 'c' && new RegExp(pattern, 'i').test(r.def))) {
+      problems.push(`missing CHECK constraint on ${table}: ${label}`);
+    }
+  }
+}
+
+const EXPECTED_PARTICIPANT_COLUMNS = [
+  ['participant_id', 'integer', 'NO'],
+  ['cycle_id', 'integer', 'NO'],
+  ['user_id', 'integer', 'NO'],
+  ['joined_at', 'timestamp with time zone', 'NO'],
+  ['starting_cash', 'numeric', 'NO'],
+  ['current_cash', 'numeric', 'NO'],
+  ['peak_wealth', 'numeric', 'NO'],
+  ['status', 'character varying', 'NO'],
+  ['final_cash', 'numeric', 'YES'],
+  ['created_at', 'timestamp with time zone', 'NO'],
+  ['updated_at', 'timestamp with time zone', 'NO']
+];
+
+const EXPECTED_HOLDING_COLUMNS = [
+  ['holding_id', 'integer', 'NO'],
+  ['participant_id', 'integer', 'NO'],
+  ['cycle_id', 'integer', 'NO'],
+  ['user_id', 'integer', 'NO'],
+  ['coin_id', 'integer', 'NO'],
+  ['quantity', 'numeric', 'NO'],
+  ['created_at', 'timestamp with time zone', 'NO'],
+  ['updated_at', 'timestamp with time zone', 'NO']
+];
+
+const EXPECTED_ROUND_TX_COLUMNS = [
+  ['round_transaction_id', 'integer', 'NO'],
+  ['participant_id', 'integer', 'NO'],
+  ['cycle_id', 'integer', 'NO'],
+  ['user_id', 'integer', 'NO'],
+  ['coin_id', 'integer', 'NO'],
+  ['type', 'character varying', 'NO'],
+  ['quantity', 'numeric', 'NO'],
+  ['price', 'numeric', 'NO'],
+  ['total_amount', 'numeric', 'NO'],
+  ['created_at', 'timestamp with time zone', 'NO']
+];
+
+async function verifyRoundState(q, problems) {
+  await verifyCore4Table(q, problems, 'apocalypse_participants', 'participant_id', EXPECTED_PARTICIPANT_COLUMNS, {
+    uniques: ['^UNIQUE \\(cycle_id, user_id\\)', '^UNIQUE \\(participant_id, cycle_id, user_id\\)'],
+    fks: [
+      { target: 'apocalypse_cycles', pattern: '^FOREIGN KEY \\(cycle_id\\)' },
+      { target: 'users', pattern: '^FOREIGN KEY \\(user_id\\)' }
+    ],
+    checks: [
+      { label: 'starting_cash > 0', pattern: 'starting_cash > \\(??0' },
+      { label: 'current_cash >= 0', pattern: 'current_cash >= \\(??0' },
+      { label: 'peak_wealth >= 0', pattern: 'peak_wealth >= \\(??0' },
+      { label: "status IN ('ACTIVE', 'FINALIZED')", pattern: 'ACTIVE.*FINALIZED' },
+      { label: 'final_cash consistency with status', pattern: 'final_cash IS NULL.*FINALIZED' }
+    ],
+    nowDefaults: ['joined_at', 'created_at', 'updated_at']
+  });
+
+  await verifyCore4Table(q, problems, 'apocalypse_holdings', 'holding_id', EXPECTED_HOLDING_COLUMNS, {
+    uniques: ['^UNIQUE \\(participant_id, coin_id\\)'],
+    fks: [
+      { target: 'apocalypse_participants', pattern: '^FOREIGN KEY \\(participant_id, cycle_id, user_id\\)' },
+      { target: 'coins', pattern: '^FOREIGN KEY \\(coin_id\\)' }
+    ],
+    checks: [{ label: 'quantity >= 0', pattern: 'quantity >= \\(??0' }]
+  });
+
+  await verifyCore4Table(q, problems, 'apocalypse_transactions', 'round_transaction_id', EXPECTED_ROUND_TX_COLUMNS, {
+    fks: [
+      { target: 'apocalypse_participants', pattern: '^FOREIGN KEY \\(participant_id, cycle_id, user_id\\)' },
+      { target: 'coins', pattern: '^FOREIGN KEY \\(coin_id\\)' }
+    ],
+    checks: [
+      { label: "type IN ('BUY', 'SELL')", pattern: 'BUY.*SELL' },
+      { label: 'quantity > 0', pattern: 'quantity > \\(??0' },
+      { label: 'price >= 0', pattern: 'price >= \\(??0' },
+      { label: 'total_amount >= 0', pattern: 'total_amount >= \\(??0' }
+    ],
+    nowDefaults: ['created_at']
+  });
+
+  // Lookup indexes.
+  for (const { name, table } of [
+    { name: 'idx_apocalypse_participants_user', table: 'apocalypse_participants' },
+    { name: 'idx_apocalypse_holdings_cycle', table: 'apocalypse_holdings' },
+    { name: 'idx_apocalypse_transactions_cycle', table: 'apocalypse_transactions' }
+  ]) {
+    const idx = await q(
+      `SELECT 1 FROM pg_class c
+       JOIN pg_index i ON i.indexrelid = c.oid
+       WHERE c.relname = '${name}' AND i.indrelid = to_regclass('public.${table}')`
+    );
+    if (idx.rowCount === 0) problems.push(`missing index ${name}`);
+  }
+
+  // Live-data invariants (only evaluated when the tables exist AND carry the
+  // columns the invariants read — an incompatible stub table must produce
+  // shape problems above, not a crash here).
+  const tables = await q(
+    `SELECT to_regclass('public.apocalypse_participants') AS p,
+            to_regclass('public.apocalypse_holdings') AS h,
+            to_regclass('public.apocalypse_transactions') AS t`
+  );
+  const hasColumns = async (table, names) => {
+    const { rows } = await q(
+      `SELECT count(*)::int AS n FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = '${table}'
+         AND column_name = ANY('{${names.join(',')}}')`
+    );
+    return rows[0].n === names.length;
+  };
+  if (tables.rows[0].p && await hasColumns('apocalypse_participants', ['cycle_id', 'status', 'final_cash', 'current_cash', 'peak_wealth', 'starting_cash'])) {
+    // No participant stays ACTIVE once its cycle is COMPLETED: finalization
+    // runs inside the Core 1 lifecycle transaction.
+    const staleActive = await q(
+      `SELECT count(*)::int AS n FROM apocalypse_participants p
+       JOIN apocalypse_cycles ac ON ac.cycle_id = p.cycle_id
+       WHERE ac.status = 'COMPLETED' AND p.status = 'ACTIVE'`
+    );
+    if (staleActive.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${staleActive.rows[0].n} ACTIVE participants on COMPLETED cycles`);
+
+    // FINALIZED rows always carry their final cash; ACTIVE rows never do.
+    const badFinal = await q(
+      `SELECT count(*)::int AS n FROM apocalypse_participants
+       WHERE (status = 'FINALIZED' AND final_cash IS NULL)
+          OR (status = 'ACTIVE' AND final_cash IS NOT NULL)`
+    );
+    if (badFinal.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${badFinal.rows[0].n} participants with final_cash inconsistent with status`);
+
+    // Cash and peak can never go negative.
+    const negative = await q(
+      `SELECT count(*)::int AS n FROM apocalypse_participants
+       WHERE current_cash < 0 OR peak_wealth < 0 OR starting_cash <= 0`
+    );
+    if (negative.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${negative.rows[0].n} participants with negative cash/peak or non-positive starting cash`);
+  }
+  if (tables.rows[0].h && await hasColumns('apocalypse_holdings', ['quantity'])) {
+    const negativeHoldings = await q(
+      `SELECT count(*)::int AS n FROM apocalypse_holdings WHERE quantity < 0`
+    );
+    if (negativeHoldings.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${negativeHoldings.rows[0].n} holdings with negative quantity`);
+  }
+  if (tables.rows[0].t && await hasColumns('apocalypse_transactions', ['quantity', 'price', 'total_amount', 'type'])) {
+    const badTx = await q(
+      `SELECT count(*)::int AS n FROM apocalypse_transactions
+       WHERE quantity <= 0 OR price < 0 OR total_amount < 0 OR type NOT IN ('BUY', 'SELL')`
+    );
+    if (badTx.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${badTx.rows[0].n} round transactions with invalid quantity/price/total/type`);
+  }
+}
+
 async function verifyGameSchema({ query } = {}) {
   const q = query || ((...args) => db.query(...args));
   const problems = [];
@@ -332,6 +561,7 @@ async function verifyGameSchema({ query } = {}) {
   await verifyApocalypseCycles(q, problems);
   await verifyBaselineColumn(q, problems);
   await verifyCollapseSchedule(q, problems);
+  await verifyRoundState(q, problems);
 
   return { ok: problems.length === 0, problems };
 }
@@ -340,7 +570,7 @@ if (require.main === module) {
   verifyGameSchema()
     .then(async ({ ok, problems }) => {
       if (ok) {
-        console.log('game schema verification PASSED (apocalypse_cycles, coins.cycle_baseline_price, coin_collapse_schedule)');
+        console.log('game schema verification PASSED (apocalypse_cycles, coins.cycle_baseline_price, coin_collapse_schedule, apocalypse_participants, apocalypse_holdings, apocalypse_transactions)');
         await db.end();
         return;
       }
