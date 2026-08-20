@@ -77,6 +77,13 @@ else
   echo "   FAILED: concurrency-test.mjs"
   FAIL=$((FAIL+1))
 fi
+echo "== game cycle concurrency tests (node, 8 parallel clients)"
+if COINS_TEST_DB="$DB" node "$PWD/scripts/test/game-cycle-concurrency-test.mjs"; then
+  PASS=$((PASS+1))
+else
+  echo "   FAILED: game-cycle-concurrency-test.mjs"
+  FAIL=$((FAIL+1))
+fi
 sudo -n -u postgres psql -d "$DB" -X -q -c "ALTER ROLE \"$USER\" NOBYPASSRLS"
 
 echo "== total: $PASS passed, $FAIL failed"

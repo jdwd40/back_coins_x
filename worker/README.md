@@ -18,6 +18,10 @@ The worker **refuses to start** if the URL does not authenticate as
 
 ## Behaviour
 
+- Calls `coins.ensure_active_cycle()` on every wake-up (even while the market
+  is halted) so the global apocalypse cycle (Crypto Chaos Core 1) advances
+  with no humans online. Idempotent; logs `apocalypse cycle advanced` only
+  when a new round is created.
 - Non-overlapping ticks; next tick scheduled only after the previous settles.
 - Passes the last confirmed `tick_sequence`; the DB no-ops stale retries and
   rejects skew (`SEQUENCE_MISMATCH`), so duplicate workers cannot double-apply.
