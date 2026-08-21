@@ -153,7 +153,8 @@ describe('Core 1: global apocalypse cycle service', () => {
       expect(state.durationMs).toBe(30 * 60 * 1000);
       expect(state.remainingMs).toBe(15 * 60 * 1000);
       expect(state.apocalypsePercent).toBe(50);
-      expect(typeof state.seed).toBe('string');
+      // Milestone 1: the public state contract no longer carries the seed.
+      expect(state).not.toHaveProperty('seed');
       expect(state.serverTime).toBe('2026-08-20T10:15:00.000Z');
     });
 
@@ -222,7 +223,14 @@ describe('Core 1: global apocalypse cycle service', () => {
       const lines = result.stdout.trim().split(String.fromCharCode(10));
       const state = JSON.parse(lines[lines.length - 1]);
       expect(state.apocalypseId).toBe(first.apocalypse_id);
-      expect(state.seed).toBe(first.seed);
+      // Public state carries no seed; the second process recovered the same
+      // persisted cycle, whose seed remains internal and unchanged.
+      expect(state).not.toHaveProperty('seed');
+      const { rows: seedRows } = await db.query(
+        'SELECT seed FROM apocalypse_cycles WHERE cycle_id = $1',
+        [first.cycle_id]
+      );
+      expect(seedRows[0].seed).toBe(first.seed);
 
       const { rows } = await db.query('SELECT * FROM apocalypse_cycles');
       expect(rows).toHaveLength(1);

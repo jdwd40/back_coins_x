@@ -222,66 +222,6 @@ exports.selectCoinById = async (coinId) => {
   });
 };
 
-/**
- * Update a coin's price and record the change in price history
- * Uses single pooled client for atomicity (BEGIN/COMMIT on same connection).
- */
-exports.updateCoinPrice = async (coinId, numericPrice) => {
-  let client;
-  try {
-    client = await db.getClient();
-    await client.query('BEGIN');
-
-    // First check if coin exists and get current price
-    const currentResult = await client.query(
-      `SELECT current_price
-       FROM coins
-       WHERE coin_id = $1::integer`,
-      [coinId]
-    );
-
-    if (currentResult.rows.length === 0) {
-      await client.query('ROLLBACK');
-      return null;
-    }
-
-    const oldPrice = parseFloat(currentResult.rows[0].current_price);
-    const priceChange = calculatePriceChange(oldPrice, numericPrice);
-
-    // Update the coin with new price and calculated change
-    const result = await client.query(
-      `UPDATE coins
-       SET
-         current_price = CAST($1 AS numeric),
-         price_change_24h = CAST($2 AS numeric)
-       WHERE coin_id = CAST($3 AS integer)
-       RETURNING ${COIN_FIELDS}`,
-      [numericPrice, priceChange, coinId]
-    );
-
-    if (result.rows.length === 0) {
-      await client.query('ROLLBACK');
-      throw new Error('Failed to update coin price - database update failed');
-    }
-
-    // Record price history (atomic with coin update)
-    await client.query(
-      `INSERT INTO price_history (coin_id, price, created_at)
-       VALUES (CAST($1 AS integer), CAST($2 AS numeric), CURRENT_TIMESTAMP)`,
-      [coinId, numericPrice]
-    );
-
-    await client.query('COMMIT');
-
-    return formatCoinResponse(result.rows[0]);
-  } catch (err) {
-    if (client) {
-      try { await client.query('ROLLBACK'); } catch (_) {}
-    }
-    throw err;
-  } finally {
-    if (client) {
-      client.release();
-    }
-  }
-};
+// Milestone 1: updateCoinPrice is removed with the PATCH price route. Coin
+// prices are written only by the market simulator and the game collapse
+// lifecycle (both server-owned); no model-level public entry point remains.

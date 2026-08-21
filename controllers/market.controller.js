@@ -10,23 +10,9 @@ exports.getMarketStatus = async (req, res, next) => {
   }
 };
 
-exports.startMarket = async (req, res, next) => {
-  try {
-    marketSimulator.start();
-    res.status(200).json({ msg: 'Market simulation started', status: marketSimulator.getMarketStatus() });
-  } catch (err) {
-    next(err);
-  }
-};
-
-exports.stopMarket = async (req, res, next) => {
-  try {
-    marketSimulator.stop();
-    res.status(200).json({ msg: 'Market simulation stopped', status: marketSimulator.getMarketStatus() });
-  } catch (err) {
-    next(err);
-  }
-};
+// Milestone 1: startMarket/stopMarket controllers are removed with their
+// routes — simulator start/stop is owned by the server process lifecycle
+// only, never by API callers.
 
 exports.getMarketStats = async (req, res, next) => {
   try {

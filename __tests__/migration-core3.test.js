@@ -180,6 +180,6 @@ describe('Core 3: tracked production migration 008', () => {
 
     const verification = await verifyGameSchema();
     expect(verification.ok).toBe(false);
-    expect(verification.problems.join(' ')).toMatch(/collapsed coins in the ACTIVE cycle have a non-zero live price/);
+    expect(verification.problems.join(' ')).toMatch(/collapsed coins in the ACTIVE\/SETTLING cycle have a non-zero live price/);
   });
 });

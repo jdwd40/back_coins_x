@@ -17,9 +17,12 @@ describe('GET /api/game/state', () => {
       durationMs: expect.any(Number),
       remainingMs: expect.any(Number),
       apocalypsePercent: expect.any(Number),
-      seed: expect.any(String),
       serverTime: expect.any(String)
     });
+
+    // Milestone 1: the cycle seed is internal-only — never in the public
+    // contract (it deterministically drives future collapses and bot moves).
+    expect(response.body).not.toHaveProperty('seed');
 
     // ISO 8601 timestamps that actually parse.
     for (const key of ['startTime', 'endTime', 'serverTime']) {
@@ -34,7 +37,6 @@ describe('GET /api/game/state', () => {
     expect(response.body.remainingMs).toBeLessThanOrEqual(response.body.durationMs);
     expect(response.body.apocalypsePercent).toBeGreaterThanOrEqual(0);
     expect(response.body.apocalypsePercent).toBeLessThanOrEqual(100);
-    expect(response.body.seed.length).toBeGreaterThan(0);
   });
 
   test('returns the same persisted cycle on repeated requests (browser is not authoritative)', async () => {
@@ -42,7 +44,6 @@ describe('GET /api/game/state', () => {
     const second = await request(app).get('/api/game/state').expect(200);
 
     expect(second.body.apocalypseId).toBe(first.body.apocalypseId);
-    expect(second.body.seed).toBe(first.body.seed);
     expect(second.body.startTime).toBe(first.body.startTime);
     expect(second.body.endTime).toBe(first.body.endTime);
   });
@@ -53,7 +54,8 @@ describe('GET /api/game/state', () => {
       .query({ seed: 'client-seed', startTime: '1999-01-01T00:00:00.000Z' })
       .expect(200);
 
-    expect(response.body.seed).not.toBe('client-seed');
+    // The response never carries any seed — server-generated or otherwise.
+    expect(response.body).not.toHaveProperty('seed');
     expect(Date.parse(response.body.startTime)).toBeGreaterThan(Date.parse('2020-01-01T00:00:00.000Z'));
   });
 
@@ -69,7 +71,9 @@ describe('GET /api/game/state', () => {
 
     expect(rows).toHaveLength(1);
     expect(response.body.apocalypseId).toBe(rows[0].apocalypse_id);
-    expect(response.body.seed).toBe(rows[0].seed);
+    // The persisted seed stays internal: present in the row, absent publicly.
+    expect(rows[0].seed).toBeTruthy();
+    expect(response.body).not.toHaveProperty('seed');
     expect(Date.parse(response.body.startTime)).toBe(new Date(rows[0].start_time).getTime());
     expect(Date.parse(response.body.endTime)).toBe(new Date(rows[0].end_time).getTime());
     expect(response.body.durationMs).toBe(Number(rows[0].duration_ms));

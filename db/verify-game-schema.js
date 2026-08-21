@@ -354,6 +354,10 @@ async function verifyCollapseSchedule(q, problems) {
   }
 
   // Live-data invariants (only when the columns exist to evaluate them).
+  // These join apocalypse_cycles; when that table is absent its own shape
+  // problems above are the report, so the joined invariants are skipped
+  // rather than crashing.
+  const cyclesPresent = await q(`SELECT to_regclass('public.apocalypse_cycles') AS reg`);
   if (byName.has('executed_at') && byName.has('scheduled_at')) {
     const early = await q(
       `SELECT count(*)::int AS n FROM coin_collapse_schedule
@@ -361,28 +365,33 @@ async function verifyCollapseSchedule(q, problems) {
     );
     if (early.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${early.rows[0].n} collapses executed before their scheduled time`);
   }
-  if (byName.has('executed_at')) {
-    // A coin collapsed in the ACTIVE cycle must be exactly £0 (never revived).
+  if (byName.has('executed_at') && cyclesPresent.rows[0].reg) {
+    // Milestone 1: the authoritative live window is ACTIVE **or SETTLING**.
+    // A coin collapsed at the end of a round stays £0 through settlement (the
+    // freeze window has no ACTIVE cycle), matching the runtime death rule in
+    // collapseScheduleService.getCollapsedCoinIds/isCoinCollapsed.
+    // A collapsed coin in the live window must be exactly £0 (never revived).
     const revived = await q(
       `SELECT count(*)::int AS n
        FROM coin_collapse_schedule cs
        JOIN apocalypse_cycles ac ON ac.cycle_id = cs.cycle_id
        JOIN coins c ON c.coin_id = cs.coin_id
-       WHERE ac.status = 'ACTIVE' AND cs.executed_at IS NOT NULL AND c.current_price <> 0`
+       WHERE ac.status IN ('ACTIVE', 'SETTLING') AND cs.executed_at IS NOT NULL AND c.current_price <> 0`
     );
-    if (revived.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${revived.rows[0].n} collapsed coins in the ACTIVE cycle have a non-zero live price`);
+    if (revived.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${revived.rows[0].n} collapsed coins in the ACTIVE/SETTLING cycle have a non-zero live price`);
 
-    // A zero live price must be backed by an executed collapse in the ACTIVE
-    // cycle — death is never inferred from price alone.
+    // A zero live price must be backed by an executed collapse in the
+    // ACTIVE or SETTLING cycle — death is never inferred from price alone,
+    // and a mid-settlement £0 (no ACTIVE cycle exists then) is legitimate.
     const unexplained = await q(
       `SELECT count(*)::int AS n FROM coins c
        WHERE c.current_price = 0 AND NOT EXISTS (
          SELECT 1 FROM coin_collapse_schedule cs
          JOIN apocalypse_cycles ac ON ac.cycle_id = cs.cycle_id
-         WHERE ac.status = 'ACTIVE' AND cs.coin_id = c.coin_id AND cs.executed_at IS NOT NULL
+         WHERE ac.status IN ('ACTIVE', 'SETTLING') AND cs.coin_id = c.coin_id AND cs.executed_at IS NOT NULL
        )`
     );
-    if (unexplained.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${unexplained.rows[0].n} zero-priced coins have no executed collapse row in the ACTIVE cycle`);
+    if (unexplained.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${unexplained.rows[0].n} zero-priced coins have no executed collapse row in the ACTIVE/SETTLING cycle`);
   }
 }
 

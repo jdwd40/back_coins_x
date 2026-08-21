@@ -39,9 +39,11 @@ app VPS) with production environment loaded:
 5. Verify the endpoint:
    `curl -fsS https://jdwd40.com/api-2/api/game/state | jq .`
    Expect HTTP 200 with `apocalypseId`, `status: "ACTIVE"`, ISO `startTime`/
-   `endTime`/`serverTime`, `durationMs`, `remainingMs`, `apocalypsePercent`,
-   and a non-empty `seed`. Repeat the call: `apocalypseId` and `seed` must be
-   identical (persistence, not regeneration).
+   `endTime`/`serverTime`, `durationMs`, `remainingMs`, `apocalypsePercent`.
+   The cycle `seed` is internal-only (Milestone 1): it deterministically
+   drives the collapse schedule and bot randomness and must NOT appear in the
+   response. Repeat the call: `apocalypseId` must be identical (persistence,
+   not regeneration).
 6. Watch logs for one full cycle boundary: `pm2 logs back_coins_x`. At
    `endTime` the worker must roll into exactly one successor
    (`APOC-0002`, ...); the endpoint must never return overlapping active

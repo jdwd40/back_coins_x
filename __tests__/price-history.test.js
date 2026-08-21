@@ -1,7 +1,6 @@
 const request = require('supertest');
 const app = require('../app');
 const db = require('../db/connection');
-const coinsModel = require('../models/coins.model');
 const seed = require('../db/seed');
 
 describe('Price History Redesign (v1 contract)', () => {
@@ -281,31 +280,7 @@ describe('Price History Redesign (v1 contract)', () => {
     });
   });
 
-  describe('Transaction consistency (updateCoinPrice)', () => {
-    test('updateCoinPrice uses single client: coin + history row written atomically', async () => {
-      const coinsRes = await request(app).get('/api/coins').expect(200);
-      const coin = coinsRes.body.coins[0];
-      const beforeCountRes = await db.query(
-        'SELECT COUNT(*) FROM price_history WHERE coin_id = $1',
-        [coin.coin_id]
-      );
-      const beforeCount = parseInt(beforeCountRes.rows[0].count);
-
-      const newPrice = 123.45;
-      const updated = await coinsModel.updateCoinPrice(coin.coin_id, newPrice);
-      expect(updated).not.toBeNull();
-
-      // After, history should have +1
-      const afterCountRes = await db.query(
-        'SELECT COUNT(*) FROM price_history WHERE coin_id = $1',
-        [coin.coin_id]
-      );
-      const afterCount = parseInt(afterCountRes.rows[0].count);
-      expect(afterCount).toBe(beforeCount + 1);
-
-      // latest coin price matches
-      const coinCheck = await db.query('SELECT current_price FROM coins WHERE coin_id=$1', [coin.coin_id]);
-      expect(Number(coinCheck.rows[0].current_price)).toBe(newPrice);
-    });
-  });
+  // Milestone 1: the "Transaction consistency (updateCoinPrice)" block was
+  // removed with the model function itself — manual price mutation no longer
+  // exists; prices are written only by the simulator/collapse lifecycle.
 });

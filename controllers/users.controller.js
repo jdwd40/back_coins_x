@@ -7,8 +7,7 @@ const {
   selectUserById,
   updateUser,
   removeUser,
-  updateUserFunds,
-  getUserFunds
+  updateUserFunds
 } = usersModel;
 
 /**
@@ -324,19 +323,19 @@ const updateUserFundsHandler = async (req, res, next) => {
       });
     }
 
-    // Get current funds
-    const currentFunds = await getUserFunds(user_id);
-    const newFunds = parseFloat(currentFunds) + fundAmount;
-
-    // Don't allow negative funds
-    if (newFunds < 0) {
-      return res.status(400).json({ 
+    // Milestone 1: strict self-service ownership — the authenticated user may
+    // only mutate their OWN funds. There is no admin role, so no cross-user
+    // funds control exists at all.
+    if (req.user.user_id !== Number(user_id)) {
+      return res.status(403).json({
         success: false,
-        msg: 'Insufficient funds' 
+        msg: 'Forbidden: you can only update your own funds'
       });
     }
 
-    // Update funds
+    // The non-negative balance rule is enforced atomically inside the model's
+    // guarded UPDATE (concurrent debits cannot overdraw); 'Insufficient
+    // funds' surfaces here as a 400.
     const updatedUser = await updateUserFunds(user_id, fundAmount);
     
     logger.log(`User funds updated: ${updatedUser.username} (ID: ${user_id}), Amount: ${fundAmount}`);
@@ -356,6 +355,13 @@ const updateUserFundsHandler = async (req, res, next) => {
       });
     }
     
+    if (error.message === 'Insufficient funds') {
+      return res.status(400).json({
+        success: false,
+        msg: 'Insufficient funds'
+      });
+    }
+
     if (error.message.includes('Valid user ID is required') ||
         error.message.includes('Amount must be a valid number')) {
       return res.status(400).json({ 

@@ -289,9 +289,14 @@ async function buyRoundTrade({ userId, apocalypseId, coinId, quantity: rawQuanti
     await client.query('SELECT pg_advisory_xact_lock($1)', [GAME_CYCLE_ADVISORY_LOCK_KEY]);
 
     const cycle = await lockLiveCycle(client, cycleIdParam, nowMs);
-    const participant = await lockParticipant(client, cycle.cycle_id, userId);
 
     // Lock the authoritative coin row for a consistent, current price.
+    // Milestone 1: the coin lock is taken BEFORE the participant lock. Every
+    // path that touches both takes them in coins -> participants order (the
+    // simulator's write transaction locks all coins then updates participants
+    // via reconcileActivePeaks; settlement executes coin collapses before
+    // finalizing participants). The previous participant -> coin order
+    // deadlocked against the simulator under load.
     const { rows: coinRows } = await client.query(
       `SELECT coin_id, symbol, current_price FROM coins WHERE coin_id = $1 FOR UPDATE`,
       [coinIdNum]
@@ -300,6 +305,8 @@ async function buyRoundTrade({ userId, apocalypseId, coinId, quantity: rawQuanti
     if (!coin) {
       throw new GameRoundError(`Coin ${coinIdNum} not found.`, 404);
     }
+
+    const participant = await lockParticipant(client, cycle.cycle_id, userId);
 
     // A coin collapsed in THIS cycle is dead: buying at £0 would hand out
     // free coins, and its live price is exactly 0 anyway.
@@ -396,9 +403,11 @@ async function sellRoundTrade({ userId, apocalypseId, coinId, quantity: rawQuant
     await client.query('SELECT pg_advisory_xact_lock($1)', [GAME_CYCLE_ADVISORY_LOCK_KEY]);
 
     const cycle = await lockLiveCycle(client, cycleIdParam, nowMs);
-    const participant = await lockParticipant(client, cycle.cycle_id, userId);
 
     // Lock the authoritative coin row; the sale price is server-side only.
+    // Milestone 1: same coins -> participants lock order as buy (see the
+    // buyRoundTrade note) — taken before the participant lock so a trade can
+    // never deadlock against the simulator's coins -> participants batch.
     const { rows: coinRows } = await client.query(
       `SELECT coin_id, symbol, current_price FROM coins WHERE coin_id = $1 FOR UPDATE`,
       [coinIdNum]
@@ -408,6 +417,8 @@ async function sellRoundTrade({ userId, apocalypseId, coinId, quantity: rawQuant
       throw new GameRoundError(`Coin ${coinIdNum} not found.`, 404);
     }
     const price = parseFloat(coin.current_price);
+
+    const participant = await lockParticipant(client, cycle.cycle_id, userId);
 
     // Lock THIS participant's holding for THIS coin in THIS cycle. Holdings
     // from another cycle (or another user) are invisible here — a sale can

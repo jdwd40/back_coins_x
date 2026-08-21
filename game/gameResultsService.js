@@ -88,8 +88,12 @@ async function getLiveLeaderboard({ now = new Date() } = {}) {
       `SELECT 1 FROM apocalypse_cycles WHERE status = 'SETTLING' LIMIT 1`
     );
     if (stuck.length > 0) {
+      // Milestone 1: the public 409 carries a generic lifecycle message only.
+      // The internal failure text (err.message) can contain internals such as
+      // seeds on some failure paths and is logged-side information, never API
+      // payload.
       throw new GameResultsError(
-        `No live apocalypse cycle is currently available: the previous round is still settling (${err.message}). Retry shortly; if this persists, the stuck SETTLING cycle needs operator attention.`,
+        'No live apocalypse cycle is currently available: the previous round is still settling. Retry shortly; if this persists, the stuck SETTLING cycle needs operator attention.',
         409
       );
     }

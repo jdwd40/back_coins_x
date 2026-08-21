@@ -232,6 +232,11 @@ function deriveProgress({ startTime, endTime, durationMs, now }) {
 
 // Maintenance + read: reconcile the active cycle (creating/recovering or
 // rolling over as needed) and return the public state contract.
+//
+// Milestone 1: the cycle seed is deliberately NOT part of the public
+// contract. It deterministically drives the Core 3 collapse schedule and
+// Core 5 bot randomness, so publishing it would let anyone precompute exactly
+// which coin collapses when. The seed stays persisted and internal-only.
 async function getGameState({ now = new Date(), durationMs, generateSeed } = {}) {
   const cycle = await reconcileCycle({ now, durationMs, generateSeed });
   const { remainingMs, apocalypsePercent } = deriveProgress({
@@ -249,7 +254,6 @@ async function getGameState({ now = new Date(), durationMs, generateSeed } = {})
     durationMs: Number(cycle.duration_ms),
     remainingMs,
     apocalypsePercent,
-    seed: cycle.seed,
     serverTime: (now instanceof Date ? now : new Date(now)).toISOString()
   };
 }

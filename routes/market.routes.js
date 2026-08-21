@@ -1,8 +1,6 @@
 const express = require('express');
 const { 
   getMarketStatus,
-  startMarket,
-  stopMarket,
   getMarketStats,
   getMarketHistory,
   getMarketPriceHistory
@@ -14,7 +12,9 @@ marketRouter.get('/status', getMarketStatus);
 marketRouter.get('/stats', getMarketStats);
 marketRouter.get('/history', getMarketHistory);
 marketRouter.get('/price-history', getMarketPriceHistory);
-marketRouter.post('/start', startMarket);
-marketRouter.post('/stop', stopMarket);
+
+// Milestone 1: there are deliberately NO POST /start or /stop routes. No
+// legitimate consumer or admin role exists; the simulator lifecycle is owned
+// solely by the server process (app.js production start, server.js shutdown).
 
 exports.marketRouter = marketRouter;

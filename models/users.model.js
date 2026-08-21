@@ -221,6 +221,10 @@ exports.updateUser = async (user_id, updateData) => {
  * @param {number} amount - The amount to add to the user's funds
  * @returns {Promise<Object>} The updated user object
  * @throws {Error} If update fails
+ *
+ * Milestone 1: the non-negative balance rule is enforced INSIDE the single
+ * UPDATE statement (funds + amount >= 0), so concurrent debits serialise on
+ * the row lock and can never overdraw — there is no read-then-write window.
  */
 exports.updateUserFunds = async (user_id, amount) => {
   if (!user_id || isNaN(Number(user_id))) {
@@ -235,13 +239,18 @@ exports.updateUserFunds = async (user_id, amount) => {
     const result = await db.query(
       `UPDATE users 
        SET funds = funds + $1
-       WHERE user_id = $2
+       WHERE user_id = $2 AND funds + $1 >= 0
        RETURNING user_id, username, funds`,
       [amount, user_id]
     );
 
     if (result.rows.length === 0) {
-      throw new Error('User not found');
+      // Distinguish "no such user" from "the balance guard rejected this".
+      const exists = await db.query('SELECT 1 FROM users WHERE user_id = $1', [user_id]);
+      if (exists.rows.length === 0) {
+        throw new Error('User not found');
+      }
+      throw new Error('Insufficient funds');
     }
 
     return result.rows[0];
