@@ -2,6 +2,7 @@ const app = require('./app');
 const db = require('./db/connection');
 const logger = require('./utils/logger');
 const gameCycleWorker = require('./game/gameCycleWorker');
+const botWorker = require('./game/botWorker');
 const marketSimulator = require('./models/market-simulator');
 
 // Top-level production JWT check (executes on require, before any listen or startServer).
@@ -54,6 +55,7 @@ const startServer = async (port = PORT) => {
       // database as the cross-process authority.
       if (process.env.NODE_ENV === 'production') {
         gameCycleWorker.start();
+        botWorker.start();
       }
       console.log('Express server started successfully');
       console.log(`Server is running on port ${port}`);
@@ -99,6 +101,11 @@ const shutdown = (signal = 'unknown') => {
       gameCycleWorker.stop();
     } catch (err) {
       console.error('[LIFECYCLE] Error stopping game cycle worker:', err.message);
+    }
+    try {
+      botWorker.stop();
+    } catch (err) {
+      console.error('[LIFECYCLE] Error stopping bot worker:', err.message);
     }
     try {
       marketSimulator.stop();

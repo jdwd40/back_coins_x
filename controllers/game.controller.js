@@ -1,10 +1,11 @@
 const { getGameState } = require('../game/gameCycleService');
 const gameRoundService = require('../game/gameRoundService');
+const gameResultsService = require('../game/gameResultsService');
 
-// Map Core 4 domain errors (which carry an explicit status) to responses;
+// Map Core 4/6 domain errors (which carry an explicit status) to responses;
 // anything else falls through to the generic error middleware.
 function handleGameError(err, res, next) {
-  if (err && err.name === 'GameRoundError' && err.status) {
+  if (err && (err.name === 'GameRoundError' || err.name === 'GameResultsError') && err.status) {
     return res.status(err.status).json({ status: 'error', message: err.message });
   }
   return next(err);
@@ -65,6 +66,44 @@ exports.sellGameTrade = async (req, res, next) => {
       quantity: amount
     });
     res.status(201).json({ status: 'success', message: 'Round sell completed successfully', data: result });
+  } catch (err) {
+    handleGameError(err, res, next);
+  }
+};
+
+// Public read-only live leaderboard for the current active cycle. Reading
+// reconciles the lifecycle first (recovering any pending settlement), then
+// reports live wealth (cash + live holdings value, collapsed coins £0),
+// sorted wealth DESC / participant ASC. Informational: the final result is
+// the immutable snapshot exposed by the results endpoints.
+exports.getLiveLeaderboard = async (req, res, next) => {
+  try {
+    const leaderboard = await gameResultsService.getLiveLeaderboard({});
+    res.status(200).json({ status: 'success', data: leaderboard });
+  } catch (err) {
+    handleGameError(err, res, next);
+  }
+};
+
+// Public read-only immutable results for one COMPLETED cycle. ACTIVE or
+// SETTLING cycles are clearly rejected (409); unknown ids are 404. Rows are
+// the settlement snapshot, never recalculated from mutable state.
+exports.getCycleResults = async (req, res, next) => {
+  try {
+    const results = await gameResultsService.getCycleResults(req.params.cycleId);
+    res.status(200).json({ status: 'success', data: results });
+  } catch (err) {
+    handleGameError(err, res, next);
+  }
+};
+
+// Public read-only recent completed cycles with their immutable snapshots.
+// ?limit= is validated (400 on non-integer) and clamped to the documented
+// bounds; it limits the read only — history is never deleted.
+exports.getRecentLeaderboards = async (req, res, next) => {
+  try {
+    const recent = await gameResultsService.getRecentLeaderboards({ limit: req.query.limit });
+    res.status(200).json({ status: 'success', data: recent });
   } catch (err) {
     handleGameError(err, res, next);
   }

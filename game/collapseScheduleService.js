@@ -230,14 +230,18 @@ async function executeDueCollapses(client, cycleId, now) {
 }
 
 // Read-only helpers for the market simulator and the narrow trade guard.
-// Death is read from the persisted execution state of the ACTIVE cycle only —
+// Death is read from the persisted execution state of the live cycle only —
 // a collapse in a COMPLETED cycle must never make a new cycle's coins dead.
+// Core 6: the SETTLING cycle counts as live here, so a coin collapsed at the
+// end of a round stays dead through settlement (the freeze window has no
+// ACTIVE cycle); the successor's baseline restoration revives prices only
+// once the next cycle is ACTIVE.
 async function getCollapsedCoinIds(queryable = db) {
   const { rows } = await queryable.query(
     `SELECT cs.coin_id
      FROM coin_collapse_schedule cs
      JOIN apocalypse_cycles ac ON ac.cycle_id = cs.cycle_id
-     WHERE ac.status = 'ACTIVE' AND cs.executed_at IS NOT NULL`
+     WHERE ac.status IN ('ACTIVE', 'SETTLING') AND cs.executed_at IS NOT NULL`
   );
   return new Set(rows.map((r) => r.coin_id));
 }
@@ -247,7 +251,7 @@ async function isCoinCollapsed(coinId, queryable = db) {
     `SELECT 1
      FROM coin_collapse_schedule cs
      JOIN apocalypse_cycles ac ON ac.cycle_id = cs.cycle_id
-     WHERE ac.status = 'ACTIVE' AND cs.coin_id = $1 AND cs.executed_at IS NOT NULL`,
+     WHERE ac.status IN ('ACTIVE', 'SETTLING') AND cs.coin_id = $1 AND cs.executed_at IS NOT NULL`,
     [coinId]
   );
   return rows.length > 0;

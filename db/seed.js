@@ -27,6 +27,9 @@ const seed = async (shouldEnd = false) => {
       DROP TABLE IF EXISTS "coins" CASCADE;
       DROP TABLE IF EXISTS "users" CASCADE;
       DROP TABLE IF EXISTS "coin_statistics" CASCADE;
+      DROP TABLE IF EXISTS "apocalypse_bot_ticks" CASCADE;
+      DROP TABLE IF EXISTS "apocalypse_bots" CASCADE;
+      DROP TABLE IF EXISTS "apocalypse_results" CASCADE;
       DROP TABLE IF EXISTS "apocalypse_transactions" CASCADE;
       DROP TABLE IF EXISTS "apocalypse_holdings" CASCADE;
       DROP TABLE IF EXISTS "apocalypse_participants" CASCADE;
@@ -178,6 +181,22 @@ const seed = async (shouldEnd = false) => {
       'utf8'
     );
     await db.query(roundStateMigration);
+
+    console.log('📦 Applying bot migration (db/migrations/010_create_apocalypse_bots.sql)...');
+    // Core 5 bot DDL sourced from the production migration only.
+    const botMigration = require('fs').readFileSync(
+      require('path').join(__dirname, 'migrations', '010_create_apocalypse_bots.sql'),
+      'utf8'
+    );
+    await db.query(botMigration);
+
+    console.log('📦 Applying settlement/results migration (db/migrations/011_create_apocalypse_results.sql)...');
+    // Core 6 settlement/results DDL sourced from the production migration only.
+    const resultsMigration = require('fs').readFileSync(
+      require('path').join(__dirname, 'migrations', '011_create_apocalypse_results.sql'),
+      'utf8'
+    );
+    await db.query(resultsMigration);
 
     console.log('📦 Inserting coins data...');
     // Insert coins data

@@ -13,11 +13,12 @@
 // serialise with rollover/finalization across every Node/PM2 process; no
 // process-local mutexes exist anywhere in this module.
 //
-// Circular-import safety: gameCycleService requires this module at load time
-// (for the finalization hook). This module therefore never requires
-// gameCycleService at the top level — the one place that needs it
-// (joinRound's rollover-repair retry) requires it lazily inside the
-// function, by which time the module graph is fully loaded.
+// Circular-import safety: gameCycleService requires gameSettlementService at
+// load time and gameSettlementService requires THIS module (for the Core 4
+// finalization hook inside settlement). This module therefore never requires
+// gameCycleService or gameSettlementService at the top level — the one place
+// that needs it (joinRound's rollover-repair retry) requires gameCycleService
+// lazily inside the function, by which time the module graph is fully loaded.
 
 const db = require('../db/connection');
 const { GAME_STARTING_CASH, resolveGameStartingCash } = require('./gameConstants');
@@ -141,19 +142,22 @@ async function refreshWealthAndPeak(client, participantId) {
   return rows[0];
 }
 
-// Read the full public round state for a participant row.
+// Read the full public round state for a participant row. isBot is the safe
+// public Core 5 marker (users.is_bot); strategy internals are never exposed.
 async function getParticipantRoundState(participantId, queryable = db) {
   const { rows } = await queryable.query(
     `SELECT p.participant_id, p.cycle_id, ac.apocalypse_id, p.user_id,
             p.joined_at, p.starting_cash, p.current_cash, p.peak_wealth,
             p.status, p.final_cash, p.created_at, p.updated_at,
+            u.is_bot,
             COALESCE(SUM(h.quantity * c.current_price), 0) AS holdings_value
      FROM apocalypse_participants p
      JOIN apocalypse_cycles ac ON ac.cycle_id = p.cycle_id
+     JOIN users u ON u.user_id = p.user_id
      LEFT JOIN apocalypse_holdings h ON h.participant_id = p.participant_id
      LEFT JOIN coins c ON c.coin_id = h.coin_id
      WHERE p.participant_id = $1
-     GROUP BY p.participant_id, ac.apocalypse_id`,
+     GROUP BY p.participant_id, ac.apocalypse_id, u.is_bot`,
     [participantId]
   );
   if (rows.length === 0) return null;
@@ -174,6 +178,7 @@ async function getParticipantRoundState(participantId, queryable = db) {
     cycleId: row.cycle_id,
     apocalypseId: row.apocalypse_id,
     userId: row.user_id,
+    isBot: row.is_bot === true,
     joinedAt: new Date(row.joined_at).toISOString(),
     startingCash: parseFloat(row.starting_cash),
     currentCash,

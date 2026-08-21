@@ -12,17 +12,23 @@ const { verifyGameSchema } = require('../db/verify-game-schema');
 const { assertDisposableTestDatabase } = require('./helpers/testDatabaseGuard');
 
 const MIGRATION_009 = '009_create_apocalypse_round_state.sql';
+const MIGRATION_011 = '011_create_apocalypse_results.sql';
 
 // Simulate the pre-Core-4 production state: Coins schema + data + Core 1/3
-// game tables, but no round-state tables.
+// game tables, but no round-state tables. The Core 6 results table carries a
+// composite FK into apocalypse_participants, so dropping participants CASCADE
+// would silently strip that FK; the simulation removes the Core 6 objects
+// explicitly first, and re-running applies 009 AND 011 in order.
 async function dropCore4Schema() {
+  await db.query('DROP TABLE IF EXISTS apocalypse_results CASCADE');
+  await db.query('DROP FUNCTION IF EXISTS apocalypse_results_immutable()');
   await db.query('DROP TABLE IF EXISTS apocalypse_transactions CASCADE');
   await db.query('DROP TABLE IF EXISTS apocalypse_holdings CASCADE');
   await db.query('DROP TABLE IF EXISTS apocalypse_participants CASCADE');
 }
 
 async function dropCore4Tracking() {
-  await db.query('DELETE FROM schema_migrations WHERE migration = $1', [MIGRATION_009]);
+  await db.query('DELETE FROM schema_migrations WHERE migration = ANY($1)', [[MIGRATION_009, MIGRATION_011]]);
 }
 
 describe('Core 4: tracked production migration 009', () => {
@@ -46,7 +52,7 @@ describe('Core 4: tracked production migration 009', () => {
     await dropCore4Tracking();
 
     const result = await runMigrations({ log: () => {} });
-    expect(result.applied).toEqual([MIGRATION_009]); // only Core 4 was missing
+    expect(result.applied).toEqual([MIGRATION_009, MIGRATION_011]); // Core 4, then Core 6 on top
 
     const verification = await verifyGameSchema();
     expect(verification.problems).toEqual([]);
@@ -67,7 +73,7 @@ describe('Core 4: tracked production migration 009', () => {
     expect(parseFloat(funds[0].funds)).toBe(1000);
 
     // Round-state tables start empty — no participant state is fabricated.
-    for (const t of ['apocalypse_participants', 'apocalypse_holdings', 'apocalypse_transactions']) {
+    for (const t of ['apocalypse_participants', 'apocalypse_holdings', 'apocalypse_transactions', 'apocalypse_results']) {
       const { rows } = await db.query(`SELECT count(*)::int AS n FROM ${t}`);
       expect(rows[0].n).toBe(0);
     }

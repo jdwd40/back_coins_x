@@ -81,6 +81,13 @@ exports.authenticateUser = async (email, password) => {
       throw new Error('Invalid credentials');
     }
 
+    // Core 5: bot accounts are NEVER login-able, by any credential, in any
+    // environment. This rejection must run BEFORE the NODE_ENV=test
+    // password123 bypass below, or test mode would authenticate bots.
+    if (user.is_bot === true) {
+      throw new Error('Invalid credentials');
+    }
+
     // For test environment, accept 'password123' directly
     const isValidPassword = process.env.NODE_ENV === 'test' 
       ? password === 'password123'

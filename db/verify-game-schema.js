@@ -20,6 +20,20 @@
 //     participant FKs), uniqueness, CHECK constraints, lookup indexes, and
 //     live-data invariants (no ACTIVE participant on a COMPLETED cycle,
 //     final_cash consistency, no negative cash/holdings).
+//   * Core 5 bots: users.is_bot (public bot marker), apocalypse_bots
+//     (durable bot identities) and apocalypse_bot_ticks (the duplicate-tick
+//     ledger) — columns, PKs, FKs, uniqueness, CHECK constraints, and
+//     live-data invariants (bot identities backed by is_bot users, no
+//     orphaned/negative tick claims).
+//   * Core 6 settlement: the SETTLING lifecycle (widened status CHECK, the
+//     single-settling partial unique index, settlement_started_at/settled_at
+//     observability columns and their live-data invariants) and
+//     apocalypse_results (the immutable per-participant snapshot) — columns,
+//     PK, FKs (including the composite participant FK), uniqueness of
+//     (cycle_id, participant_id) and (cycle_id, rank), CHECK constraints
+//     (monetary precision, net_profit identity, rank/count consistency), the
+//     immutability triggers, and live-data invariants (results only on
+//     COMPLETED cycles, gapless 1..N ranks, settled-cycle completeness).
 //
 // Exits non-zero with an explicit problem list on any mismatch.
 //
@@ -35,6 +49,8 @@ const EXPECTED_COLUMNS = [
   ['end_time', 'timestamp with time zone', 'NO'],
   ['duration_ms', 'bigint', 'NO'],
   ['status', 'character varying', 'NO'],
+  ['settlement_started_at', 'timestamp with time zone', 'YES'],
+  ['settled_at', 'timestamp with time zone', 'YES'],
   ['created_at', 'timestamp with time zone', 'NO'],
   ['updated_at', 'timestamp with time zone', 'NO']
 ];
@@ -107,8 +123,8 @@ async function verifyApocalypseCycles(q, problems) {
   );
   const defs = checks.rows.map((r) => r.def);
   if (!defs.some((d) => /duration_ms > 0/.test(d))) problems.push('missing CHECK (duration_ms > 0)');
-  if (!defs.some((d) => /ACTIVE/.test(d) && /COMPLETED/.test(d))) {
-    problems.push("missing CHECK (status IN ('ACTIVE', 'COMPLETED'))");
+  if (!defs.some((d) => /ACTIVE/.test(d) && /SETTLING/.test(d) && /COMPLETED/.test(d))) {
+    problems.push("missing CHECK (status IN ('ACTIVE', 'SETTLING', 'COMPLETED'))");
   }
   if (!defs.some((d) => /end_time > start_time/.test(d))) problems.push('missing CHECK (end_time > start_time)');
 
@@ -131,10 +147,50 @@ async function verifyApocalypseCycles(q, problems) {
     }
   }
 
+  // Single-settling-cycle partial unique index (Core 6): at most one cycle
+  // may be mid-settlement; a stuck SETTLING cycle blocks any successor.
+  const idxSettling = await q(
+    `SELECT i.indisunique, i.indpred IS NOT NULL AS is_partial,
+            pg_get_expr(i.indpred, i.indrelid) AS predicate, a.attname
+     FROM pg_class c
+     JOIN pg_index i ON i.indexrelid = c.oid
+     JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0]
+     WHERE c.relname = 'apocalypse_cycles_single_settling'
+       AND i.indrelid = 'public.apocalypse_cycles'::regclass`
+  );
+  if (idxSettling.rowCount === 0) {
+    problems.push('missing index apocalypse_cycles_single_settling');
+  } else {
+    const { indisunique, is_partial, predicate, attname } = idxSettling.rows[0];
+    if (!indisunique || !is_partial || attname !== 'status' || !/status.*SETTLING/i.test(predicate || '')) {
+      problems.push('index apocalypse_cycles_single_settling is not the expected partial UNIQUE index on (status) WHERE status = SETTLING');
+    }
+  }
+
   // Live-data invariants (only when rows exist and the needed columns do).
   if (byName.has('status')) {
     const active = await q(`SELECT count(*)::int AS n FROM apocalypse_cycles WHERE status = 'ACTIVE'`);
     if (active.rows[0].n > 1) problems.push(`INVARIANT VIOLATION: ${active.rows[0].n} ACTIVE rows`);
+    const settling = await q(`SELECT count(*)::int AS n FROM apocalypse_cycles WHERE status = 'SETTLING'`);
+    if (settling.rows[0].n > 1) problems.push(`INVARIANT VIOLATION: ${settling.rows[0].n} SETTLING rows`);
+  }
+  if (byName.has('status') && byName.has('settlement_started_at')) {
+    // A SETTLING cycle always carries its durable freeze timestamp — that is
+    // what makes an incomplete/failed settlement observable.
+    const unstamped = await q(
+      `SELECT count(*)::int AS n FROM apocalypse_cycles
+       WHERE status = 'SETTLING' AND settlement_started_at IS NULL`
+    );
+    if (unstamped.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${unstamped.rows[0].n} SETTLING cycles without settlement_started_at`);
+  }
+  if (byName.has('status') && byName.has('settled_at')) {
+    // settled_at exists exactly on Core-6-settled COMPLETED cycles (legacy
+    // pre-Core-6 COMPLETED rows legitimately have it NULL and are exempt).
+    const badSettled = await q(
+      `SELECT count(*)::int AS n FROM apocalypse_cycles
+       WHERE settled_at IS NOT NULL AND status <> 'COMPLETED'`
+    );
+    if (badSettled.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${badSettled.rows[0].n} non-COMPLETED cycles carrying settled_at`);
   }
   if (byName.has('start_time') && byName.has('end_time')) {
     const badWindows = await q(
@@ -554,6 +610,231 @@ async function verifyRoundState(q, problems) {
   }
 }
 
+// --- Core 5: bots (users.is_bot, apocalypse_bots, apocalypse_bot_ticks) ---
+
+async function verifyBots(q, problems) {
+  // users.is_bot: the persisted public bot marker.
+  const { rows: markerCols } = await q(
+    `SELECT data_type, is_nullable, column_default
+     FROM information_schema.columns
+     WHERE table_schema = 'public' AND table_name = 'users' AND column_name = 'is_bot'`
+  );
+  if (markerCols.length === 0) {
+    problems.push('missing column: users.is_bot');
+  } else {
+    const col = markerCols[0];
+    if (col.data_type !== 'boolean') problems.push(`column users.is_bot: type ${col.data_type}, expected boolean`);
+    if (col.is_nullable !== 'NO') problems.push(`column users.is_bot: nullable=${col.is_nullable}, expected NO`);
+    if ((col.column_default || '') !== 'false') {
+      problems.push(`column users.is_bot: default ${col.column_default}, expected false`);
+    }
+  }
+
+  await verifyCore4Table(q, problems, 'apocalypse_bots', 'bot_id', [
+    ['bot_id', 'integer', 'NO'],
+    ['bot_key', 'character varying', 'NO'],
+    ['strategy', 'character varying', 'NO'],
+    ['user_id', 'integer', 'NO'],
+    ['last_action_at', 'timestamp with time zone', 'YES'],
+    ['created_at', 'timestamp with time zone', 'NO']
+  ], {
+    uniques: ['^UNIQUE \\(bot_key\\)', '^UNIQUE \\(user_id\\)'],
+    fks: [{ target: 'users', pattern: '^FOREIGN KEY \\(user_id\\)' }],
+    checks: [{ label: 'strategy roster', pattern: 'conservative.*momentum.*dip_buyer.*reckless' }],
+    nowDefaults: ['created_at']
+  });
+
+  await verifyCore4Table(q, problems, 'apocalypse_bot_ticks', 'tick_pk', [
+    ['tick_pk', 'integer', 'NO'],
+    ['cycle_id', 'integer', 'NO'],
+    ['tick_id', 'bigint', 'NO'],
+    ['actions', 'jsonb', 'NO'],
+    ['executed_at', 'timestamp with time zone', 'NO']
+  ], {
+    uniques: ['^UNIQUE \\(cycle_id, tick_id\\)'],
+    fks: [{ target: 'apocalypse_cycles', pattern: '^FOREIGN KEY \\(cycle_id\\)' }],
+    checks: [{ label: 'tick_id >= 0', pattern: 'tick_id >= \\(??0' }],
+    nowDefaults: ['executed_at']
+  });
+
+  // Live-data invariants (only when the tables exist with the columns the
+  // invariants read).
+  const tables = await q(
+    `SELECT to_regclass('public.apocalypse_bots') AS b,
+            to_regclass('public.apocalypse_bot_ticks') AS t`
+  );
+  if (tables.rows[0].b) {
+    // Every durable bot identity points at a user actually marked is_bot.
+    const { rows: unmarked } = await q(
+      `SELECT count(*)::int AS n FROM apocalypse_bots b
+       JOIN users u ON u.user_id = b.user_id
+       WHERE u.is_bot IS DISTINCT FROM true`
+    );
+    if (unmarked[0].n > 0) {
+      problems.push(`INVARIANT VIOLATION: ${unmarked[0].n} bot identities backed by users without is_bot = true`);
+    }
+    // Persisted cooldown timestamps can never be in the future.
+    const { rows: futureActions } = await q(
+      `SELECT count(*)::int AS n FROM apocalypse_bots
+       WHERE last_action_at IS NOT NULL AND last_action_at > now()`
+    );
+    if (futureActions[0].n > 0) {
+      problems.push(`INVARIANT VIOLATION: ${futureActions[0].n} bot identities with a future last_action_at`);
+    }
+  }
+  if (tables.rows[0].t) {
+    // Tick rows can only ever belong to real cycles (FK-backed) and carry
+    // non-negative tick ids (CHECK-backed); verify no orphan claims exist.
+    // When apocalypse_cycles is itself absent, the shape problems recorded
+    // above are the report — here only the local check remains.
+    const cyclesPresent = await q(`SELECT to_regclass('public.apocalypse_cycles') AS reg`);
+    const orphans = cyclesPresent.rows[0].reg
+      ? await q(
+        `SELECT count(*)::int AS n FROM apocalypse_bot_ticks bt
+         WHERE NOT EXISTS (SELECT 1 FROM apocalypse_cycles ac WHERE ac.cycle_id = bt.cycle_id)
+            OR bt.tick_id < 0`
+      )
+      : await q('SELECT count(*)::int AS n FROM apocalypse_bot_ticks WHERE tick_id < 0');
+    if (orphans.rows[0].n > 0) {
+      problems.push(`INVARIANT VIOLATION: ${orphans.rows[0].n} bot tick rows with orphaned cycle or negative tick id`);
+    }
+  }
+}
+
+// --- Core 6: settlement results (apocalypse_results + immutability) -------
+
+const EXPECTED_RESULT_COLUMNS = [
+  ['result_id', 'integer', 'NO'],
+  ['cycle_id', 'integer', 'NO'],
+  ['participant_id', 'integer', 'NO'],
+  ['user_id', 'integer', 'NO'],
+  ['apocalypse_id', 'character varying', 'NO'],
+  ['username', 'character varying', 'NO'],
+  ['is_bot', 'boolean', 'NO'],
+  ['bot_personality', 'character varying', 'YES'],
+  ['rank', 'integer', 'NO'],
+  ['final_cash', 'numeric', 'NO'],
+  ['peak_wealth', 'numeric', 'NO'],
+  ['starting_cash', 'numeric', 'NO'],
+  ['net_profit', 'numeric', 'NO'],
+  ['joined_at', 'timestamp with time zone', 'NO'],
+  ['trade_count', 'integer', 'NO'],
+  ['buy_count', 'integer', 'NO'],
+  ['sell_count', 'integer', 'NO'],
+  ['created_at', 'timestamp with time zone', 'NO']
+];
+
+async function verifyResults(q, problems) {
+  await verifyCore4Table(q, problems, 'apocalypse_results', 'result_id', EXPECTED_RESULT_COLUMNS, {
+    uniques: ['^UNIQUE \\(cycle_id, participant_id\\)', '^UNIQUE \\(cycle_id, rank\\)'],
+    fks: [
+      { target: 'apocalypse_cycles', pattern: '^FOREIGN KEY \\(cycle_id\\)' },
+      { target: 'users', pattern: '^FOREIGN KEY \\(user_id\\)' },
+      { target: 'apocalypse_participants', pattern: '^FOREIGN KEY \\(participant_id, cycle_id, user_id\\)' }
+    ],
+    checks: [
+      { label: 'rank > 0', pattern: 'rank > \\(??0' },
+      { label: 'final_cash >= 0', pattern: 'final_cash >= \\(??0' },
+      { label: 'peak_wealth >= 0', pattern: 'peak_wealth >= \\(??0' },
+      { label: 'starting_cash > 0', pattern: 'starting_cash > \\(??0' },
+      { label: 'net_profit = final_cash - starting_cash', pattern: 'net_profit.*final_cash.*starting_cash' },
+      { label: 'bot_personality roster', pattern: 'bot_personality.*conservative.*momentum.*dip_buyer.*reckless' },
+      { label: 'trade_count = buy_count + sell_count', pattern: 'trade_count.*buy_count.*sell_count' },
+      { label: 'trade_count >= 0', pattern: 'trade_count >= \\(??0' }
+    ],
+    nowDefaults: ['created_at']
+  });
+
+  const present = await q(`SELECT to_regclass('public.apocalypse_results') AS reg`);
+  if (!present.rows[0].reg) return; // shape problems already recorded
+
+  // Immutability triggers: UPDATE, DELETE and TRUNCATE must all be blocked
+  // by the apocalypse_results_immutable trigger function.
+  const triggers = await q(
+    `SELECT t.tgname, p.proname AS func
+     FROM pg_trigger t
+     JOIN pg_class c ON c.oid = t.tgrelid
+     JOIN pg_namespace n ON n.oid = c.relnamespace
+     JOIN pg_proc p ON p.oid = t.tgfoid
+     WHERE n.nspname = 'public' AND c.relname = 'apocalypse_results' AND NOT t.tgisinternal`
+  );
+  for (const name of ['apocalypse_results_no_update', 'apocalypse_results_no_delete', 'apocalypse_results_no_truncate']) {
+    const trig = triggers.rows.find((r) => r.tgname === name);
+    if (!trig) {
+      problems.push(`missing immutability trigger ${name} on apocalypse_results`);
+    } else if (trig.func !== 'apocalypse_results_immutable') {
+      problems.push(`trigger ${name} on apocalypse_results executes ${trig.func}, expected apocalypse_results_immutable`);
+    }
+  }
+
+  // Lookup index.
+  const idx = await q(
+    `SELECT 1 FROM pg_class c
+     JOIN pg_index i ON i.indexrelid = c.oid
+     WHERE c.relname = 'idx_apocalypse_results_user'
+       AND i.indrelid = to_regclass('public.apocalypse_results')`
+  );
+  if (idx.rowCount === 0) problems.push('missing index idx_apocalypse_results_user');
+
+  // Live-data invariants. Every joined table is to_regclass-guarded first:
+  // when a joined table is absent, its own shape problems above are the
+  // report and the joined invariant is skipped rather than crashing.
+  const joined = await q(
+    `SELECT to_regclass('public.apocalypse_cycles') AS c,
+            to_regclass('public.apocalypse_participants') AS p`
+  );
+
+  // Local-only: net_profit is exactly final_cash - starting_cash.
+  const badProfit = await q(
+    `SELECT count(*)::int AS n FROM apocalypse_results
+     WHERE net_profit <> final_cash - starting_cash`
+  );
+  if (badProfit.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${badProfit.rows[0].n} results with net_profit <> final_cash - starting_cash`);
+
+  const badCounts = await q(
+    `SELECT count(*)::int AS n FROM apocalypse_results
+     WHERE trade_count <> buy_count + sell_count
+        OR trade_count < 0 OR buy_count < 0 OR sell_count < 0 OR rank <= 0`
+  );
+  if (badCounts.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${badCounts.rows[0].n} results with inconsistent trade counts or non-positive rank`);
+
+  if (joined.rows[0].c) {
+    // A results snapshot can only ever belong to a COMPLETED cycle.
+    const wrongCycle = await q(
+      `SELECT count(*)::int AS n FROM apocalypse_results r
+       JOIN apocalypse_cycles ac ON ac.cycle_id = r.cycle_id
+       WHERE ac.status <> 'COMPLETED'`
+    );
+    if (wrongCycle.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${wrongCycle.rows[0].n} results attached to non-COMPLETED cycles`);
+
+    // Rank uniqueness/completeness per cycle: no duplicate ranks and ranks
+    // are exactly 1..N with no gaps (the UNIQUE (cycle_id, rank) constraint
+    // is the enforcement; this catches any historical anomaly).
+    const badRanks = await q(
+      `SELECT count(*)::int AS n FROM (
+         SELECT cycle_id FROM apocalypse_results
+         GROUP BY cycle_id
+         HAVING count(*) <> count(DISTINCT rank)
+            OR max(rank) <> count(*) OR min(rank) <> 1
+       ) bad`
+    );
+    if (badRanks.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${badRanks.rows[0].n} cycles with duplicate or gapped result ranks`);
+
+    // A Core-6-settled cycle (settled_at stamped) has exactly one result
+    // per participant. Legacy pre-Core-6 COMPLETED cycles (settled_at NULL)
+    // predate results and are exempt.
+    if (joined.rows[0].p) {
+      const incomplete = await q(
+        `SELECT count(*)::int AS n FROM apocalypse_cycles ac
+         WHERE ac.settled_at IS NOT NULL
+           AND (SELECT count(*) FROM apocalypse_results r WHERE r.cycle_id = ac.cycle_id)
+               <> (SELECT count(*) FROM apocalypse_participants p WHERE p.cycle_id = ac.cycle_id)`
+      );
+      if (incomplete.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${incomplete.rows[0].n} settled cycles whose result count differs from their participant count`);
+    }
+  }
+}
+
 async function verifyGameSchema({ query } = {}) {
   const q = query || ((...args) => db.query(...args));
   const problems = [];
@@ -562,6 +843,8 @@ async function verifyGameSchema({ query } = {}) {
   await verifyBaselineColumn(q, problems);
   await verifyCollapseSchedule(q, problems);
   await verifyRoundState(q, problems);
+  await verifyBots(q, problems);
+  await verifyResults(q, problems);
 
   return { ok: problems.length === 0, problems };
 }
@@ -570,7 +853,7 @@ if (require.main === module) {
   verifyGameSchema()
     .then(async ({ ok, problems }) => {
       if (ok) {
-        console.log('game schema verification PASSED (apocalypse_cycles, coins.cycle_baseline_price, coin_collapse_schedule, apocalypse_participants, apocalypse_holdings, apocalypse_transactions)');
+        console.log('game schema verification PASSED (apocalypse_cycles [SETTLING lifecycle + settlement observability], coins.cycle_baseline_price, coin_collapse_schedule, apocalypse_participants, apocalypse_holdings, apocalypse_transactions, users.is_bot, apocalypse_bots, apocalypse_bot_ticks, apocalypse_results [immutable])');
         await db.end();
         return;
       }

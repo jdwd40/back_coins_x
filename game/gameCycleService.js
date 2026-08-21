@@ -1,11 +1,13 @@
 const crypto = require('crypto');
 const db = require('../db/connection');
 const collapseSchedule = require('./collapseScheduleService');
-// Core 4: round-state finalization hook. This module requires
-// gameRoundService at load time; gameRoundService never requires this module
-// at the top level (it lazy-requires reconcileCycle inside joinRound only),
-// so there is no circular import.
-const gameRoundService = require('./gameRoundService');
+// Core 6: settlement phases (freeze/settle). gameSettlementService owns the
+// Core 4 participant finalization hook now (it requires gameRoundService);
+// neither it nor gameRoundService requires this module at the top level
+// (joinRound lazy-requires reconcileCycle only), so there is no circular
+// import. Successor creation stays here so a failed settlement durably
+// blocks the next round.
+const settlementService = require('./gameSettlementService');
 
 // Default global apocalypse cycle length: 30 minutes.
 const DEFAULT_GAME_CYCLE_DURATION_MS = 30 * 60 * 1000;
@@ -111,39 +113,37 @@ async function insertCycle(client, { startTime, durationMs, seed }) {
   return rows[0];
 }
 
-// Transactionally create or recover the current global active cycle.
-// Idempotent: an existing unexpired active cycle is returned unchanged.
-// Expired cycles are completed and rolled into exactly one chained successor
-// at a time until the active window contains `now` (multi-cycle downtime
-// recovery). The advisory lock serialises this across processes; the partial
-// unique index on status='ACTIVE' is the database-enforced backstop.
-//
-// Core 3 runs inside this same advisory-locked transaction:
-//   * a newly created cycle restores coin prices from the explicit persisted
-//     baseline and gets its deterministic collapse schedule generated once;
-//   * a pre-existing active cycle missing its schedule (e.g. created before
-//     Core 3 existed) has it recovered WITHOUT resetting live prices;
-//   * before an expired cycle is marked COMPLETED, its persisted schedule is
-//     reconciled through its END time, so the final scheduled coin collapses
-//     to exactly £0 at the cycle end even if the app/worker was offline
-//     across the boundary;
-//   * the now-active cycle's due collapse rows are executed at `now`.
-// Reconciliation observes and reuses persisted rows — it never rerolls.
-async function reconcileCycle({ now = new Date(), durationMs, generateSeed = defaultGenerateSeed } = {}) {
-  const duration = resolveDurationMs(durationMs);
-  const nowMs = (now instanceof Date ? now : new Date(now)).getTime();
+// Transactionally ensure an ACTIVE cycle exists and return it. Caller's
+// reconcile loop decides whether it is live or needs freezing. A brand-new
+// database gets the aligned initial cycle; a database whose latest cycle is
+// COMPLETED gets exactly one chained successor starting at the predecessor's
+// end. Recovery of a pre-existing active cycle's collapse schedule happens
+// here without resetting live prices, and a live cycle's due collapses are
+// executed at `now`. Everything runs inside the same advisory-locked Core 1
+// transaction shape as before, so concurrent processes can never create
+// overlapping active cycles (the partial unique index is the backstop).
+async function ensureActiveCycle({ now, durationMs, generateSeed }) {
   const client = await db.getClient();
   try {
     await client.query('BEGIN');
     await client.query('SELECT pg_advisory_xact_lock($1)', [GAME_CYCLE_ADVISORY_LOCK_KEY]);
 
-    let { rows } = await client.query(
-      `SELECT * FROM apocalypse_cycles WHERE status = 'ACTIVE' LIMIT 1`
+    const nowMs = (now instanceof Date ? now : new Date(now)).getTime();
+    const { rows } = await client.query(
+      `SELECT * FROM apocalypse_cycles WHERE status = 'ACTIVE' LIMIT 1 FOR UPDATE`
     );
-
     let active = rows[0];
     if (!active) {
-      active = await insertCycle(client, { startTime: alignStartTime(now, duration), durationMs: duration, seed: generateSeed() });
+      // Chain off the most recent COMPLETED predecessor so windows never gap
+      // or overlap; with no history at all, start the aligned initial cycle.
+      const { rows: prev } = await client.query(
+        `SELECT end_time FROM apocalypse_cycles
+         WHERE status = 'COMPLETED'
+         ORDER BY end_time DESC, cycle_id DESC
+         LIMIT 1`
+      );
+      const startTime = prev[0] ? new Date(prev[0].end_time) : alignStartTime(now, durationMs);
+      active = await insertCycle(client, { startTime, durationMs, seed: generateSeed() });
       // New cycle boundary: restore the persisted baseline, then create this
       // cycle's schedule once — atomically with the cycle insert.
       await collapseSchedule.startCycle(client, active);
@@ -151,36 +151,13 @@ async function reconcileCycle({ now = new Date(), durationMs, generateSeed = def
       // Recovery path: a pre-existing active cycle gets its schedule created
       // if (and only if) it is missing. No baseline reset mid-cycle.
       await collapseSchedule.createScheduleForCycle(client, active);
+      // While the cycle is live, reconcile its persisted due collapse rows.
+      // An expired cycle's collapses run at exactly cycle end during
+      // settlement, not here.
+      if (new Date(active.end_time).getTime() > nowMs) {
+        await collapseSchedule.executeDueCollapses(client, active.cycle_id, new Date(nowMs));
+      }
     }
-
-    // Complete expired round(s) and roll into exactly one successor each,
-    // chaining start = predecessor end so windows never gap or overlap.
-    while (new Date(active.end_time).getTime() <= nowMs) {
-      // Reconcile the expiring cycle through its end time BEFORE it is
-      // completed, so no scheduled collapse (including the final one,
-      // scheduled exactly at cycle end) is lost to downtime.
-      await collapseSchedule.executeDueCollapses(client, active.cycle_id, new Date(active.end_time));
-      // Core 4: with the final £0 collapses persisted, finalize every active
-      // participant of the expiring cycle — status FINALIZED, final_cash
-      // from authoritative current_cash — inside this same advisory-locked
-      // transaction, before the cycle becomes COMPLETED and its successor
-      // exists. Nothing transfers to the successor; a join there starts
-      // fresh at the game starting cash. The hook is idempotent.
-      await gameRoundService.finalizeCycleParticipants(client, active.cycle_id);
-      await client.query(
-        `UPDATE apocalypse_cycles SET status = 'COMPLETED', updated_at = $2 WHERE cycle_id = $1`,
-        [active.cycle_id, new Date(nowMs).toISOString()]
-      );
-      active = await insertCycle(client, {
-        startTime: new Date(active.end_time),
-        durationMs: duration,
-        seed: generateSeed()
-      });
-      await collapseSchedule.startCycle(client, active);
-    }
-
-    // While an active cycle exists, reconcile its persisted due collapse rows.
-    await collapseSchedule.executeDueCollapses(client, active.cycle_id, new Date(nowMs));
 
     await client.query('COMMIT');
     return active;
@@ -190,6 +167,53 @@ async function reconcileCycle({ now = new Date(), durationMs, generateSeed = def
   } finally {
     client.release();
   }
+}
+
+// Bound on reconcile loop passes. Every non-returning pass makes one durable
+// lifecycle advance (a freeze, a settlement, or a successor creation), so
+// the loop always converges; the bound only guards against a pathological
+// state looping forever.
+const MAX_LIFECYCLE_PASSES = 10000;
+
+// Transactionally create or recover the current global active cycle.
+// Idempotent: an existing unexpired active cycle is returned unchanged.
+//
+// Core 6 lifecycle: ACTIVE -> SETTLING -> COMPLETED. Each reconcile call
+// walks the same deterministic phase loop, each phase in its own
+// advisory-locked transaction:
+//   1. FREEZE: an expired ACTIVE cycle commits to durable SETTLING first.
+//      From that commit, all trades against the cycle are rejected.
+//   2. SETTLE: a durable SETTLING cycle is settled to completion — Core 3
+//      collapses reconciled through exactly cycle end (the final coin
+//      reaches £0 before any value/result), Core 4 participants finalized,
+//      the immutable ranked apocalypse_results snapshot written exactly
+//      once, then the predecessor marked COMPLETED. A settlement failure
+//      leaves SETTLING committed (observable via settlement_started_at with
+//      settled_at NULL) and blocks any successor; the next call resumes it
+//      safely — replays can never duplicate results, cash, collapses, or
+//      successors.
+//   3. ENSURE ACTIVE: with no SETTLING cycle outstanding, exactly one
+//      successor is created, chained at the predecessor's end (Core 1
+//      no-overlap). Long downtime chains one freeze/settle/successor pass
+//      per elapsed cycle, preserving full history.
+// Reconciliation observes and reuses persisted rows — it never rerolls.
+async function reconcileCycle({ now = new Date(), durationMs, generateSeed = defaultGenerateSeed } = {}) {
+  const duration = resolveDurationMs(durationMs);
+  const nowDate = now instanceof Date ? now : new Date(now);
+  const nowMs = nowDate.getTime();
+
+  for (let pass = 0; pass < MAX_LIFECYCLE_PASSES; pass++) {
+    // Phase 1: freeze an expired ACTIVE cycle into durable SETTLING.
+    if (await settlementService.freezeExpiredActiveCycle({ nowMs })) continue;
+    // Phase 2: complete any durable SETTLING cycle (results + COMPLETED).
+    if (await settlementService.settleSettlingCycle()) continue;
+    // Phase 3: ensure an ACTIVE cycle exists; return it when it is live.
+    const active = await ensureActiveCycle({ now: nowDate, durationMs: duration, generateSeed });
+    if (new Date(active.end_time).getTime() > nowMs) return active;
+    // A chained successor that is itself already expired (long downtime):
+    // loop to freeze and settle it in turn.
+  }
+  throw new Error('reconcileCycle: game lifecycle failed to converge');
 }
 
 // Derive countdown figures from the persisted window. apocalypsePercent is
