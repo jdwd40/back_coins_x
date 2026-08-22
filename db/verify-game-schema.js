@@ -9,6 +9,9 @@
 //     itself (at most one ACTIVE row, end_time > start_time).
 //   * public.coins.cycle_baseline_price (Core 3): the durable restoration
 //     baseline column, its NOT NULL and positive CHECK.
+//   * Canonical coin catalogue (migration 013): the exact player-facing
+//     (coin_id, name, symbol) identities for coin_ids 1..10, exactly 10
+//     coin rows, and live symbol uniqueness.
 //   * public.coin_collapse_schedule (Core 3): columns, PK, both FKs, both
 //     UNIQUE constraints (cycle/coin and cycle/rank), all CHECK constraints,
 //     the partial due-reconciliation index, and live-data invariants (no
@@ -234,6 +237,60 @@ async function verifyBaselineColumn(q, problems) {
     );
     if (bad.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${bad.rows[0].n} coins rows with NULL or non-positive cycle_baseline_price`);
   }
+}
+
+// --- Migration 013: canonical coin catalogue --------------------------------
+
+// The player-facing catalogue renamed in place by migration 013. Mapping
+// authority: stable coin_id ordering 1..10 onto the documented catalogue
+// order. Rows outside ids 1..10 are not part of the canonical catalogue.
+const CANONICAL_COIN_CATALOGUE = [
+  [1, 'FutureCoin', 'FTR'],
+  [2, 'NovaCash', 'NVC'],
+  [3, 'Byteon', 'BYT'],
+  [4, 'DigitalVault', 'DGV'],
+  [5, 'Cybercore', 'CYB'],
+  [6, 'BlockNation', 'BLN'],
+  [7, 'StellaFortune', 'STF'],
+  [8, 'JD Coin', 'JDC'],
+  [9, 'MeteorCoin', 'MTC'],
+  [10, 'CryptoZen', 'CZN']
+];
+
+async function verifyCoinCatalogue(q, problems) {
+  const table = await q(`SELECT to_regclass('public.coins') AS reg`);
+  if (!table.rows[0].reg) {
+    problems.push('table public.coins does not exist');
+    return;
+  }
+
+  const { rows } = await q('SELECT coin_id, name, symbol FROM coins ORDER BY coin_id');
+  const byId = new Map(rows.map((r) => [r.coin_id, r]));
+
+  // Exact canonical identity at each stable coin_id (catches legacy names
+  // left behind by an unapplied migration 013, or any drifted identity).
+  for (const [id, name, symbol] of CANONICAL_COIN_CATALOGUE) {
+    const row = byId.get(id);
+    if (!row) {
+      problems.push(`canonical coin missing: coin_id ${id} (${name}/${symbol})`);
+    } else if (row.name !== name || row.symbol !== symbol) {
+      problems.push(`canonical coin_id ${id}: found ${row.name}/${row.symbol}, expected ${name}/${symbol}`);
+    }
+  }
+
+  // The catalogue is exactly the canonical 10 — extra player-facing rows
+  // (e.g. legacy seed-only coins) are flagged, not silently tolerated.
+  if (rows.length !== CANONICAL_COIN_CATALOGUE.length) {
+    problems.push(`coin catalogue: ${rows.length} coin rows, expected exactly ${CANONICAL_COIN_CATALOGUE.length} (extra rows are non-canonical and player-facing)`);
+  }
+
+  // Live-data mirror of the coins.symbol UNIQUE constraint.
+  const dup = await q(
+    `SELECT count(*)::int AS n FROM (
+       SELECT symbol FROM coins GROUP BY symbol HAVING count(*) > 1
+     ) d`
+  );
+  if (dup.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${dup.rows[0].n} coin symbols are duplicated`);
 }
 
 // --- Core 3: coin_collapse_schedule ----------------------------------------
@@ -869,6 +926,7 @@ async function verifyGameSchema({ query } = {}) {
 
   await verifyApocalypseCycles(q, problems);
   await verifyBaselineColumn(q, problems);
+  await verifyCoinCatalogue(q, problems);
   await verifyCollapseSchedule(q, problems);
   await verifyRoundState(q, problems);
   await verifyBots(q, problems);
@@ -881,7 +939,7 @@ if (require.main === module) {
   verifyGameSchema()
     .then(async ({ ok, problems }) => {
       if (ok) {
-        console.log('game schema verification PASSED (apocalypse_cycles [SETTLING lifecycle + settlement observability], coins.cycle_baseline_price, coin_collapse_schedule, apocalypse_participants, apocalypse_holdings, apocalypse_transactions, users.is_bot, apocalypse_bots, apocalypse_bot_ticks, apocalypse_results [immutable])');
+        console.log('game schema verification PASSED (apocalypse_cycles [SETTLING lifecycle + settlement observability], coins.cycle_baseline_price, canonical coin catalogue [migration 013], coin_collapse_schedule, apocalypse_participants, apocalypse_holdings, apocalypse_transactions, users.is_bot, apocalypse_bots, apocalypse_bot_ticks, apocalypse_results [immutable])');
         await db.end();
         return;
       }

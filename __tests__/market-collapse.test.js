@@ -16,7 +16,10 @@ const CYCLE_START = new Date('2026-08-20T10:00:00.000Z');
 const DURATION_MS = 30 * 60 * 1000;
 const WINDOW_START_MS = CYCLE_START.getTime() + DURATION_MS * 0.70;
 const CYCLE_END_MS = CYCLE_START.getTime() + DURATION_MS;
-const SPACING_MS = (CYCLE_END_MS - WINDOW_START_MS) / 12;
+// Collapse ranks are evenly spaced by window/(coinCount - 1); the seeded
+// canonical catalogue holds 10 coins (migration 013).
+const SEEDED_COIN_COUNT = 10;
+const SPACING_MS = (CYCLE_END_MS - WINDOW_START_MS) / (SEEDED_COIN_COUNT - 1);
 
 async function collapseRankZeroCoin() {
   // Create the cycle and reconcile exactly at the first scheduled collapse.

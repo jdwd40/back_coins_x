@@ -1,8 +1,8 @@
 [
   {
     "coin_id": 1,
-    "name": "BitBerto",
-    "symbol": "BTB",
+    "name": "FutureCoin",
+    "symbol": "FTR",
     "current_price": "£0.10",
     "market_cap": "£30,000.00",
     "circulating_supply": 2500,
@@ -11,8 +11,8 @@
   },
   {
     "coin_id": 2,
-    "name": "GedCoin",
-    "symbol": "GED",
+    "name": "NovaCash",
+    "symbol": "NVC",
     "current_price": "£1.37",
     "market_cap": "£18,000.00",
     "circulating_supply": 4500,
@@ -21,8 +21,8 @@
   },
   {
     "coin_id": 3,
-    "name": "Mr B Block",
-    "symbol": "MBB",
+    "name": "Byteon",
+    "symbol": "BYT",
     "current_price": "£0.12",
     "market_cap": "£20,000.00",
     "circulating_supply": 4000,
@@ -31,8 +31,8 @@
   },
   {
     "coin_id": 4,
-    "name": "BartoSatashi",
-    "symbol": "BTS",
+    "name": "DigitalVault",
+    "symbol": "DGV",
     "current_price": "£0.10",
     "market_cap": "£7,000.00",
     "circulating_supply": 7000,
@@ -41,8 +41,8 @@
   },
   {
     "coin_id": 5,
-    "name": "PeteChain",
-    "symbol": "PTC",
+    "name": "Cybercore",
+    "symbol": "CYB",
     "current_price": "£96.45",
     "market_cap": "£12,000.00",
     "circulating_supply": 6000,
@@ -51,8 +51,8 @@
   },
   {
     "coin_id": 6,
-    "name": "DeanNode",
-    "symbol": "DNO",
+    "name": "BlockNation",
+    "symbol": "BLN",
     "current_price": "£43.46",
     "market_cap": "£30,000.00",
     "circulating_supply": 2000,
@@ -61,8 +61,8 @@
   },
   {
     "coin_id": 7,
-    "name": "DeanSpark",
-    "symbol": "DSP",
+    "name": "StellaFortune",
+    "symbol": "STF",
     "current_price": "£3.91",
     "market_cap": "£14,000.00",
     "circulating_supply": 5500,
@@ -71,8 +71,8 @@
   },
   {
     "coin_id": 8,
-    "name": "SlateBit",
-    "symbol": "SLB",
+    "name": "JD Coin",
+    "symbol": "JDC",
     "current_price": "£33.48",
     "market_cap": "£15,000.00",
     "circulating_supply": 5000,
@@ -81,8 +81,8 @@
   },
   {
     "coin_id": 9,
-    "name": "JarLedger",
-    "symbol": "JRL",
+    "name": "MeteorCoin",
+    "symbol": "MTC",
     "current_price": "£0.10",
     "market_cap": "£6,400.00",
     "circulating_supply": 8000,
@@ -91,42 +91,12 @@
   },
   {
     "coin_id": 10,
-    "name": "WolliWarden",
-    "symbol": "WLW",
+    "name": "CryptoZen",
+    "symbol": "CZN",
     "current_price": "£32.00",
     "market_cap": "£25,000.00",
     "circulating_supply": 3000,
     "price_change_24h": null,
     "founder": "Si Wollaston"
-  },
-  {
-    "coin_id": 11,
-    "name": "HashAd",
-    "symbol": "HAD",
-    "current_price": "£35.50",
-    "market_cap": "£22,000.00",
-    "circulating_supply": 4200,
-    "price_change_24h": null,
-    "founder": "Adam Evans"
-  },
-  {
-    "coin_id": 12,
-    "name": "ChrisByte",
-    "symbol": "CBT",
-    "current_price": "£28.75",
-    "market_cap": "£19,000.00",
-    "circulating_supply": 3800,
-    "price_change_24h": null,
-    "founder": "Chris Evans"
-  },
-  {
-    "coin_id": 13,
-    "name": "HodlWayne",
-    "symbol": "HDW",
-    "current_price": "£42.20",
-    "market_cap": "£24,000.00",
-    "circulating_supply": 4800,
-    "price_change_24h": null,
-    "founder": "Wayne"
   }
 ]

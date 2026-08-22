@@ -26,8 +26,8 @@ const CYCLE_START = new Date('2026-08-20T10:00:00.000Z');
 const CYCLE_END = new Date('2026-08-20T10:30:00.000Z');
 const DURATION_MS = 30 * 60 * 1000;
 const WINDOW_START_MS = CYCLE_START.getTime() + DURATION_MS * (COLLAPSE_WINDOW_START_PERCENT / 100);
-// 13 seeded coins -> rank spacing inside the collapse window.
-const SEEDED_COIN_COUNT = 13;
+// 10 seeded canonical coins (migration 013) -> rank spacing inside the collapse window.
+const SEEDED_COIN_COUNT = 10;
 const SPACING_MS = (CYCLE_END.getTime() - WINDOW_START_MS) / (SEEDED_COIN_COUNT - 1);
 
 async function coinCount() {
@@ -256,16 +256,17 @@ describe('Core 3: persisted schedule lifecycle', () => {
     expect(executed[0].n).toBe(2);
 
     // Sleep through the rest and wake at 95%: every rank due by then executes.
-    // 95% of the cycle = 10:28:30 -> ranks 0..10 due (rank 11 at 10:29:15, rank 12 at end).
+    // 95% of the cycle = 10:28:30 -> ranks 0..7 due with the 10-coin 60s
+    // spacing (rank 8 at 10:29:00, rank 9 at cycle end).
     await reconcileCycle({ now: new Date('2026-08-20T10:28:30.000Z') });
     ({ rows: executed } = await db.query(
       'SELECT collapse_rank FROM coin_collapse_schedule WHERE cycle_id = $1 AND executed_at IS NOT NULL ORDER BY collapse_rank',
       [cycle.cycle_id]
     ));
-    expect(executed.map((r) => r.collapse_rank)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect(executed.map((r) => r.collapse_rank)).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
 
     const { rows: zeroCoins } = await db.query('SELECT count(*)::int AS n FROM coins WHERE current_price = 0');
-    expect(zeroCoins[0].n).toBe(11);
+    expect(zeroCoins[0].n).toBe(8);
   });
 
   test('repeated reconciliation is idempotent: no duplicate £0 history or state changes', async () => {

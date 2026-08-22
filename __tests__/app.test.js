@@ -10,7 +10,7 @@ describe('API Endpoints', () => {
         .expect(200)
         .then(({ body }) => {
           expect(Array.isArray(body.coins)).toBe(true);
-          expect(body.coins).toHaveLength(13);
+          expect(body.coins).toHaveLength(10);
         });
     });
   });

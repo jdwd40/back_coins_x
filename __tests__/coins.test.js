@@ -29,14 +29,14 @@ describe('Coins API', () => {
         .expect(200);
 
       expect(Array.isArray(response.body.coins)).toBe(true);
-      expect(response.body.coins).toHaveLength(13);
+      expect(response.body.coins).toHaveLength(10);
 
-      // Test the first coin (BitBerto) specifically
-      const bitBerto = response.body.coins.find(coin => coin.name === 'BitBerto');
-      expect(bitBerto).toMatchObject({
+      // Test the first coin (FutureCoin) specifically
+      const futureCoin = response.body.coins.find(coin => coin.name === 'FutureCoin');
+      expect(futureCoin).toMatchObject({
         coin_id: 1,
-        name: 'BitBerto',
-        symbol: 'BTB',
+        name: 'FutureCoin',
+        symbol: 'FTR',
         current_price: '£0.10',
         market_cap: '£30,000.00',
         circulating_supply: 2500,
@@ -68,8 +68,8 @@ describe('Coins API', () => {
 
       expect(body.coin).toEqual({
         coin_id: 1,
-        name: 'BitBerto',
-        symbol: 'BTB',
+        name: 'FutureCoin',
+        symbol: 'FTR',
         current_price: CurrencyFormatter.formatGBP(0.10),
         market_cap: CurrencyFormatter.formatGBP(30000.00),
         circulating_supply: 2500,
