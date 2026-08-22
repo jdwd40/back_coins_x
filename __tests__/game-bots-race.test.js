@@ -76,14 +76,16 @@ describe('Core 5: genuine multi-process bot races', () => {
     const { rows: identities } = await db.query('SELECT count(*)::int AS n FROM apocalypse_bots');
     expect(identities[0].n).toBe(4);
     const { rows: participants } = await db.query(
-      'SELECT count(*)::int AS n FROM apocalypse_participants WHERE cycle_id = $1',
+      `SELECT count(*)::int AS n FROM apocalypse_participants p
+       JOIN users u ON u.user_id = p.user_id
+       WHERE p.cycle_id = $1 AND u.is_bot = true`,
       [cycle.cycle_id]
     );
-    expect(participants[0].n).toBe(4);
+    expect(participants[0].n).toBe(4); // #17: humans auto-initialized separately
     for (const p of (await db.query(
       'SELECT * FROM apocalypse_participants WHERE cycle_id = $1', [cycle.cycle_id]
     )).rows) {
-      expect(parseFloat(p.starting_cash)).toBe(1000);
+      expect(parseFloat(p.starting_cash)).toBe(10000);
       expect(parseFloat(p.current_cash)).toBeGreaterThanOrEqual(0);
     }
 

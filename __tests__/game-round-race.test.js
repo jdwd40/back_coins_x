@@ -57,7 +57,7 @@ describe('Core 4: genuine multi-process races', () => {
     expect(target.database).toMatch(/test/i);
   });
 
-  test('duplicate join race: 6 processes joining one user create exactly one participant with £1,000', async () => {
+  test('duplicate join race: 6 processes joining one user create exactly one participant with £10,000', async () => {
     const barrierMs = Date.now() + 1500;
     const specs = Array.from({ length: 6 }, () => ({
       mode: 'join', barrierMs, payload: { userId: 1, nowMs: barrierMs }
@@ -73,9 +73,9 @@ describe('Core 4: genuine multi-process races', () => {
     expect(cycles).toHaveLength(1);
     const participants = await participantByUser(cycles[0].cycle_id, 1);
     expect(participants).toHaveLength(1);
-    expect(parseFloat(participants[0].starting_cash)).toBe(1000);
-    expect(parseFloat(participants[0].current_cash)).toBe(1000);
-    expect(parseFloat(participants[0].peak_wealth)).toBe(1000);
+    expect(parseFloat(participants[0].starting_cash)).toBe(10000);
+    expect(parseFloat(participants[0].current_cash)).toBe(10000);
+    expect(parseFloat(participants[0].peak_wealth)).toBe(10000);
     // Exactly one join ever happened globally for this user.
     const { rows: all } = await db.query('SELECT count(*)::int AS n FROM apocalypse_participants WHERE user_id = 1');
     expect(all[0].n).toBe(1);
@@ -88,11 +88,11 @@ describe('Core 4: genuine multi-process races', () => {
     const coinId = coinRows[0].coin_id;
     await db.query('UPDATE coins SET current_price = 100.00 WHERE coin_id = $1', [coinId]);
 
-    // Two processes each try to buy £600 of coin with only £1,000 round cash.
+    // Two processes each try to buy £6,000 of coin with only £10,000 round cash.
     const barrierMs = Date.now() + 1500;
     const specs = Array.from({ length: 2 }, () => ({
       mode: 'buy', barrierMs,
-      payload: { userId: 1, apocalypseId: cycle.apocalypse_id, coinId, quantity: 6, nowMs: barrierMs }
+      payload: { userId: 1, apocalypseId: cycle.apocalypse_id, coinId, quantity: 60, nowMs: barrierMs }
     }));
     const results = parseResults(await Promise.all(spawnWorkers(specs)));
 
@@ -105,13 +105,13 @@ describe('Core 4: genuine multi-process races', () => {
 
     // Invariants asserted directly in PostgreSQL.
     const participants = await participantByUser(cycle.cycle_id, 1);
-    expect(parseFloat(participants[0].current_cash)).toBe(400);
+    expect(parseFloat(participants[0].current_cash)).toBe(4000);
     const { rows: h } = await db.query(
       'SELECT quantity FROM apocalypse_holdings WHERE participant_id = $1 AND coin_id = $2',
       [participants[0].participant_id, coinId]
     );
     expect(h).toHaveLength(1);
-    expect(parseFloat(h[0].quantity)).toBe(6);
+    expect(parseFloat(h[0].quantity)).toBe(60);
     const { rows: t } = await db.query(
       `SELECT count(*)::int AS n FROM apocalypse_transactions WHERE participant_id = $1 AND type = 'BUY'`,
       [participants[0].participant_id]
@@ -148,8 +148,8 @@ describe('Core 4: genuine multi-process races', () => {
     expect(rejected[0].message).toMatch(/Insufficient round holdings/);
 
     const participants = await participantByUser(cycle.cycle_id, 1);
-    // Exactly one £500 sale landed: 1000 - 500 (buy) + 500 (sell) = 1000.
-    expect(parseFloat(participants[0].current_cash)).toBe(1000);
+    // Exactly one £500 sale landed: 10000 - 500 (buy) + 500 (sell) = 10000.
+    expect(parseFloat(participants[0].current_cash)).toBe(10000);
     const { rows: h } = await db.query(
       'SELECT quantity FROM apocalypse_holdings WHERE participant_id = $1 AND coin_id = $2',
       [participants[0].participant_id, coinId]
@@ -226,8 +226,8 @@ describe('Core 4: genuine multi-process races', () => {
       // The buy committed before finalization: cash/holding/ledger are all
       // consistent and the final cash includes the trade.
       const total = Math.round(2 * price * 100) / 100;
-      expect(parseFloat(p.current_cash)).toBeCloseTo(1000 - total, 2);
-      expect(parseFloat(p.final_cash)).toBeCloseTo(1000 - total, 2);
+      expect(parseFloat(p.current_cash)).toBeCloseTo(10000 - total, 2);
+      expect(parseFloat(p.final_cash)).toBeCloseTo(10000 - total, 2);
       expect(h).toHaveLength(1);
       expect(parseFloat(h[0].quantity)).toBe(2);
       expect(t).toHaveLength(1);
@@ -237,8 +237,8 @@ describe('Core 4: genuine multi-process races', () => {
       // stale and nothing was written.
       expect(buyResult.status).toBe(409);
       expect(buyResult.message).toMatch(/no longer active/);
-      expect(parseFloat(p.current_cash)).toBe(1000);
-      expect(parseFloat(p.final_cash)).toBe(1000);
+      expect(parseFloat(p.current_cash)).toBe(10000);
+      expect(parseFloat(p.final_cash)).toBe(10000);
       expect(h).toHaveLength(0);
       expect(t).toHaveLength(0);
     }

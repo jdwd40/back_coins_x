@@ -133,7 +133,7 @@ describe('Core 5: bot configuration', () => {
   });
 
   test('trade-size cap is validated: finite, 2dp money, positive and safely bounded', () => {
-    for (const bad of ['abc', '0', '-10', '10.555', '0.5', '1001', 'Infinity']) {
+    for (const bad of ['abc', '0', '-10', '10.555', '0.5', '10001', 'Infinity']) {
       process.env.GAME_BOT_MAX_TRADE_SIZE = bad;
       expect(() => botConfig.resolveBotConfig()).toThrow(/GAME_BOT_MAX_TRADE_SIZE/);
     }
@@ -271,7 +271,7 @@ describe('Core 5: deterministic decisions from public state only', () => {
     // When it does buy: small stake (5% of cash) on the most stable coin.
     const buy = botService.decideBotAction({ strategy: 'conservative', marketState: state, random: () => 0.1 });
     expect(buy).toMatchObject({ type: 'BUY', coinId: 2 });
-    expect(buy.quantity * 10).toBeLessThanOrEqual(50); // 5% of £1,000 at price 10
+    expect(buy.quantity * 10).toBeLessThanOrEqual(500); // 5% of £10,000 at price 10
     // Defensive sell: a holding whose public history declined meaningfully is
     // dumped in full to protect cash.
     const holding = shapedState({ holdings: [{ coinId: 2, symbol: 'BBB', quantity: 4 }] });
@@ -411,7 +411,7 @@ describe('Core 5: deterministic decisions from public state only', () => {
       expect(futureDoomed.collapsed).toBe(false);
     }
     expect(Object.keys(state).sort()).toEqual(['apocalypsePercent', 'cash', 'coins', 'holdings']);
-    expect(state.cash).toBe(1000);
+    expect(state.cash).toBe(10000);
     expect(state.apocalypsePercent).toBeGreaterThanOrEqual(0);
     expect(state.apocalypsePercent).toBeLessThanOrEqual(100);
   });
@@ -439,12 +439,15 @@ describe('Core 5: bot ticks', () => {
       'SELECT * FROM apocalypse_participants WHERE cycle_id = $1 ORDER BY user_id',
       [cycle.cycle_id]
     );
-    expect(participants).toHaveLength(4);
-    for (const p of participants) {
-      expect(parseFloat(p.starting_cash)).toBe(1000);
+    // Issue #17: humans are auto-initialized too — assert the BOT rows.
+    const botIds = new Set(users.map((u) => u.userId ?? u.user_id));
+    const botParticipants = participants.filter((p) => botIds.has(p.user_id));
+    expect(botParticipants).toHaveLength(4);
+    for (const p of botParticipants) {
+      expect(parseFloat(p.starting_cash)).toBe(10000);
       expect(p.status).toBe('ACTIVE');
       // Round cash only ever moved by real trades: never above the start.
-      expect(parseFloat(p.current_cash)).toBeLessThanOrEqual(1000);
+      expect(parseFloat(p.current_cash)).toBeLessThanOrEqual(10000);
       expect(parseFloat(p.current_cash)).toBeGreaterThanOrEqual(0);
     }
   });

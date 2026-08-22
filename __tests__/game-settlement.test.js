@@ -114,8 +114,8 @@ describe('Core 6: end-of-round settlement', () => {
     // in the SUCCESSOR cycle at the full game starting cash.
     const joined = await gameRoundService.joinRound({ userId: 2, now: AFTER_END });
     expect(joined.apocalypseId).not.toBe(cycle.apocalypse_id);
-    expect(joined.startingCash).toBe(1000);
-    expect(joined.currentCash).toBe(1000);
+    expect(joined.startingCash).toBe(10000);
+    expect(joined.currentCash).toBe(10000);
 
     const predecessor = await getCycle(cycle.apocalypse_id);
     expect(predecessor.status).toBe('COMPLETED');
@@ -179,11 +179,11 @@ describe('Core 6: end-of-round settlement', () => {
     expect(results).toHaveLength(2);
 
     const [first, second] = results;
-    // User 2 kept 1000 cash -> rank 1; user 1 spent -> rank 2.
+    // User 2 kept 10000 cash -> rank 1; user 1 spent -> rank 2.
     expect(first.user_id).toBe(2);
     expect(first.rank).toBe(1);
-    expect(parseFloat(first.final_cash)).toBe(1000);
-    expect(parseFloat(first.starting_cash)).toBe(1000);
+    expect(parseFloat(first.final_cash)).toBe(10000);
+    expect(parseFloat(first.starting_cash)).toBe(10000);
     expect(parseFloat(first.net_profit)).toBe(0);
     expect(first.trade_count).toBe(0);
     expect(first.buy_count).toBe(0);
@@ -196,7 +196,7 @@ describe('Core 6: end-of-round settlement', () => {
 
     expect(second.user_id).toBe(1);
     expect(second.rank).toBe(2);
-    expect(parseFloat(second.final_cash)).toBeCloseTo(1000 - spent, 2);
+    expect(parseFloat(second.final_cash)).toBeCloseTo(10000 - spent, 2);
     expect(parseFloat(second.net_profit)).toBeCloseTo(-spent, 2);
     expect(second.trade_count).toBe(1);
     expect(second.buy_count).toBe(1);
@@ -205,7 +205,7 @@ describe('Core 6: end-of-round settlement', () => {
 
     // Peak wealth is at least the final cash and at least the starting cash.
     expect(parseFloat(second.peak_wealth)).toBeGreaterThanOrEqual(parseFloat(second.final_cash));
-    expect(parseFloat(second.peak_wealth)).toBeGreaterThanOrEqual(1000);
+    expect(parseFloat(second.peak_wealth)).toBeGreaterThanOrEqual(10000);
 
     // Participant rows are FINALIZED with matching final cash.
     const { rows: participants } = await db.query(
@@ -231,8 +231,8 @@ describe('Core 6: end-of-round settlement', () => {
       [cycle.cycle_id]
     );
     expect(results).toHaveLength(2);
-    expect(parseFloat(results[0].final_cash)).toBe(1000);
-    expect(parseFloat(results[1].final_cash)).toBe(1000);
+    expect(parseFloat(results[0].final_cash)).toBe(10000);
+    expect(parseFloat(results[1].final_cash)).toBe(10000);
     expect(results[0].participant_id).toBe(p1.participantId); // lower id wins the tie
     expect(results[1].participant_id).toBe(p2.participantId);
     expect(results.map((r) => r.rank)).toEqual([1, 2]);
@@ -243,14 +243,15 @@ describe('Core 6: end-of-round settlement', () => {
     // Join at 95% of the cycle.
     const late = new Date(T0.getTime() + CYCLE_MS * 0.95);
     const participant = await gameRoundService.joinRound({ userId: 1, now: late });
-    expect(participant.startingCash).toBe(1000);
+    expect(participant.startingCash).toBe(10000);
 
     await reconcileCycle({ now: AFTER_END, durationMs: CYCLE_MS });
 
-    const { rows } = await db.query('SELECT * FROM apocalypse_results WHERE cycle_id = $1', [cycle.cycle_id]);
+    const { rows } = await db.query(
+      'SELECT * FROM apocalypse_results WHERE cycle_id = $1 AND user_id = 1', [cycle.cycle_id]);
     expect(rows).toHaveLength(1);
-    expect(parseFloat(rows[0].starting_cash)).toBe(1000);
-    expect(parseFloat(rows[0].final_cash)).toBe(1000);
+    expect(parseFloat(rows[0].starting_cash)).toBe(10000);
+    expect(parseFloat(rows[0].final_cash)).toBe(10000);
     expect(rows[0].rank).toBe(1);
     // joined_at is stamped once by the database at join and snapshotted as-is.
     expect(new Date(rows[0].joined_at).toISOString()).toBe(participant.joinedAt);
@@ -259,32 +260,40 @@ describe('Core 6: end-of-round settlement', () => {
   test('bots rank identically to humans and can take rank 1', async () => {
     const cycle = await startCycle();
     const roster = await botService.ensureBotsProvisioned();
-    const bot = roster[0];
-    await gameRoundService.joinRound({ userId: bot.userId, now: T0 });
+    // #17 auto-init swept the roster in on the next reconcile; ensure it.
+    await gameRoundService.joinRound({ userId: roster[0].userId, now: T0 });
 
-    // The human spends cash; the untraded bot keeps the full 1000 and wins.
-    await gameRoundService.joinRound({ userId: 1, now: T0 });
+    // BOTH humans trade and lose cash; the untraded bots keep the full
+    // £10,000 and outrank them under the identical rule.
     const coin = await cheapestCoin();
-    await gameRoundService.buyRoundTrade({
-      userId: 1, apocalypseId: cycle.apocalypse_id, coinId: coin.coin_id, quantity: 10, now: T0
-    });
+    for (const userId of [1, 2]) {
+      await gameRoundService.buyRoundTrade({
+        userId, apocalypseId: cycle.apocalypse_id, coinId: coin.coin_id, quantity: 10, now: T0
+      });
+    }
 
     await reconcileCycle({ now: AFTER_END, durationMs: CYCLE_MS });
 
     const { rows: results } = await db.query(
-      'SELECT * FROM apocalypse_results WHERE cycle_id = $1 ORDER BY rank',
+      'SELECT * FROM apocalypse_results WHERE cycle_id = $1 ORDER BY rank NULLS LAST, participant_id',
       [cycle.cycle_id]
     );
-    expect(results).toHaveLength(2);
+    // 2 humans + 4 bots, all initialized with £10,000.
+    expect(results).toHaveLength(6);
     expect(results[0].rank).toBe(1);
     expect(results[0].is_bot).toBe(true);
-    expect(results[0].bot_personality).toBe(bot.strategy);
-    expect(results[0].user_id).toBe(bot.userId);
-    expect(parseFloat(results[0].final_cash)).toBe(1000);
-    expect(results[1].is_bot).toBe(false);
+    expect(results[0].bot_personality).toBe(roster[0].strategy);
+    expect(results[0].user_id).toBe(roster[0].userId);
+    expect(parseFloat(results[0].final_cash)).toBe(10000);
+    // Ranks 1-4 are the bots (full cash); ranks 5-6 the trading humans.
+    for (const r of results.slice(0, 4)) expect(r.is_bot).toBe(true);
+    for (const r of results.slice(4)) expect(r.is_bot).toBe(false);
   });
 
   test('an empty cycle completes with zero results', async () => {
+    // #17: every registered user is auto-initialized into every cycle, so
+    // the zero-participant case requires zero registered users.
+    await db.query('DELETE FROM users');
     const cycle = await startCycle();
     await reconcileCycle({ now: AFTER_END, durationMs: CYCLE_MS });
 
@@ -397,7 +406,7 @@ describe('Core 6: end-of-round settlement', () => {
     ).rejects.toThrow(/immutable/);
 
     const { rows } = await db.query('SELECT final_cash FROM apocalypse_results WHERE cycle_id = $1', [cycle.cycle_id]);
-    expect(parseFloat(rows[0].final_cash)).toBe(1000);
+    expect(parseFloat(rows[0].final_cash)).toBe(10000);
   });
 
   test('successor chains exactly at predecessor end; multi-cycle downtime preserves full history', async () => {
@@ -431,11 +440,14 @@ describe('Core 6: end-of-round settlement', () => {
     expect(cycles[2].settled_at).toBeNull();
 
     // History: cycle 1's results/participants survive later rounds untouched.
+    // #17: BOTH seeded users are participants of every cycle; the traded
+    // user 1 lost cash, the untouched user 2 settled at exactly £10,000.
     const { rows: results } = await db.query('SELECT * FROM apocalypse_results WHERE cycle_id = $1', [cycles[0].cycle_id]);
-    expect(results).toHaveLength(1);
-    expect(results[0].user_id).toBe(1);
-    const { rows: emptyResults } = await db.query('SELECT count(*)::int AS n FROM apocalypse_results WHERE cycle_id = $1', [cycles[1].cycle_id]);
-    expect(emptyResults[0].n).toBe(0);
+    expect(results).toHaveLength(2);
+    const user1Result = results.find((r) => r.user_id === 1);
+    expect(parseFloat(user1Result.final_cash)).toBeLessThan(10000);
+    const { rows: secondCycleResults } = await db.query('SELECT count(*)::int AS n FROM apocalypse_results WHERE cycle_id = $1', [cycles[1].cycle_id]);
+    expect(secondCycleResults[0].n).toBe(2); // untouched middle cycle: both users
 
     // The collapse schedules of completed cycles are preserved (no reroll,
     // no deletion).

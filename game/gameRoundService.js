@@ -596,6 +596,34 @@ async function sellRoundTrade({ userId, apocalypseId, coinId, quantity: rawQuant
 }
 
 // ---------------------------------------------------------------------------
+// Cycle-start participant initialization (issue #17: continuous automatic
+// participation). Called by gameCycleService INSIDE the Core 1
+// advisory-locked cycle transaction — both when a brand-new cycle is
+// inserted and when a pre-existing ACTIVE cycle is recovered — so EVERY
+// registered user (humans AND the configured bots, who are users rows with
+// is_bot = true) has exactly one participant row for the current cycle with
+// exactly the authoritative starting cash, whether or not any human is
+// online. Set-based and idempotent: ON CONFLICT (cycle_id, user_id) DO
+// NOTHING means retries, restarts, duplicate workers and the per-request
+// joinRound path can never duplicate a participant or re-award starting
+// cash; a mid-cycle registration is picked up by the next reconciliation.
+// Nothing is read from or written to users.funds.
+// ---------------------------------------------------------------------------
+async function initializeCycleParticipants(client, cycleId) {
+  const startingCash = resolveGameStartingCash();
+  const { rowCount } = await client.query(
+    `INSERT INTO apocalypse_participants
+       (cycle_id, user_id, starting_cash, current_cash, peak_wealth, status)
+     SELECT $1, u.user_id, $2, $2, $2, 'ACTIVE'
+     FROM users u
+     ORDER BY u.user_id
+     ON CONFLICT (cycle_id, user_id) DO NOTHING`,
+    [cycleId, startingCash]
+  );
+  return rowCount;
+}
+
+// ---------------------------------------------------------------------------
 // Lifecycle finalization hook. Called by gameCycleService.reconcileCycle
 // INSIDE the Core 1 advisory-locked transaction, AFTER Core 3 has executed
 // the final £0 collapses for the expiring cycle and BEFORE the cycle is
@@ -651,6 +679,7 @@ module.exports = {
   buyRoundTrade,
   sellRoundTrade,
   getParticipantRoundState,
+  initializeCycleParticipants,
   finalizeCycleParticipants,
   reconcileActivePeaks
 };

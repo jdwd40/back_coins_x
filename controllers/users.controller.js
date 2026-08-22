@@ -34,7 +34,20 @@ const registerUser = async (req, res, next) => {
     }
 
     const newUser = await createUser(username, email, password);
-    
+
+    // Issue #17: a user who registers during an ACTIVE Apocalypse is a
+    // participant immediately — exactly one current-cycle row with the
+    // authoritative starting cash, no JOIN step. Best-effort: registration
+    // itself must never fail because game reconciliation did; the next
+    // cycle reconciliation also ensures the row (initializeCycleParticipants
+    // is idempotent), so a failure here only delays visibility.
+    try {
+      const gameRoundService = require('../game/gameRoundService');
+      await gameRoundService.joinRound({ userId: newUser.user_id });
+    } catch (gameErr) {
+      logger.error(`Post-registration round initialization failed for user ${newUser.user_id}: ${gameErr.message}`);
+    }
+
     logger.log(`User registered successfully: ${username} (${email})`);
     
     res.status(201).json({ 

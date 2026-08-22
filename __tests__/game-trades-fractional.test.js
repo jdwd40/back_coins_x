@@ -91,7 +91,7 @@ describe('Core 4 + migration 012: fractional round-trade quantities', () => {
     const holding = response.body.data.participant.holdings.find((h) => h.coinId === coinId);
     expect(holding.quantity).toBe(0.004);
 
-    expect(await roundCash(participant.participantId)).toBeCloseTo(990, 2);
+    expect(await roundCash(participant.participantId)).toBeCloseTo(9990, 2);
     expect(await heldQuantity(participant.participantId, coinId)).toBe(0.004);
     const { rows: txs } = await db.query(
       'SELECT quantity, total_amount FROM apocalypse_transactions WHERE participant_id = $1',
@@ -105,7 +105,7 @@ describe('Core 4 + migration 012: fractional round-trade quantities', () => {
     const { cycle, participant, coinId } = await setupJoinedRound({ coinPrice: 10 });
     const auth = `Bearer ${tokenFor(1)}`;
 
-    // £10/coin, £1,000 round cash: every required example is affordable, and
+    // £10/coin, £10,000 round cash: every required example is affordable, and
     // the smallest (0.004 × £10 = £0.04) clears the £0.01 minimum-notional
     // rule (fcoins_y #6 follow-up). Sub-penny rejections are covered by
     // __tests__/game-trades-min-notional.test.js.
@@ -141,18 +141,18 @@ describe('Core 4 + migration 012: fractional round-trade quantities', () => {
 
     await sell(auth, cycle, coinId, 0.006).expect(201); // the exact remainder
     expect(await heldQuantity(participant.participantId, coinId)).toBe(0);
-    expect(await roundCash(participant.participantId)).toBeCloseTo(1000, 2); // full round trip
+    expect(await roundCash(participant.participantId)).toBeCloseTo(10000, 2); // full round trip
   });
 
   test('fractional overspend is rejected atomically: cash, holdings and ledger unchanged', async () => {
     const { cycle, participant, coinId } = await setupJoinedRound();
     const auth = `Bearer ${tokenFor(1)}`;
 
-    // 0.5 * £2,500 = £1,250 > £1,000 round cash.
-    const response = await buy(auth, cycle, coinId, 0.5).expect(400);
+    // 5 * £2,500 = £12,500 > £10,000 round cash.
+    const response = await buy(auth, cycle, coinId, 5).expect(400);
 
     expect(response.body.message).toMatch(/Insufficient round cash/);
-    expect(await roundCash(participant.participantId)).toBe(1000);
+    expect(await roundCash(participant.participantId)).toBe(10000);
     expect(await heldQuantity(participant.participantId, coinId)).toBe(0);
     const { rows: t } = await db.query(
       'SELECT count(*)::int AS n FROM apocalypse_transactions WHERE participant_id = $1',
@@ -187,12 +187,12 @@ describe('Core 4 + migration 012: fractional round-trade quantities', () => {
     const response = await buy(auth, cycle, coinId, 0.00000001).expect(201);
     expect(response.body.data.transaction.quantity).toBe(0.00000001);
     expect(response.body.data.transaction.totalAmount).toBeCloseTo(0.01, 2);
-    expect(await roundCash(participant.participantId)).toBeCloseTo(999.99, 2);
+    expect(await roundCash(participant.participantId)).toBeCloseTo(9999.99, 2);
     expect(await heldQuantity(participant.participantId, coinId)).toBe(0.00000001);
 
     await sell(auth, cycle, coinId, 0.00000001).expect(201); // full dust exit
     expect(await heldQuantity(participant.participantId, coinId)).toBe(0);
-    expect(await roundCash(participant.participantId)).toBe(1000);
+    expect(await roundCash(participant.participantId)).toBe(10000);
 
     // Database invariants after dust trades: never negative.
     const { rows: checks } = await db.query(
@@ -223,7 +223,7 @@ describe('Core 4 + migration 012: fractional round-trade quantities', () => {
     }
 
     // Nothing was written: rejection happens before any mutation.
-    expect(await roundCash(participant.participantId)).toBe(1000);
+    expect(await roundCash(participant.participantId)).toBe(10000);
     expect(await heldQuantity(participant.participantId, coinId)).toBe(0);
 
     // Trailing zeros do NOT count against precision: 0.00400000 is 0.004.
@@ -240,7 +240,7 @@ describe('Core 4 + migration 012: fractional round-trade quantities', () => {
       expect(response.body.message).toMatch(/Invalid quantity/);
     }
 
-    expect(await roundCash(participant.participantId)).toBe(1000);
+    expect(await roundCash(participant.participantId)).toBe(10000);
     expect(await heldQuantity(participant.participantId, coinId)).toBe(0);
   });
 

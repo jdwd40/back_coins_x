@@ -1,10 +1,12 @@
 // Core 4: round trade API — POST /api/game/trades/buy and /trades/sell.
 // Proves: explicit cycleId requirement and stale/unknown/malformed ID
-// rejection before any write; explicit-prior-join requirement; atomic buys
-// (insufficient round cash rejected with full rollback); atomic sells
-// (oversell rejected with full rollback); server-side pricing (client prices
-// ignored); participant ownership via the auth token; and total isolation
-// from legacy users.funds / portfolios / transactions (both directions).
+// rejection before any write; atomic buys (insufficient round cash rejected
+// with full rollback); atomic sells (oversell rejected with full rollback);
+// server-side pricing (client prices ignored); participant ownership via the
+// auth token; and total isolation from legacy users.funds / portfolios /
+// transactions (both directions). Issue #17: every registered user always
+// has a current-cycle participant (no explicit join requirement), so the
+// old no-participant 409 is unreachable for registered users.
 
 const request = require('supertest');
 const jwt = require('jsonwebtoken');
@@ -74,7 +76,7 @@ describe('Core 4: round trades', () => {
       type: 'BUY', coinId: coin.coin_id, quantity: 10, price, totalAmount: expectedTotal
     });
 
-    expect(await roundCash(participant.participantId)).toBeCloseTo(1000 - expectedTotal, 2);
+    expect(await roundCash(participant.participantId)).toBeCloseTo(10000 - expectedTotal, 2);
 
     const { rows: holdings } = await db.query(
       'SELECT * FROM apocalypse_holdings WHERE participant_id = $1 AND coin_id = $2',
@@ -130,12 +132,12 @@ describe('Core 4: round trades', () => {
     const response = await request(app)
       .post('/api/game/trades/buy')
       .set('Authorization', `Bearer ${tokenFor(1)}`)
-      .send({ cycleId: cycle.apocalypse_id, coin_id: coinId, amount: 20 }) // £2,000 > £1,000 round cash
+      .send({ cycleId: cycle.apocalypse_id, coin_id: coinId, amount: 200 }) // £20,000 > £10,000 round cash
       .expect(400);
 
     expect(response.body.message).toMatch(/Insufficient round cash/);
     // Full rollback: no cash moved, no holding, no ledger row.
-    expect(await roundCash(participant.participantId)).toBe(1000);
+    expect(await roundCash(participant.participantId)).toBe(10000);
     const { rows: h } = await db.query('SELECT count(*)::int AS n FROM apocalypse_holdings WHERE participant_id = $1', [participant.participantId]);
     const { rows: t } = await db.query('SELECT count(*)::int AS n FROM apocalypse_transactions WHERE participant_id = $1', [participant.participantId]);
     expect(h[0].n).toBe(0);
@@ -229,19 +231,25 @@ describe('Core 4: round trades', () => {
 
     expect(response.body.data.transaction.price).toBe(price);
     expect(response.body.data.transaction.totalAmount).toBeCloseTo(Math.round(2 * price * 100) / 100, 2);
-    expect(await roundCash(participant.participantId)).toBeCloseTo(1000 - Math.round(2 * price * 100) / 100, 2);
+    expect(await roundCash(participant.participantId)).toBeCloseTo(10000 - Math.round(2 * price * 100) / 100, 2);
   });
 
-  test('trading requires an explicit prior join: no participant, no trade', async () => {
+  test('no explicit join needed: a registered user trades immediately against their server-owned participant (#17)', async () => {
     const cycle = await reconcileCycle({ now: new Date(), durationMs: LONG_DURATION_MS });
+    // No join call at all — cycle reconciliation auto-initialized user 1.
     const response = await request(app)
       .post('/api/game/trades/buy')
       .set('Authorization', `Bearer ${tokenFor(1)}`)
       .send({ cycleId: cycle.apocalypse_id, coin_id: 1, amount: 1 })
-      .expect(409);
-    expect(response.body.message).toMatch(/Join the round first/);
-    const { rows } = await db.query('SELECT count(*)::int AS n FROM apocalypse_participants');
-    expect(rows[0].n).toBe(0);
+      .expect(201);
+    expect(response.body.data.participant.userId).toBe(1);
+    const { rows } = await db.query(
+      `SELECT count(*)::int AS n FROM apocalypse_participants p
+       JOIN apocalypse_cycles ac ON ac.cycle_id = p.cycle_id
+       WHERE ac.apocalypse_id = $1 AND p.user_id = 1`,
+      [cycle.apocalypse_id]
+    );
+    expect(rows[0].n).toBe(1);
   });
 
   test('stale prior apocalypse ID is rejected before any write', async () => {
@@ -258,7 +266,7 @@ describe('Core 4: round trades', () => {
       .expect(409);
 
     expect(response.body.message).toMatch(/no longer active/);
-    expect(await roundCash(participant.participantId)).toBe(1000);
+    expect(await roundCash(participant.participantId)).toBe(10000);
     const { rows: t } = await db.query('SELECT count(*)::int AS n FROM apocalypse_transactions');
     expect(t[0].n).toBe(0);
   });
@@ -289,14 +297,17 @@ describe('Core 4: round trades', () => {
   });
 
   test("another user's participant cannot be traded against: the token identity is the only ownership", async () => {
-    const { cycle } = await setupJoinedRound(); // user 1 joined
-    // User 2 has not joined: any trade attempt fails, user 1's state untouched.
+    const { cycle, participant } = await setupJoinedRound(); // user 1 joined
+    // A user_id in the body is ignored: the token (user 2) owns the trade.
+    // User 2's own auto-initialized participant (#17) has no holdings, so
+    // the sell is rejected as oversell against USER 2 — user 1 untouched.
     const response = await request(app)
       .post('/api/game/trades/sell')
       .set('Authorization', `Bearer ${tokenFor(2)}`)
       .send({ cycleId: cycle.apocalypse_id, coin_id: 1, amount: 1, user_id: 1 })
-      .expect(409);
-    expect(response.body.message).toMatch(/Join the round first/);
+      .expect(400);
+    expect(response.body.message).toMatch(/Insufficient round holdings/);
+    expect(await roundCash(participant.participantId)).toBe(10000);
   });
 
   test('legacy /api/transactions/buy still works and creates NO round state (both directions isolated)', async () => {
@@ -314,7 +325,7 @@ describe('Core 4: round trades', () => {
     expect(await userFunds(1)).toBeLessThan(1000);
     expect((await legacyRowCounts(1)).transactions).toBe(1);
     // Round state completely untouched by the legacy trade.
-    expect(await roundCash(participant.participantId)).toBe(1000);
+    expect(await roundCash(participant.participantId)).toBe(10000);
     const { rows: h } = await db.query('SELECT count(*)::int AS n FROM apocalypse_holdings WHERE participant_id = $1', [participant.participantId]);
     const { rows: t } = await db.query('SELECT count(*)::int AS n FROM apocalypse_transactions WHERE participant_id = $1', [participant.participantId]);
     expect(h[0].n).toBe(0);

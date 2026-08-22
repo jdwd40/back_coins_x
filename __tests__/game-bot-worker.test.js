@@ -53,8 +53,11 @@ describe('Core 5: bot worker lifecycle', () => {
 
     const { rows: bots } = await db.query('SELECT count(*)::int AS n FROM users WHERE is_bot = true');
     expect(bots[0].n).toBe(4);
-    const { rows: participants } = await db.query('SELECT count(*)::int AS n FROM apocalypse_participants');
-    expect(participants[0].n).toBe(4);
+    const { rows: participants } = await db.query(
+      `SELECT count(*)::int AS n FROM apocalypse_participants p
+       JOIN users u ON u.user_id = p.user_id WHERE u.is_bot = true`
+    );
+    expect(participants[0].n).toBe(4); // #17: human participants also exist
   });
 
   test('duplicate in-process start() calls do not create duplicate timers', () => {

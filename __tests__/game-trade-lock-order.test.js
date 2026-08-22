@@ -107,7 +107,7 @@ describe('simulator vs trade lock ordering (coins -> participants everywhere)', 
               (SELECT quantity FROM apocalypse_holdings h WHERE h.participant_id = p.participant_id AND h.coin_id = 1) AS qty
        FROM apocalypse_participants p WHERE p.user_id = 1`
     );
-    expect(parseFloat(rows[0].current_cash)).toBeLessThan(1000);
+    expect(parseFloat(rows[0].current_cash)).toBeLessThan(10000);
     expect(parseFloat(rows[0].qty)).toBe(1);
   });
 

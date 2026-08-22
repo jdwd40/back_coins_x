@@ -90,11 +90,11 @@ const MIN_BOT_TICK_INTERVAL_MS = 1000; // 1 second
 const MAX_BOT_TICK_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
 
 // Per-trade size cap (pounds). Default caps one bot trade at a quarter of
-// the £1,000 starting cash; the upper bound is the entire starting bankroll —
-// a "cap" above it would cap nothing.
-const DEFAULT_BOT_MAX_TRADE_SIZE = 250;
+// the £10,000 starting cash; the upper bound is the entire starting
+// bankroll — a "cap" above it would cap nothing.
+const DEFAULT_BOT_MAX_TRADE_SIZE = 2500;
 const MIN_BOT_MAX_TRADE_SIZE = 1;
-const MAX_BOT_MAX_TRADE_SIZE = 1000;
+const MAX_BOT_MAX_TRADE_SIZE = 10000;
 
 // Per-bot cooldown between executed actions. Default matches the default
 // tick interval so a bot acts at most once per tick out of the box. Zero is

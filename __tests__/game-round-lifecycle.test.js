@@ -1,7 +1,7 @@
 // Core 4: lifecycle coverage — Core 3 collapsed-coin behaviour in round
 // trades, wealth = cash + live holdings value, monotonic peak (including the
 // set-based market reconciliation), lifecycle finalization at rollover, and
-// consecutive-cycle isolation (fresh £1,000, no state transfer).
+// consecutive-cycle isolation (fresh £10,000, no state transfer).
 
 const request = require('supertest');
 const jwt = require('jsonwebtoken');
@@ -70,7 +70,7 @@ describe('Core 4: Core 3 collapsed-coin behaviour in round trades', () => {
     }
 
     const p = await participantRow(participant.participantId);
-    expect(parseFloat(p.current_cash)).toBe(1000);
+    expect(parseFloat(p.current_cash)).toBe(10000);
     const { rows: t } = await db.query('SELECT count(*)::int AS n FROM apocalypse_transactions');
     expect(t[0].n).toBe(0);
   });
@@ -87,7 +87,7 @@ describe('Core 4: Core 3 collapsed-coin behaviour in round trades', () => {
     });
     const expectedCost = Math.round(5 * price * 100) / 100;
     expect(buy.transaction.totalAmount).toBeCloseTo(expectedCost, 2);
-    const cashAfterBuy = 1000 - expectedCost;
+    const cashAfterBuy = 10000 - expectedCost;
 
     // The coin collapses while held.
     await reconcileCycle({ now: WINDOW_START });
@@ -122,15 +122,15 @@ describe('Core 4: wealth and monotonic peak', () => {
     await buyRoundTrade({ userId: 1, apocalypseId: cycle.apocalypse_id, coinId: firstCoinId, quantity: 10, now: EARLY });
     let state = await getParticipantRoundState(participant.participantId);
     const cost = Math.round(10 * price * 100) / 100;
-    expect(state.currentCash).toBeCloseTo(1000 - cost, 2);
+    expect(state.currentCash).toBeCloseTo(10000 - cost, 2);
     expect(state.holdingsValue).toBeCloseTo(cost, 2);
-    expect(state.wealth).toBeCloseTo(1000, 2);
+    expect(state.wealth).toBeCloseTo(10000, 2);
 
     // Collapse: holdings now worth exactly £0; wealth falls to cash only.
     await reconcileCycle({ now: WINDOW_START });
     state = await getParticipantRoundState(participant.participantId);
     expect(state.holdingsValue).toBe(0);
-    expect(state.wealth).toBeCloseTo(1000 - cost, 2);
+    expect(state.wealth).toBeCloseTo(10000 - cost, 2);
   });
 
   test('peak is monotonic across live price movements via the set-based reconciliation', async () => {
@@ -146,10 +146,10 @@ describe('Core 4: wealth and monotonic peak', () => {
 
     await buyRoundTrade({ userId: 1, apocalypseId: cycle.apocalypse_id, coinId, quantity: 10, now: EARLY });
     let p = await participantRow(participant.participantId);
-    expect(parseFloat(p.current_cash)).toBe(500);
-    expect(parseFloat(p.peak_wealth)).toBe(1000);
+    expect(parseFloat(p.current_cash)).toBe(9500);
+    expect(parseFloat(p.peak_wealth)).toBe(10000);
 
-    // Price doubles: wealth = 500 + 10*100 = 1500 -> peak lifts to 1500.
+    // Price doubles: wealth = 9500 + 10*100 = 10500 -> peak lifts to 10500.
     await db.query('UPDATE coins SET current_price = 100.00 WHERE coin_id = $1', [coinId]);
     const client = await db.getClient();
     try {
@@ -160,9 +160,9 @@ describe('Core 4: wealth and monotonic peak', () => {
       client.release();
     }
     p = await participantRow(participant.participantId);
-    expect(parseFloat(p.peak_wealth)).toBe(1500);
+    expect(parseFloat(p.peak_wealth)).toBe(10500);
 
-    // Price crashes below entry: wealth falls, peak stays at 1500 (monotonic).
+    // Price crashes below entry: wealth falls, peak stays at 10500 (monotonic).
     await db.query('UPDATE coins SET current_price = 10.00 WHERE coin_id = $1', [coinId]);
     const client2 = await db.getClient();
     try {
@@ -173,10 +173,10 @@ describe('Core 4: wealth and monotonic peak', () => {
       client2.release();
     }
     p = await participantRow(participant.participantId);
-    expect(parseFloat(p.peak_wealth)).toBe(1500);
+    expect(parseFloat(p.peak_wealth)).toBe(10500);
     const state = await getParticipantRoundState(participant.participantId);
-    expect(state.wealth).toBe(600); // 500 cash + 10 * £10
-    expect(state.peakWealth).toBe(1500);
+    expect(state.wealth).toBe(9600); // 9500 cash + 10 * £10
+    expect(state.peakWealth).toBe(10500);
   });
 
   test('the market simulator price batch reconciles peaks atomically (peak >= wealth after every batch)', async () => {
@@ -196,7 +196,7 @@ describe('Core 4: wealth and monotonic peak', () => {
 });
 
 describe('Core 4: finalization and consecutive-cycle isolation', () => {
-  test('rollover finalizes participants (final_cash = current_cash), creates no successor state, and the next join starts fresh £1,000', async () => {
+  test('rollover finalizes participants (final_cash = current_cash), creates no successor state, and the next join starts fresh £10,000', async () => {
     const { cycle, firstCoinId } = await fixedCycle();
     const participant = await joinRound({ userId: 1, now: EARLY });
     // Trade so finalization is observably copied from authoritative cash.
@@ -224,13 +224,13 @@ describe('Core 4: finalization and consecutive-cycle isolation', () => {
     expect(oldAgain.status).toBe('FINALIZED');
     expect(parseFloat(oldAgain.final_cash)).toBeCloseTo(parseFloat(before.current_cash), 2);
 
-    // Join the successor round: a NEW participant, fresh £1,000, no holdings.
+    // Join the successor round: a NEW participant, fresh £10,000, no holdings.
     const next = await joinRound({ userId: 1, now: AFTER_END });
     expect(next.participantId).not.toBe(participant.participantId);
     expect(next.apocalypseId).toBe(successor.apocalypse_id);
-    expect(next.startingCash).toBe(1000);
-    expect(next.currentCash).toBe(1000);
-    expect(next.peakWealth).toBe(1000);
+    expect(next.startingCash).toBe(10000);
+    expect(next.currentCash).toBe(10000);
+    expect(next.peakWealth).toBe(10000);
     expect(next.holdings).toEqual([]);
 
     // Exactly one participant per cycle for this user.
@@ -257,7 +257,7 @@ describe('Core 4: finalization and consecutive-cycle isolation', () => {
     ).rejects.toMatchObject({ status: 400, message: expect.stringMatching(/Insufficient round holdings/) });
 
     // Successor state untouched.
-    expect(next.currentCash).toBe(1000);
+    expect(next.currentCash).toBe(10000);
     const { rows: h } = await db.query(
       'SELECT count(*)::int AS n FROM apocalypse_holdings WHERE participant_id = $1',
       [next.participantId]
@@ -301,7 +301,7 @@ describe('Core 4: finalization and consecutive-cycle isolation', () => {
 
     const old = await participantRow(participant.participantId);
     expect(old.status).toBe('FINALIZED');
-    expect(parseFloat(old.final_cash)).toBe(1000);
-    expect(parseFloat(old.current_cash)).toBe(1000);
+    expect(parseFloat(old.final_cash)).toBe(10000);
+    expect(parseFloat(old.current_cash)).toBe(10000);
   });
 });

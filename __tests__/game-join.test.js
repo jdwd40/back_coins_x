@@ -1,8 +1,11 @@
-// Core 4: join-anytime participation — POST /api/game/join and the
-// joinRound service. Proves: authentication, identical £1,000 starting cash
-// at 1%/50%/95% of the cycle, idempotent repeated joins (same row, nothing
-// reset), starting cash never copied from users.funds, and zero leakage into
-// legacy users/portfolios/transactions.
+// Core 4/7: round participation — POST /api/game/join (the idempotent
+// ensure-and-return-state endpoint) and the joinRound service. Proves:
+// authentication, identical £10,000 starting cash at 1%/50%/95% of the
+// cycle, idempotent repeated joins (same row, nothing reset), starting cash
+// never copied from users.funds, and zero leakage into legacy
+// users/portfolios/transactions. Issue #17: participants are ALSO
+// auto-created for every registered user at cycle start/reconcile; join
+// remains the per-request ensure+read path and never resets existing state.
 
 const request = require('supertest');
 const jwt = require('jsonwebtoken');
@@ -39,10 +42,10 @@ async function userFunds(userId) {
 }
 
 describe('Core 4: game constants', () => {
-  test('GAME_STARTING_CASH is exactly 1000 and is the single source', () => {
-    expect(GAME_STARTING_CASH).toBe(1000);
-    expect(resolveGameStartingCash(undefined)).toBe(1000);
-    expect(resolveGameStartingCash('')).toBe(1000);
+  test('GAME_STARTING_CASH is exactly 10000 and is the single source', () => {
+    expect(GAME_STARTING_CASH).toBe(10000);
+    expect(resolveGameStartingCash(undefined)).toBe(10000);
+    expect(resolveGameStartingCash('')).toBe(10000);
   });
 
   test('starting cash validation rejects non-positive, non-finite and non-numeric values', () => {
@@ -74,8 +77,11 @@ describe('Core 4: game constants', () => {
   });
 
   test('a rejected fractional-penny env override cannot create any participant', async () => {
-    const userId = await createUser('bad_override_join', 5000);
+    // Establish the cycle BEFORE the user exists so auto-participation
+    // (#17) has not already initialized this user; the assertion stays
+    // purely about the rejected override refusing to create anything.
     await reconcileCycle({ now: atPercent(0.5) });
+    const userId = await createUser('bad_override_join', 5000);
     const previous = process.env.GAME_STARTING_CASH;
     process.env.GAME_STARTING_CASH = '1000.001';
     try {
@@ -93,12 +99,15 @@ describe('Core 4: game constants', () => {
   });
 
   test('a valid 2dp env override is stored exactly for every participant', async () => {
-    const userA = await createUser('override_join_a', 5000);
-    const userB = await createUser('override_join_b', 7000);
-    await reconcileCycle({ now: atPercent(0.5) });
+    // The override must be in force before the cycle exists: issue #17
+    // auto-initializes every registered user at cycle creation, and those
+    // rows must carry the overridden value exactly.
     const previous = process.env.GAME_STARTING_CASH;
     process.env.GAME_STARTING_CASH = '2500.50';
     try {
+      const userA = await createUser('override_join_a', 5000);
+      const userB = await createUser('override_join_b', 7000);
+      await reconcileCycle({ now: atPercent(0.5) });
       const stateA = await joinRound({ userId: userA, now: atPercent(10) });
       const stateB = await joinRound({ userId: userB, now: atPercent(90) });
       expect(stateA.startingCash).toBe(2500.5);
@@ -106,6 +115,14 @@ describe('Core 4: game constants', () => {
     } finally {
       if (previous === undefined) delete process.env.GAME_STARTING_CASH;
       else process.env.GAME_STARTING_CASH = previous;
+    }
+    let userA, userB;
+    {
+      const { rows: ids } = await db.query(
+        `SELECT user_id FROM users WHERE username = ANY($1) ORDER BY username`,
+        [['override_join_a', 'override_join_b']]
+      );
+      [userA, userB] = ids.map((r) => r.user_id);
     }
     const { rows } = await db.query(
       `SELECT starting_cash, current_cash FROM apocalypse_participants
@@ -125,7 +142,7 @@ describe('Core 4: POST /api/game/join', () => {
     await request(app).post('/api/game/join').expect(401);
   });
 
-  test('creates a participant with exactly £1,000 and returns round state', async () => {
+  test('creates a participant with exactly £10,000 and returns round state', async () => {
     const response = await request(app)
       .post('/api/game/join')
       .set('Authorization', `Bearer ${tokenFor(1)}`)
@@ -138,10 +155,10 @@ describe('Core 4: POST /api/game/join', () => {
       cycleId: expect.any(Number),
       apocalypseId: expect.stringMatching(/^APOC-\d{4,}$/),
       userId: 1,
-      startingCash: 1000,
-      currentCash: 1000,
-      wealth: 1000,
-      peakWealth: 1000,
+      startingCash: 10000,
+      currentCash: 10000,
+      wealth: 10000,
+      peakWealth: 10000,
       status: 'ACTIVE',
       finalCash: null,
       holdings: []
@@ -153,8 +170,8 @@ describe('Core 4: POST /api/game/join', () => {
       [p.participantId]
     );
     expect(rows).toHaveLength(1);
-    expect(parseFloat(rows[0].starting_cash)).toBe(1000);
-    expect(parseFloat(rows[0].current_cash)).toBe(1000);
+    expect(parseFloat(rows[0].starting_cash)).toBe(10000);
+    expect(parseFloat(rows[0].current_cash)).toBe(10000);
   });
 
   test('repeated joins return the same row and never reset anything', async () => {
@@ -210,16 +227,16 @@ describe('Core 4: POST /api/game/join', () => {
 });
 
 describe('Core 4: join-anytime starting cash parity (service, fixed cycle times)', () => {
-  test.each([1, 50, 95])('joining at %i%% of the cycle yields exactly £1,000', async (pct) => {
+  test.each([1, 50, 95])('joining at %i%% of the cycle yields exactly £10,000', async (pct) => {
     const userId = await createUser(`join_${pct}pct`, 99999); // funds must NOT be consulted
     await reconcileCycle({ now: atPercent(0.5) }); // creates the 10:00-10:30 cycle
 
     const state = await joinRound({ userId, now: atPercent(pct) });
 
-    expect(state.startingCash).toBe(1000);
-    expect(state.currentCash).toBe(1000);
-    expect(state.wealth).toBe(1000);
-    expect(state.peakWealth).toBe(1000);
+    expect(state.startingCash).toBe(10000);
+    expect(state.currentCash).toBe(10000);
+    expect(state.wealth).toBe(10000);
+    expect(state.peakWealth).toBe(10000);
     expect(state.status).toBe('ACTIVE');
     expect(await userFunds(userId)).toBe(99999); // account funds untouched
   });
@@ -238,8 +255,13 @@ describe('Core 4: join-anytime starting cash parity (service, fixed cycle times)
     const second = await joinRound({ userId: 1, now: atPercent(60) });
     expect(second.participantId).toBe(first.participantId);
     expect(second.joinedAt).toBe(first.joinedAt);
-    expect(second.startingCash).toBe(1000);
-    const { rows } = await db.query('SELECT count(*)::int AS n FROM apocalypse_participants');
+    expect(second.startingCash).toBe(10000);
+    // Exactly one row for THIS user in THIS cycle — issue #17 auto-init
+    // legitimately creates rows for every other registered user too.
+    const { rows } = await db.query(
+      'SELECT count(*)::int AS n FROM apocalypse_participants WHERE cycle_id = $1 AND user_id = 1',
+      [first.cycleId]
+    );
     expect(rows[0].n).toBe(1);
   });
 });

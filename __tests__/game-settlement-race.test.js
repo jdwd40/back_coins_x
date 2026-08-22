@@ -94,11 +94,13 @@ describe('Core 6: genuine multi-process settlement races', () => {
       'SELECT * FROM apocalypse_transactions WHERE cycle_id = $1', [cycle.cycle_id]
     );
     const { rows: participants } = await db.query(
-      'SELECT * FROM apocalypse_participants WHERE cycle_id = $1', [cycle.cycle_id]
+      'SELECT * FROM apocalypse_participants WHERE cycle_id = $1 AND user_id = 1', [cycle.cycle_id]
     );
     const { rows: results } = await db.query(
-      'SELECT * FROM apocalypse_results WHERE cycle_id = $1', [cycle.cycle_id]
+      'SELECT * FROM apocalypse_results WHERE cycle_id = $1 AND user_id = 1', [cycle.cycle_id]
     );
+    // #17: user 2 is also auto-initialized into the cycle; assertions target
+    // the RACING user 1's rows specifically.
     expect(participants).toHaveLength(1);
     expect(participants[0].status).toBe('FINALIZED');
     expect(results).toHaveLength(1);
@@ -108,15 +110,15 @@ describe('Core 6: genuine multi-process settlement races', () => {
       // holding, and the settlement result reflect it exactly once.
       expect(txs).toHaveLength(1);
       expect(txs[0].type).toBe('BUY');
-      const expected = 1000 - parseFloat(txs[0].total_amount);
+      const expected = 10000 - parseFloat(txs[0].total_amount);
       expect(parseFloat(participants[0].current_cash)).toBeCloseTo(expected, 2);
       expect(parseFloat(results[0].final_cash)).toBeCloseTo(expected, 2);
     } else {
       // The freeze won: the trade was rejected and mutated NOTHING.
       expect(trade.status).toBe(409);
       expect(txs).toHaveLength(0);
-      expect(parseFloat(participants[0].current_cash)).toBe(1000);
-      expect(parseFloat(results[0].final_cash)).toBe(1000);
+      expect(parseFloat(participants[0].current_cash)).toBe(10000);
+      expect(parseFloat(results[0].final_cash)).toBe(10000);
     }
   });
 
@@ -214,7 +216,7 @@ describe('Core 6: genuine multi-process settlement races', () => {
     const { rows: snapshot } = await db.query(
       'SELECT count(*)::int AS n FROM apocalypse_results WHERE cycle_id = $1', [cycle.cycle_id]
     );
-    expect(snapshot[0].n).toBe(1);
+    expect(snapshot[0].n).toBe(2); // #17: both seeded users are participants
     const { rows: settling } = await db.query(
       `SELECT count(*)::int AS n FROM apocalypse_cycles WHERE status = 'SETTLING'`
     );

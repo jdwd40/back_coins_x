@@ -1,12 +1,13 @@
 // Crypto Chaos game-design constants.
 //
 // GAME_STARTING_CASH is the single authoritative starting cash for every
-// participant of every apocalypse cycle. Joining at 1%, 50% or 95% of a
-// cycle always yields exactly this amount; it is never copied from
-// users.funds and never adjusted for late entry. This is the ONLY place the
-// value is defined — do not scatter literals.
+// participant of every apocalypse cycle. Every registered human and every
+// configured bot is initialized with exactly this amount at each cycle
+// start (issue #17: continuous automatic participation); it is never copied
+// from users.funds and never adjusted for late entry. This is the ONLY place
+// the value is defined — do not scatter literals.
 
-const GAME_STARTING_CASH = 1000;
+const GAME_STARTING_CASH = 10000;
 
 // Round-trade quantity precision (migration 012): apocalypse_holdings and
 // apocalypse_transactions store quantity as DECIMAL(18,8) — crypto-style

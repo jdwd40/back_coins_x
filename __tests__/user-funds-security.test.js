@@ -77,7 +77,7 @@ describe('PATCH /api/users/:user_id/funds security', () => {
 
   test('legacy funds changes never touch game round cash', async () => {
     const participant = await gameRoundService.joinRound({ userId: 1 });
-    expect(participant.currentCash).toBe(1000);
+    expect(participant.currentCash).toBe(10000); // #17 authoritative round cash
 
     await request(app)
       .patch('/api/users/1/funds')
@@ -89,7 +89,7 @@ describe('PATCH /api/users/:user_id/funds security', () => {
       'SELECT current_cash FROM apocalypse_participants WHERE participant_id = $1',
       [participant.participantId]
     );
-    expect(parseFloat(rows[0].current_cash)).toBe(1000);
+    expect(parseFloat(rows[0].current_cash)).toBe(10000);
   });
 
   test('the model enforces the non-negative balance atomically (no read-then-write window)', async () => {

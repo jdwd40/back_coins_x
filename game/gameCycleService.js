@@ -8,6 +8,13 @@ const collapseSchedule = require('./collapseScheduleService');
 // import. Successor creation stays here so a failed settlement durably
 // blocks the next round.
 const settlementService = require('./gameSettlementService');
+// Issue #17: continuous automatic participation. Every cycle start (and
+// every recovery of a pre-existing ACTIVE cycle) initializes one £10,000
+// participant row per registered user via gameRoundService. Load order is
+// safe: gameRoundService never requires this module at the top level (its
+// one joinRound retry requires it lazily), exactly like the settlement
+// chain above.
+const gameRoundService = require('./gameRoundService');
 
 // Default global apocalypse cycle length: 30 minutes.
 const DEFAULT_GAME_CYCLE_DURATION_MS = 30 * 60 * 1000;
@@ -147,10 +154,19 @@ async function ensureActiveCycle({ now, durationMs, generateSeed }) {
       // New cycle boundary: restore the persisted baseline, then create this
       // cycle's schedule once — atomically with the cycle insert.
       await collapseSchedule.startCycle(client, active);
+      // Issue #17: every registered human and configured bot starts this
+      // Apocalypse with exactly the authoritative starting cash — no JOIN
+      // step, no human online required. Set-based and idempotent.
+      await gameRoundService.initializeCycleParticipants(client, active.cycle_id);
     } else {
       // Recovery path: a pre-existing active cycle gets its schedule created
       // if (and only if) it is missing. No baseline reset mid-cycle.
       await collapseSchedule.createScheduleForCycle(client, active);
+      // Issue #17: ensure the live cycle's participant set is complete —
+      // covers users registered mid-cycle and cycles created before
+      // automatic participation existed. ON CONFLICT DO NOTHING makes this
+      // a no-op for everyone already initialized; nobody is ever reset.
+      await gameRoundService.initializeCycleParticipants(client, active.cycle_id);
       // While the cycle is live, reconcile its persisted due collapse rows.
       // An expired cycle's collapses run at exactly cycle end during
       // settlement, not here.

@@ -94,9 +94,9 @@ describe('Core 6: leaderboard and results APIs', () => {
       // Live wealth = cash + live holdings value (buy moved cash into coin).
       const buyer = board.entries.find((e) => e.username === 'john_doe');
       const holder = board.entries.find((e) => e.username === 'jane_smith');
-      expect(buyer.currentCash).toBeCloseTo(1000 - Math.round(10 * price * 100) / 100, 2);
-      expect(buyer.currentWealth).toBeCloseTo(1000, 2);
-      expect(holder.currentWealth).toBe(1000);
+      expect(buyer.currentCash).toBeCloseTo(10000 - Math.round(10 * price * 100) / 100, 2);
+      expect(buyer.currentWealth).toBeCloseTo(10000, 2);
+      expect(holder.currentWealth).toBe(10000);
 
       // Tie on wealth: participant_id ASC decides; ranks are 1,2.
       expect(board.entries.map((e) => e.rank)).toEqual([1, 2]);
@@ -126,7 +126,7 @@ describe('Core 6: leaderboard and results APIs', () => {
       const response = await request(app).get('/api/game/leaderboard').expect(200);
       const entry = response.body.data.entries.find((e) => e.username === 'john_doe');
       expect(entry.currentWealth).toBeCloseTo(entry.currentCash, 2);
-      expect(entry.currentWealth).toBeLessThan(1000);
+      expect(entry.currentWealth).toBeLessThan(10000);
     });
 
     test('bots appear with isBot and personality on the live board', async () => {
@@ -192,7 +192,7 @@ describe('Core 6: leaderboard and results APIs', () => {
           isBot: expect.any(Boolean),
           finalCash: expect.any(Number),
           peakWealth: expect.any(Number),
-          startingCash: 1000,
+          startingCash: 10000,
           netProfit: expect.any(Number),
           joinedAt: expect.any(String),
           tradeCount: expect.any(Number),
@@ -217,7 +217,7 @@ describe('Core 6: leaderboard and results APIs', () => {
       const after = (await request(app).get(`/api/game/results/${cycle.apocalypse_id}`).expect(200)).body.data;
       expect(after.results[0].finalCash).toBe(before.results[0].finalCash);
       expect(after.results[0].peakWealth).toBe(before.results[0].peakWealth);
-      expect(after.results[0].finalCash).toBe(1000);
+      expect(after.results[0].finalCash).toBe(10000);
     });
 
     test('clearly rejects ACTIVE and SETTLING cycles (409), unknown (404) and malformed (400) ids', async () => {
@@ -252,9 +252,13 @@ describe('Core 6: leaderboard and results APIs', () => {
       expect(data.limit).toBe(5); // documented default
       expect(data.count).toBe(2);
       expect(data.leaderboards.map((b) => b.cycleId)).toEqual([second.apocalypse_id, first.apocalypse_id]);
-      expect(data.leaderboards[0].results).toHaveLength(1);
-      expect(data.leaderboards[0].results[0].username).toBe('jane_smith');
-      expect(data.leaderboards[1].results[0].username).toBe('john_doe');
+      // Issue #17: EVERY registered user is a participant of every cycle, so
+      // each completed cycle's snapshot holds both seeded users (untouched
+      // participants settle at exactly the £10,000 starting cash; the tie
+      // breaks by participant_id ASC — john_doe initialized first).
+      expect(data.leaderboards[0].results).toHaveLength(2);
+      expect(data.leaderboards[0].results.map((r) => r.username)).toEqual(['john_doe', 'jane_smith']);
+      expect(data.leaderboards[1].results.map((r) => r.username)).toEqual(['john_doe', 'jane_smith']);
     });
 
     test('limit is validated and clamped, and never deletes history', async () => {
@@ -277,6 +281,9 @@ describe('Core 6: leaderboard and results APIs', () => {
     });
 
     test('completed cycles with no participants appear with an empty snapshot', async () => {
+      // Issue #17: every registered user is auto-initialized into every
+      // cycle, so the zero-participant case requires zero registered users.
+      await db.query('DELETE FROM users');
       await completedCycle({ join: [] });
       const response = await request(app).get('/api/game/leaderboards/recent').expect(200);
       expect(response.body.data.count).toBe(1);

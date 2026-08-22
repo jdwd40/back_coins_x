@@ -86,13 +86,13 @@ describe('minimum notional: every live-priced trade must settle for at least £0
     expect(response.body.message).toMatch(/£0\.00/);
 
     // Nothing moved: cash, holdings and ledger are exactly as before.
-    expect(await roundCash(participant.participantId)).toBe(1000);
+    expect(await roundCash(participant.participantId)).toBe(10000);
     expect(await heldQuantity(participant.participantId, coinId)).toBe(0);
     expect(await ledgerCount(participant.participantId)).toBe(0);
 
     // The exploit is not repeatable even once, let alone in a loop.
     await buy(auth, cycle, coinId, 0.004).expect(400);
-    expect(await roundCash(participant.participantId)).toBe(1000);
+    expect(await roundCash(participant.participantId)).toBe(10000);
     expect(await heldQuantity(participant.participantId, coinId)).toBe(0);
   });
 
@@ -121,12 +121,12 @@ describe('minimum notional: every live-priced trade must settle for at least £0
 
     const bought = await buy(auth, cycle, coinId, 0.01).expect(201);
     expect(bought.body.data.transaction.totalAmount).toBe(0.01);
-    expect(await roundCash(participant.participantId)).toBeCloseTo(999.99, 2);
+    expect(await roundCash(participant.participantId)).toBeCloseTo(9999.99, 2);
 
     const sold = await sell(auth, cycle, coinId, 0.01).expect(201);
     expect(sold.body.data.transaction.totalAmount).toBe(0.01);
     expect(await heldQuantity(participant.participantId, coinId)).toBe(0);
-    expect(await roundCash(participant.participantId)).toBeCloseTo(1000, 2);
+    expect(await roundCash(participant.participantId)).toBeCloseTo(10000, 2);
   });
 
   test('6. 0.004 fractional trades still succeed whenever their value is >= £0.01', async () => {
@@ -141,7 +141,7 @@ describe('minimum notional: every live-priced trade must settle for at least £0
     const sold = await sell(auth, cycle, coinId, 0.004).expect(201);
     expect(sold.body.data.transaction.totalAmount).toBe(0.01);
     expect(await heldQuantity(participant.participantId, coinId)).toBe(0);
-    expect(await roundCash(participant.participantId)).toBeCloseTo(1000, 2);
+    expect(await roundCash(participant.participantId)).toBeCloseTo(10000, 2);
   });
 
   test('sub-penny rounding edge: 0.005 @ £1 rounds to £0.01 and is allowed (rounded rule, judged as recorded)', async () => {
@@ -194,7 +194,7 @@ describe('minimum notional: every live-priced trade must settle for at least £0
   test('7b. bot decision enforcement skips sub-penny decisions and passes valid ones through', () => {
     const state = (price) => ({
       coins: [{ coinId: 1, symbol: 'JDC', currentPrice: price, history: [1, 1] }],
-      cash: 1000,
+      cash: 10000,
       holdings: [],
       apocalypsePercent: 10
     });
