@@ -10,7 +10,8 @@ const COIN_FIELDS = [
   'market_cap',
   'circulating_supply',
   'price_change_24h',
-  'founder'
+  'founder',
+  'retired'
 ].join(', ');
 
 // Time range definitions in milliseconds
@@ -164,6 +165,7 @@ exports.selectAllCoins = async () => {
     LEFT JOIN latest_prices lp ON c.coin_id = lp.coin_id
     LEFT JOIN old_prices_24h op ON c.coin_id = op.coin_id
     LEFT JOIN earliest_prices ep ON c.coin_id = ep.coin_id
+    WHERE c.retired = FALSE
     ORDER BY c.coin_id ASC;
   `);
 

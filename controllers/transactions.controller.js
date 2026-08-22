@@ -151,6 +151,16 @@ exports.processBuyTransaction = async (req, res, next) => {
       });
     }
 
+    // Migration 014: a retired coin is preserved history, not catalogue —
+    // new purchases are rejected, but its rows, price history and any
+    // existing holdings remain readable and sellable.
+    if (coin.retired) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'This coin has been retired from the catalogue and cannot be purchased.'
+      });
+    }
+
     // Core 3 narrow price-zero compatibility guard: a coin collapsed in the
     // ACTIVE apocalypse cycle is permanently dead for the rest of the cycle
     // (live price exactly £0). Reject new purchases with a clear domain error —

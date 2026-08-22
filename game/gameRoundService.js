@@ -376,12 +376,22 @@ async function buyRoundTrade({ userId, apocalypseId, coinId, quantity: rawQuanti
     // finalizing participants). The previous participant -> coin order
     // deadlocked against the simulator under load.
     const { rows: coinRows } = await client.query(
-      `SELECT coin_id, symbol, current_price FROM coins WHERE coin_id = $1 FOR UPDATE`,
+      `SELECT coin_id, symbol, current_price, retired FROM coins WHERE coin_id = $1 FOR UPDATE`,
       [coinIdNum]
     );
     const coin = coinRows[0];
     if (!coin) {
       throw new GameRoundError(`Coin ${coinIdNum} not found.`, 404);
+    }
+
+    // Migration 014: retired coins are preserved history, not catalogue —
+    // they can never be bought in a round (selling an existing holding
+    // remains possible via the sell path).
+    if (coin.retired) {
+      throw new GameRoundError(
+        `Coin ${coin.symbol} has been retired from the catalogue and cannot be purchased.`,
+        400
+      );
     }
 
     const participant = await lockParticipant(client, cycle.cycle_id, userId);

@@ -207,6 +207,16 @@ const seed = async (shouldEnd = false) => {
     );
     await db.query(fractionalQuantityMigration);
 
+    console.log('📦 Applying legacy-coin retirement migration (db/migrations/014_retire_legacy_coins.sql)...');
+    // coins.retired DDL sourced from the production migration only. The
+    // data part (retiring ids 11-13) no-ops here: the coins table is still
+    // empty at this point and fresh seeds insert only the canonical 10.
+    const retireLegacyMigration = require('fs').readFileSync(
+      require('path').join(__dirname, 'migrations', '014_retire_legacy_coins.sql'),
+      'utf8'
+    );
+    await db.query(retireLegacyMigration);
+
     console.log('📦 Inserting coins data...');
     // Insert coins data
     const coinsData = require(process.env.NODE_ENV === 'test' 

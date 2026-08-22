@@ -169,6 +169,7 @@ async function buildPublicMarketState({ cycle, participant, now = new Date(), qu
               WHERE s.cycle_id = $1 AND s.coin_id = c.coin_id AND s.executed_at IS NOT NULL
             ) AS collapsed
      FROM coins c
+     WHERE c.retired = FALSE
      ORDER BY c.coin_id`,
     [cycle.cycle_id]
   );

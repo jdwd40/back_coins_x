@@ -9,9 +9,12 @@
 //     itself (at most one ACTIVE row, end_time > start_time).
 //   * public.coins.cycle_baseline_price (Core 3): the durable restoration
 //     baseline column, its NOT NULL and positive CHECK.
-//   * Canonical coin catalogue (migration 013): the exact player-facing
-//     (coin_id, name, symbol) identities for coin_ids 1..10, exactly 10
-//     coin rows, and live symbol uniqueness.
+//   * Canonical coin catalogue (migrations 013 + 014): the exact
+//     player-facing (coin_id, name, symbol) identities for coin_ids 1..10,
+//     the coins.retired column shape, exactly the canonical 10 active
+//     (non-retired extra rows are player-facing and flagged; retired legacy
+//     rows are preserved history, not catalogue), and live symbol
+//     uniqueness.
 //   * public.coin_collapse_schedule (Core 3): columns, PK, both FKs, both
 //     UNIQUE constraints (cycle/coin and cycle/rank), all CHECK constraints,
 //     the partial due-reconciliation index, and live-data invariants (no
@@ -264,7 +267,21 @@ async function verifyCoinCatalogue(q, problems) {
     return;
   }
 
-  const { rows } = await q('SELECT coin_id, name, symbol FROM coins ORDER BY coin_id');
+  // Migration 014 column shape: retirement semantics underpin the catalogue
+  // checks below, so a missing/incompatible column is reported on its own.
+  const retiredCol = await q(
+    `SELECT data_type, is_nullable FROM information_schema.columns
+     WHERE table_schema = 'public' AND table_name = 'coins' AND column_name = 'retired'`
+  );
+  if (retiredCol.rows.length === 0) {
+    problems.push('coins.retired column missing — migration 014 (retire legacy coins) has not been applied');
+    return;
+  }
+  if (retiredCol.rows[0].data_type !== 'boolean' || retiredCol.rows[0].is_nullable !== 'NO') {
+    problems.push(`coins.retired has an incompatible shape (type=${retiredCol.rows[0].data_type}, nullable=${retiredCol.rows[0].is_nullable}) — expected boolean NOT NULL`);
+  }
+
+  const { rows } = await q('SELECT coin_id, name, symbol, retired FROM coins ORDER BY coin_id');
   const byId = new Map(rows.map((r) => [r.coin_id, r]));
 
   // Exact canonical identity at each stable coin_id (catches legacy names
@@ -275,13 +292,18 @@ async function verifyCoinCatalogue(q, problems) {
       problems.push(`canonical coin missing: coin_id ${id} (${name}/${symbol})`);
     } else if (row.name !== name || row.symbol !== symbol) {
       problems.push(`canonical coin_id ${id}: found ${row.name}/${row.symbol}, expected ${name}/${symbol}`);
+    } else if (row.retired) {
+      problems.push(`canonical coin_id ${id} (${name}/${symbol}) is retired — canonical coins must stay active`);
     }
   }
 
-  // The catalogue is exactly the canonical 10 — extra player-facing rows
-  // (e.g. legacy seed-only coins) are flagged, not silently tolerated.
-  if (rows.length !== CANONICAL_COIN_CATALOGUE.length) {
-    problems.push(`coin catalogue: ${rows.length} coin rows, expected exactly ${CANONICAL_COIN_CATALOGUE.length} (extra rows are non-canonical and player-facing)`);
+  // The ACTIVE catalogue is exactly the canonical 10. Extra rows are only
+  // tolerated when retired (migration 014's soft-retirement path) — a
+  // non-retired extra is still player-facing and is flagged.
+  const canonicalIds = new Set(CANONICAL_COIN_CATALOGUE.map(([id]) => id));
+  const activeExtras = rows.filter((r) => !r.retired && !canonicalIds.has(r.coin_id));
+  if (activeExtras.length > 0) {
+    problems.push(`coin catalogue: ${activeExtras.length} non-canonical coin row(s) are not retired (${activeExtras.map((r) => `${r.coin_id}:${r.name}/${r.symbol}`).join(', ')}) — extra rows are player-facing`);
   }
 
   // Live-data mirror of the coins.symbol UNIQUE constraint.
@@ -939,7 +961,7 @@ if (require.main === module) {
   verifyGameSchema()
     .then(async ({ ok, problems }) => {
       if (ok) {
-        console.log('game schema verification PASSED (apocalypse_cycles [SETTLING lifecycle + settlement observability], coins.cycle_baseline_price, canonical coin catalogue [migration 013], coin_collapse_schedule, apocalypse_participants, apocalypse_holdings, apocalypse_transactions, users.is_bot, apocalypse_bots, apocalypse_bot_ticks, apocalypse_results [immutable])');
+        console.log('game schema verification PASSED (apocalypse_cycles [SETTLING lifecycle + settlement observability], coins.cycle_baseline_price, canonical coin catalogue [migrations 013 + 014 retirement], coin_collapse_schedule, apocalypse_participants, apocalypse_holdings, apocalypse_transactions, users.is_bot, apocalypse_bots, apocalypse_bot_ticks, apocalypse_results [immutable])');
         await db.end();
         return;
       }

@@ -74,7 +74,8 @@ describe('Coins API', () => {
         market_cap: CurrencyFormatter.formatGBP(30000.00),
         circulating_supply: 2500,
         price_change_24h: null,
-        founder: 'Roberto'
+        founder: 'Roberto',
+        retired: false
       });
     });
 

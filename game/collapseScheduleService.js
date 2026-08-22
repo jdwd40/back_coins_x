@@ -137,7 +137,9 @@ async function createScheduleForCycle(client, cycle) {
   if (existing.length > 0) return existing;
 
   const { rows: coins } = await client.query(
-    `SELECT coin_id, current_price FROM coins ORDER BY coin_id FOR UPDATE`
+    // Migration 014: retired coins are preserved history, not catalogue —
+    // new cycles schedule collapses only across the active catalogue.
+    `SELECT coin_id, current_price FROM coins WHERE retired = FALSE ORDER BY coin_id FOR UPDATE`
   );
   const schedule = buildSchedule({
     seed: cycle.seed,
