@@ -8,6 +8,19 @@
 
 const GAME_STARTING_CASH = 1000;
 
+// Round-trade quantity precision (migration 012): apocalypse_holdings and
+// apocalypse_transactions store quantity as DECIMAL(18,8) — crypto-style
+// fractional coins, so trades like 0.004 JDC are exact. MONEY stays at the
+// application's 2-decimal precision (DECIMAL(18,2)); only the COIN amount
+// carries up to 8 decimal places. Trade validation must REJECT quantities
+// with more than this many significant fractional digits — never silently
+// round them into a materially different quantity.
+const GAME_QUANTITY_DECIMALS = 8;
+// DECIMAL(18,8) leaves 10 integer digits, so the largest storable quantity
+// is 9,999,999,999.99999999. This exclusive upper bound keeps a too-large
+// request a clean 400 instead of a PostgreSQL numeric-overflow 500.
+const GAME_QUANTITY_MAX = 10000000000;
+
 // Validate a monetary game constant: it must be a positive, finite number
 // representable exactly at the application's 2-decimal money precision (the
 // same precision PostgreSQL DECIMAL(18,2) stores). Values with more than two
@@ -50,6 +63,8 @@ function resolveGameStartingCash(raw = process.env.GAME_STARTING_CASH) {
 
 module.exports = {
   GAME_STARTING_CASH,
+  GAME_QUANTITY_DECIMALS,
+  GAME_QUANTITY_MAX,
   validateGameStartingCash,
   resolveGameStartingCash
 };

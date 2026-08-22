@@ -579,6 +579,25 @@ async function verifyRoundState(q, problems) {
     );
     return rows[0].n === names.length;
   };
+
+  // Migration 012 shape: round-trade quantities are DECIMAL(18,8) —
+  // crypto-style fractional coin precision (0.004 JDC trades are exact).
+  // Money columns stay DECIMAL(18,2); only quantity carries 8 decimals.
+  for (const table of ['apocalypse_holdings', 'apocalypse_transactions']) {
+    if (await hasColumns(table, ['quantity'])) {
+      const { rows } = await q(
+        `SELECT numeric_precision, numeric_scale FROM information_schema.columns
+         WHERE table_schema = 'public' AND table_name = '${table}' AND column_name = 'quantity'`
+      );
+      const column = rows[0];
+      if (!column || Number(column.numeric_precision) !== 18 || Number(column.numeric_scale) !== 8) {
+        problems.push(
+          `wrong column type on ${table}: quantity must be DECIMAL(18,8)` +
+          (column ? ` (found numeric(${column.numeric_precision},${column.numeric_scale}))` : '')
+        );
+      }
+    }
+  }
   if (tables.rows[0].p && await hasColumns('apocalypse_participants', ['cycle_id', 'status', 'final_cash', 'current_cash', 'peak_wealth', 'starting_cash'])) {
     // No participant stays ACTIVE once its cycle is COMPLETED: finalization
     // runs inside the Core 1 lifecycle transaction.

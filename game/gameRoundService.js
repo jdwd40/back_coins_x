@@ -21,7 +21,7 @@
 // lazily inside the function, by which time the module graph is fully loaded.
 
 const db = require('../db/connection');
-const { GAME_STARTING_CASH, resolveGameStartingCash } = require('./gameConstants');
+const { GAME_STARTING_CASH, GAME_QUANTITY_DECIMALS, GAME_QUANTITY_MAX, resolveGameStartingCash } = require('./gameConstants');
 
 // Must match gameCycleService's GAME_CYCLE_ADVISORY_LOCK_KEY. It is
 // re-declared here (not imported) to keep this module free of any top-level
@@ -45,18 +45,80 @@ function round2(value) {
   return Math.round(value * 100) / 100;
 }
 
-// Validate a client-supplied trade quantity: finite, positive, and resolved
-// to the ledger's 2-decimal precision. Returns the normalised quantity.
+// Render a quantity in a user-facing message: plain decimal text at the
+// ledger's 8-decimal precision with trailing zeros stripped — never exponent
+// notation ("1e-8") and never whole-coin rounding. Messages only; trade
+// quantities themselves are validated by validateQuantity.
+function formatQuantityText(value) {
+  if (!Number.isFinite(value)) return '0';
+  return value.toFixed(GAME_QUANTITY_DECIMALS).replace(/0+$/, '').replace(/\.$/, '');
+}
+
+// Plain decimal strings only: digits with at most one fractional part
+// ("10", "1.25", "0.004", ".5", "1."). Signs, exponents, hex, thousands
+// separators and blank/garbage strings are malformed input, not quantities.
+const PLAIN_QUANTITY_PATTERN = /^(?:\d+(?:\.\d*)?|\.\d+)$/;
+
+// Exact significant-fractional-digit count of a validated numeric string, in
+// plain ("0.004") or exponent ("1e-7", from String(number)) form. Computed
+// on the DECIMAL STRING so binary floating-point representation error can
+// never miscount. Trailing zeros do not count: "0.5000" is value-identical
+// to "0.5" and needs only 1 decimal place.
+function significantDecimalPlaces(text) {
+  const match = /^(\d*)(?:\.(\d*))?(?:[eE]([+-]?\d+))?$/.exec(text);
+  if (!match) return Infinity; // unreachable: callers pre-validate the shape
+  const intDigits = match[1] || '';
+  const fracDigits = match[2] || '';
+  const exponent = match[3] ? parseInt(match[3], 10) : 0;
+  // value = (intDigits concatenated with fracDigits) * 10^(exponent - fracLen)
+  let scale = fracDigits.length - exponent;
+  if (scale <= 0) return 0;
+  let digits = intDigits + fracDigits;
+  let trailingZeros = 0;
+  while (digits.endsWith('0')) {
+    digits = digits.slice(0, -1);
+    trailingZeros += 1;
+  }
+  return Math.max(0, scale - trailingZeros);
+}
+
+// Validate a client-supplied trade quantity: finite, positive, storable, and
+// at the ledger's exact fractional precision (DECIMAL(18,8) as of migration
+// 012 — see gameConstants.GAME_QUANTITY_DECIMALS). Anything needing MORE
+// precision is rejected with an explicit precision error, NEVER silently
+// rounded into a materially different quantity. Returns the quantity as a
+// number; node-pg serialises doubles shortest-round-trip (and PostgreSQL
+// parses the decimal text exactly), so what was validated is what is stored.
 function validateQuantity(raw) {
-  const quantity = typeof raw === 'string' && raw.trim() !== '' ? Number(raw) : raw;
-  if (typeof quantity !== 'number' || !Number.isFinite(quantity) || quantity <= 0) {
-    throw new GameRoundError('Invalid quantity. Please provide a finite quantity greater than 0.', 400);
+  const invalid = () => new GameRoundError(
+    'Invalid quantity. Please provide a finite quantity greater than 0.',
+    400
+  );
+  let text;
+  if (typeof raw === 'string') {
+    text = raw.trim();
+    if (!PLAIN_QUANTITY_PATTERN.test(text)) throw invalid();
+  } else if (typeof raw === 'number' && Number.isFinite(raw)) {
+    text = String(raw); // shortest round-trip; exponent form for tiny values
+  } else {
+    throw invalid();
   }
-  const normalised = round2(quantity);
-  if (normalised <= 0) {
-    throw new GameRoundError('Invalid quantity. Please provide a finite quantity greater than 0.', 400);
+  const quantity = Number(text);
+  if (!(quantity > 0)) throw invalid();
+  const places = significantDecimalPlaces(text);
+  if (places > GAME_QUANTITY_DECIMALS) {
+    throw new GameRoundError(
+      `Invalid quantity. Quantities support up to ${GAME_QUANTITY_DECIMALS} decimal places; ${text} needs ${places} and would have to be rounded. Reduce the precision instead.`,
+      400
+    );
   }
-  return normalised;
+  if (quantity >= GAME_QUANTITY_MAX) {
+    throw new GameRoundError(
+      'Invalid quantity. Quantity exceeds the maximum storable value.',
+      400
+    );
+  }
+  return quantity;
 }
 
 function validateApocalypseId(raw) {
@@ -433,7 +495,7 @@ async function sellRoundTrade({ userId, apocalypseId, coinId, quantity: rawQuant
     const held = holding ? parseFloat(holding.quantity) : 0;
     if (!holding || held < quantity) {
       throw new GameRoundError(
-        `Insufficient round holdings. You have ${held} of ${coin.symbol} available to sell in this cycle.`,
+        `Insufficient round holdings. You have ${formatQuantityText(held)} of ${coin.symbol} available to sell in this cycle.`,
         400
       );
     }
@@ -448,7 +510,7 @@ async function sellRoundTrade({ userId, apocalypseId, coinId, quantity: rawQuant
     );
     if (rowCount !== 1) {
       throw new GameRoundError(
-        `Insufficient round holdings. You have ${held} of ${coin.symbol} available to sell in this cycle.`,
+        `Insufficient round holdings. You have ${formatQuantityText(held)} of ${coin.symbol} available to sell in this cycle.`,
         400
       );
     }

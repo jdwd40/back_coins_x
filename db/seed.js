@@ -198,6 +198,15 @@ const seed = async (shouldEnd = false) => {
     );
     await db.query(resultsMigration);
 
+    console.log('📦 Applying fractional-quantity migration (db/migrations/012_fractional_round_quantities.sql)...');
+    // Fractional round-quantity (DECIMAL(18,8)) DDL sourced from the
+    // production migration only.
+    const fractionalQuantityMigration = require('fs').readFileSync(
+      require('path').join(__dirname, 'migrations', '012_fractional_round_quantities.sql'),
+      'utf8'
+    );
+    await db.query(fractionalQuantityMigration);
+
     console.log('📦 Inserting coins data...');
     // Insert coins data
     const coinsData = require(process.env.NODE_ENV === 'test' 

@@ -13,12 +13,16 @@ const { assertDisposableTestDatabase } = require('./helpers/testDatabaseGuard');
 
 const MIGRATION_009 = '009_create_apocalypse_round_state.sql';
 const MIGRATION_011 = '011_create_apocalypse_results.sql';
+const MIGRATION_012 = '012_fractional_round_quantities.sql';
 
 // Simulate the pre-Core-4 production state: Coins schema + data + Core 1/3
 // game tables, but no round-state tables. The Core 6 results table carries a
 // composite FK into apocalypse_participants, so dropping participants CASCADE
 // would silently strip that FK; the simulation removes the Core 6 objects
-// explicitly first, and re-running applies 009 AND 011 in order.
+// explicitly first, and re-running applies 009 AND 011 in order. Migration
+// 012 only ALTERS the two quantity columns (no new tables), so no schema
+// drop is needed for it — its tracking row is removed so the rerun re-applies
+// the DECIMAL(18,2) -> DECIMAL(18,8) widening on the freshly recreated tables.
 async function dropCore4Schema() {
   await db.query('DROP TABLE IF EXISTS apocalypse_results CASCADE');
   await db.query('DROP FUNCTION IF EXISTS apocalypse_results_immutable()');
@@ -28,7 +32,7 @@ async function dropCore4Schema() {
 }
 
 async function dropCore4Tracking() {
-  await db.query('DELETE FROM schema_migrations WHERE migration = ANY($1)', [[MIGRATION_009, MIGRATION_011]]);
+  await db.query('DELETE FROM schema_migrations WHERE migration = ANY($1)', [[MIGRATION_009, MIGRATION_011, MIGRATION_012]]);
 }
 
 describe('Core 4: tracked production migration 009', () => {
@@ -52,7 +56,7 @@ describe('Core 4: tracked production migration 009', () => {
     await dropCore4Tracking();
 
     const result = await runMigrations({ log: () => {} });
-    expect(result.applied).toEqual([MIGRATION_009, MIGRATION_011]); // Core 4, then Core 6 on top
+    expect(result.applied).toEqual([MIGRATION_009, MIGRATION_011, MIGRATION_012]); // Core 4, then Core 6, then the 012 quantity widening
 
     const verification = await verifyGameSchema();
     expect(verification.problems).toEqual([]);
