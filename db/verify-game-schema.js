@@ -828,7 +828,11 @@ const EXPECTED_RESULT_COLUMNS = [
   ['trade_count', 'integer', 'NO'],
   ['buy_count', 'integer', 'NO'],
   ['sell_count', 'integer', 'NO'],
-  ['created_at', 'timestamp with time zone', 'NO']
+  ['created_at', 'timestamp with time zone', 'NO'],
+  // Issue #19: stored generated column — PostgreSQL reports generated
+  // columns as is_nullable 'YES' even though the expression over two NOT
+  // NULL columns can never yield NULL.
+  ['leaderboard_eligible', 'boolean', 'YES']
 ];
 
 async function verifyResults(q, problems) {
@@ -897,6 +901,22 @@ async function verifyResults(q, problems) {
      WHERE net_profit <> final_cash - starting_cash`
   );
   if (badProfit.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${badProfit.rows[0].n} results with net_profit <> final_cash - starting_cash`);
+
+  // Issue #19: the stored eligibility flag must exactly match the canonical
+  // rule final_cash > starting_cash (the generated column guarantees this;
+  // the check guards against any historical/manual anomaly). Column-guarded:
+  // on a pre-015 schema the missing column is already a shape problem above.
+  const hasEligibility = await q(
+    `SELECT count(*)::int AS n FROM information_schema.columns
+     WHERE table_schema = 'public' AND table_name = 'apocalypse_results' AND column_name = 'leaderboard_eligible'`
+  );
+  if (hasEligibility.rows[0].n > 0) {
+    const badEligibility = await q(
+      `SELECT count(*)::int AS n FROM apocalypse_results
+       WHERE leaderboard_eligible IS DISTINCT FROM (final_cash > starting_cash)`
+    );
+    if (badEligibility.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${badEligibility.rows[0].n} results with leaderboard_eligible <> (final_cash > starting_cash)`);
+  }
 
   const badCounts = await q(
     `SELECT count(*)::int AS n FROM apocalypse_results

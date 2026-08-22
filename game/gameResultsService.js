@@ -174,9 +174,15 @@ function validateApocalypseId(raw) {
   return raw;
 }
 
+// Issue #19: leaderboardEligibility is explicit on every served result row —
+// clients never reverse-engineer it. It derives from the immutable stored
+// final_cash vs the row's own authoritative starting_cash (generated column
+// leaderboard_eligible, migration 015), so historical pre-rule rows get the
+// identical threshold semantics for free.
 function publicResultRow(row) {
   return {
     rank: row.rank,
+    leaderboardEligible: row.leaderboard_eligible === true,
     participantId: row.participant_id,
     cycleId: row.apocalypse_id,
     userId: row.user_id,
@@ -246,8 +252,23 @@ async function getRecentLeaderboards({ limit: rawLimit } = {}) {
 
   const leaderboards = [];
   for (const cycle of cycles) {
+    // Issue #19: the public completed-round leaderboard contains ONLY
+    // profitable finishes (final_cash > that round's authoritative
+    // starting_cash). Exactly-break-even and losing results are preserved
+    // immutably and remain retrievable via GET /api/game/results/:cycleId —
+    // they are simply not leaderboard entries. Leaderboard ranks are
+    // computed among qualifying entries only, gapless 1..M, with the
+    // settlement tie-breaker (final_cash DESC, participant_id ASC). A cycle
+    // with zero qualifying players legitimately yields an empty board.
     const { rows } = await db.query(
-      `SELECT * FROM apocalypse_results WHERE cycle_id = $1 ORDER BY rank ASC`,
+      `SELECT *, ROW_NUMBER() OVER (ORDER BY final_cash DESC, participant_id ASC)::integer AS leaderboard_rank
+       FROM apocalypse_results
+       WHERE cycle_id = $1 AND leaderboard_eligible
+       ORDER BY final_cash DESC, participant_id ASC`,
+      [cycle.cycle_id]
+    );
+    const { rows: totals } = await db.query(
+      `SELECT count(*)::int AS n FROM apocalypse_results WHERE cycle_id = $1`,
       [cycle.cycle_id]
     );
     leaderboards.push({
@@ -257,7 +278,8 @@ async function getRecentLeaderboards({ limit: rawLimit } = {}) {
       endTime: new Date(cycle.end_time).toISOString(),
       settledAt: cycle.settled_at ? new Date(cycle.settled_at).toISOString() : null,
       resultCount: rows.length,
-      results: rows.map(publicResultRow)
+      totalResultCount: totals[0].n,
+      results: rows.map((row) => ({ ...publicResultRow(row), rank: row.leaderboard_rank }))
     });
   }
 

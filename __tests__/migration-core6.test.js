@@ -33,7 +33,10 @@ async function dropCore6Schema() {
 }
 
 async function dropCore6Tracking() {
-  await db.query('DELETE FROM schema_migrations WHERE migration = $1', [MIGRATION_011]);
+  // 015 (leaderboard_eligible) alters apocalypse_results, which
+  // dropCore6Schema drops — clear its tracking row too so the rerun
+  // restores the canonical post-#19 schema.
+  await db.query('DELETE FROM schema_migrations WHERE migration = ANY($1)', [[MIGRATION_011, '015_leaderboard_eligible.sql']]);
 }
 
 describe('Core 6: tracked production migration 011', () => {
@@ -63,7 +66,7 @@ describe('Core 6: tracked production migration 011', () => {
     await dropCore6Tracking();
 
     const result = await runMigrations({ log: () => {} });
-    expect(result.applied).toEqual([MIGRATION_011]); // only Core 6 was missing
+    expect(result.applied).toEqual([MIGRATION_011, '015_leaderboard_eligible.sql']); // only Core 6 was missing
 
     const verification = await verifyGameSchema();
     expect(verification.problems).toEqual([]);
@@ -107,7 +110,7 @@ describe('Core 6: tracked production migration 011', () => {
     // existing compatible objects, detect compatibility, and record it again.
     await dropCore6Tracking();
     const rerun = await runMigrations({ log: () => {} });
-    expect(rerun.applied).toEqual([MIGRATION_011]);
+    expect(rerun.applied).toEqual([MIGRATION_011, '015_leaderboard_eligible.sql']);
     const verification = await verifyGameSchema();
     expect(verification.problems).toEqual([]);
   });
@@ -146,7 +149,7 @@ describe('Core 6: tracked production migration 011', () => {
     await dropCore6Tracking();
 
     const result = await runMigrations({ log: () => {} });
-    expect(result.applied).toEqual([MIGRATION_011]);
+    expect(result.applied).toEqual([MIGRATION_011, '015_leaderboard_eligible.sql']);
     const { rows: checks } = await db.query(
       `SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint
        WHERE conrelid = 'public.apocalypse_cycles'::regclass AND contype = 'c'`

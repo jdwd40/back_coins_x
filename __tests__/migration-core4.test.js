@@ -31,8 +31,13 @@ async function dropCore4Schema() {
   await db.query('DROP TABLE IF EXISTS apocalypse_participants CASCADE');
 }
 
+// Migration 015 (leaderboard_eligible) alters apocalypse_results, which
+// dropCore4Schema drops — its tracking row must be cleared too so
+// runMigrations restores the canonical post-#19 schema.
+const MIGRATION_015 = '015_leaderboard_eligible.sql';
+
 async function dropCore4Tracking() {
-  await db.query('DELETE FROM schema_migrations WHERE migration = ANY($1)', [[MIGRATION_009, MIGRATION_011, MIGRATION_012]]);
+  await db.query('DELETE FROM schema_migrations WHERE migration = ANY($1)', [[MIGRATION_009, MIGRATION_011, MIGRATION_012, MIGRATION_015]]);
 }
 
 describe('Core 4: tracked production migration 009', () => {
@@ -56,7 +61,7 @@ describe('Core 4: tracked production migration 009', () => {
     await dropCore4Tracking();
 
     const result = await runMigrations({ log: () => {} });
-    expect(result.applied).toEqual([MIGRATION_009, MIGRATION_011, MIGRATION_012]); // Core 4, then Core 6, then the 012 quantity widening
+    expect(result.applied).toEqual([MIGRATION_009, MIGRATION_011, MIGRATION_012, MIGRATION_015]); // Core 4, Core 6, 012 widening, #19 eligibility column
 
     const verification = await verifyGameSchema();
     expect(verification.problems).toEqual([]);

@@ -30,14 +30,21 @@ async function liveCycle() {
 }
 
 // Settle the CURRENT active cycle completely: create (or adopt) it at the
-// real now, let the given users join, shift its window into the past (the
-// end_time > start_time CHECK still holds), then reconcile at the real now
-// to settle it and chain a long-lived successor.
-async function completedCycle({ join = [] } = {}) {
+// real now, let the given users join, optionally set per-user current cash
+// (issue #19: profitability decides leaderboard presence), shift its window
+// into the past (the end_time > start_time CHECK still holds), then
+// reconcile at the real now to settle it and chain a long-lived successor.
+async function completedCycle({ join = [], setCash = {} } = {}) {
   const now = new Date();
   const cycle = await reconcileCycle({ now, durationMs: SHORT_DURATION_MS });
   for (const userId of join) {
     await gameRoundService.joinRound({ userId, now });
+  }
+  for (const [userId, cash] of Object.entries(setCash)) {
+    await db.query(
+      'UPDATE apocalypse_participants SET current_cash = $1 WHERE cycle_id = $2 AND user_id = $3',
+      [cash, cycle.cycle_id, Number(userId)]
+    );
   }
   await db.query(
     `UPDATE apocalypse_cycles
@@ -243,22 +250,24 @@ describe('Core 6: leaderboard and results APIs', () => {
   });
 
   describe('GET /api/game/leaderboards/recent', () => {
-    test('returns recent completed cycles newest-first with snapshots, bounded by the default limit', async () => {
-      const first = await completedCycle({ join: [1] });
-      const second = await completedCycle({ join: [2] });
+    test('returns recent completed cycles newest-first with PROFITABLE-ONLY snapshots, bounded by the default limit', async () => {
+      // Issue #19: only finishes above the £10,000 starting cash appear.
+      // Cycle 1: john_doe profits (£10,500); jane_smith breaks even.
+      // Cycle 2: jane_smith profits (£12,000); john_doe loses.
+      const first = await completedCycle({ join: [1], setCash: { 1: 10500 } });
+      const second = await completedCycle({ join: [2], setCash: { 2: 12000 } });
 
       const response = await request(app).get('/api/game/leaderboards/recent').expect(200);
       const data = response.body.data;
       expect(data.limit).toBe(5); // documented default
       expect(data.count).toBe(2);
       expect(data.leaderboards.map((b) => b.cycleId)).toEqual([second.apocalypse_id, first.apocalypse_id]);
-      // Issue #17: EVERY registered user is a participant of every cycle, so
-      // each completed cycle's snapshot holds both seeded users (untouched
-      // participants settle at exactly the £10,000 starting cash; the tie
-      // breaks by participant_id ASC — john_doe initialized first).
-      expect(data.leaderboards[0].results).toHaveLength(2);
-      expect(data.leaderboards[0].results.map((r) => r.username)).toEqual(['john_doe', 'jane_smith']);
-      expect(data.leaderboards[1].results.map((r) => r.username)).toEqual(['john_doe', 'jane_smith']);
+      // Each board shows only its qualifying player, ranked 1, while the
+      // full participant count stays visible via totalResultCount.
+      expect(data.leaderboards[0].resultCount).toBe(1);
+      expect(data.leaderboards[0].totalResultCount).toBe(2);
+      expect(data.leaderboards[0].results[0]).toMatchObject({ rank: 1, username: 'jane_smith', finalCash: 12000, leaderboardEligible: true });
+      expect(data.leaderboards[1].results[0]).toMatchObject({ rank: 1, username: 'john_doe', finalCash: 10500, leaderboardEligible: true });
     });
 
     test('limit is validated and clamped, and never deletes history', async () => {
@@ -280,14 +289,14 @@ describe('Core 6: leaderboard and results APIs', () => {
       expect(rows[0].n).toBe(2);
     });
 
-    test('completed cycles with no participants appear with an empty snapshot', async () => {
-      // Issue #17: every registered user is auto-initialized into every
-      // cycle, so the zero-participant case requires zero registered users.
-      await db.query('DELETE FROM users');
+    test('completed cycles with no qualifying players appear with an empty snapshot', async () => {
+      // Issue #19: everyone settled at exactly the £10,000 break-even —
+      // nobody qualifies, and an empty leaderboard is a legitimate result.
       await completedCycle({ join: [] });
       const response = await request(app).get('/api/game/leaderboards/recent').expect(200);
       expect(response.body.data.count).toBe(1);
       expect(response.body.data.leaderboards[0].resultCount).toBe(0);
+      expect(response.body.data.leaderboards[0].totalResultCount).toBe(2); // both auto-initialized users preserved
       expect(response.body.data.leaderboards[0].results).toEqual([]);
     });
   });

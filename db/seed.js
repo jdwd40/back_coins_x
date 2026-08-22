@@ -217,6 +217,15 @@ const seed = async (shouldEnd = false) => {
     );
     await db.query(retireLegacyMigration);
 
+    console.log('📦 Applying profitable-leaderboard migration (db/migrations/015_leaderboard_eligible.sql)...');
+    // Issue #19 leaderboard_eligible generated column, sourced from the
+    // production migration only.
+    const leaderboardEligibleMigration = require('fs').readFileSync(
+      require('path').join(__dirname, 'migrations', '015_leaderboard_eligible.sql'),
+      'utf8'
+    );
+    await db.query(leaderboardEligibleMigration);
+
     console.log('📦 Inserting coins data...');
     // Insert coins data
     const coinsData = require(process.env.NODE_ENV === 'test' 
