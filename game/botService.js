@@ -37,6 +37,7 @@ const crypto = require('crypto');
 const bcrypt = require('bcrypt');
 const db = require('../db/connection');
 const { BOT_ROSTER, BOT_STRATEGIES, resolveBotConfig } = require('./botConfig');
+const { GAME_MIN_TRADE_VALUE } = require('./gameConstants');
 const gameRoundService = require('./gameRoundService');
 const { reconcileCycle, deriveProgress } = require('./gameCycleService');
 
@@ -391,6 +392,20 @@ function enforceTradeSizeCap(decision, marketState, maxTradeSize) {
   return { ...decision, quantity: cappedQuantity };
 }
 
+// Service-side enforcement of the minimum notional (fcoins_y #6 follow-up):
+// bots obey the SAME £0.01 rule as humans. A live-priced decision whose
+// authoritative 2-decimal consideration rounds below one penny becomes a
+// skip (null) rather than a doomed service call. A £0-priced (collapsed)
+// SELL passes through untouched: exiting a dead holding at exactly £0 is
+// the designed Core 3 exit, and the shared service exempts it identically.
+function enforceMinTradeValue(decision, marketState) {
+  if (!decision || (decision.type !== 'BUY' && decision.type !== 'SELL')) return decision;
+  const coin = marketState.coins.find((c) => c.coinId === decision.coinId);
+  if (!coin || !(coin.currentPrice > 0)) return decision;
+  if (round2(decision.quantity * coin.currentPrice) < GAME_MIN_TRADE_VALUE) return null;
+  return decision;
+}
+
 // ---------------------------------------------------------------------------
 // The single scheduler tick. Claims (cycle_id, tick_id) in the durable tick
 // ledger FIRST — the unique constraint makes the tick execute at most once
@@ -499,8 +514,10 @@ async function runBotTick({ tickId: rawTickId, now = new Date() } = {}) {
         maxTradeSize: config.maxTradeSize
       });
       // Authoritative per-trade size-cap enforcement at the service layer,
-      // immediately before the shared trade call.
-      const decision = enforceTradeSizeCap(decided, marketState, config.maxTradeSize);
+      // immediately before the shared trade call. The minimum-notional rule
+      // (same one humans face) runs next: a sub-penny trade becomes a skip.
+      const capped = enforceTradeSizeCap(decided, marketState, config.maxTradeSize);
+      const decision = capped && enforceMinTradeValue(capped, marketState);
       action.action = decision;
 
       if (decision && decision.type === 'BUY') {
@@ -531,6 +548,9 @@ async function runBotTick({ tickId: rawTickId, now = new Date() } = {}) {
         );
         actionsTaken += 1;
         action.result = 'executed';
+      } else if (capped && decision === null) {
+        action.result = 'skipped';
+        action.reason = 'min-trade-value';
       } else if (decision === null) {
         action.result = 'skipped';
         action.reason = 'trade-size-cap';
@@ -574,5 +594,6 @@ module.exports = {
   buildPublicMarketState,
   decideBotAction,
   enforceTradeSizeCap,
+  enforceMinTradeValue,
   runBotTick
 };

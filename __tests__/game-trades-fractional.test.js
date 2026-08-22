@@ -102,10 +102,13 @@ describe('Core 4 + migration 012: fractional round-trade quantities', () => {
   });
 
   test('the required fractional examples and plain integers all trade successfully', async () => {
-    const { cycle, participant, coinId } = await setupJoinedRound({ coinPrice: 1 });
+    const { cycle, participant, coinId } = await setupJoinedRound({ coinPrice: 10 });
     const auth = `Bearer ${tokenFor(1)}`;
 
-    // £1/coin, £1,000 round cash: every required example is affordable.
+    // £10/coin, £1,000 round cash: every required example is affordable, and
+    // the smallest (0.004 × £10 = £0.04) clears the £0.01 minimum-notional
+    // rule (fcoins_y #6 follow-up). Sub-penny rejections are covered by
+    // __tests__/game-trades-min-notional.test.js.
     for (const amount of [1, 1.5, 0.5, 0.04, 0.004]) {
       const response = await buy(auth, cycle, coinId, amount).expect(201);
       expect(response.body.data.transaction.quantity).toBe(amount);
@@ -173,16 +176,18 @@ describe('Core 4 + migration 012: fractional round-trade quantities', () => {
     expect(await sellLedgerCount(participant.participantId)).toBe(0);
   });
 
-  test('8-decimal dust (the exact ledger precision) trades; cash and holdings stay non-negative', async () => {
-    const { cycle, participant, coinId } = await setupJoinedRound({ coinPrice: 1 });
+  test('8-decimal dust (the exact ledger precision) trades when its value >= £0.01; cash and holdings stay non-negative', async () => {
+    // £1,000,000/coin: 0.00000001 costs round2(£0.01) = £0.01 — the smallest
+    // possible dust quantity at exactly the minimum notional. Sub-penny dust
+    // (e.g. 1e-8 @ £1) is now REJECTED by the £0.01 minimum-notional rule;
+    // that contract lives in __tests__/game-trades-min-notional.test.js.
+    const { cycle, participant, coinId } = await setupJoinedRound({ coinPrice: 1000000 });
     const auth = `Bearer ${tokenFor(1)}`;
 
-    // £1/coin: 0.00000001 costs round2(£0.00000001) = £0.00 — sub-penny dust
-    // can never drain or inflate cash under the 2-decimal money rules.
     const response = await buy(auth, cycle, coinId, 0.00000001).expect(201);
     expect(response.body.data.transaction.quantity).toBe(0.00000001);
-    expect(response.body.data.transaction.totalAmount).toBe(0);
-    expect(await roundCash(participant.participantId)).toBe(1000);
+    expect(response.body.data.transaction.totalAmount).toBeCloseTo(0.01, 2);
+    expect(await roundCash(participant.participantId)).toBeCloseTo(999.99, 2);
     expect(await heldQuantity(participant.participantId, coinId)).toBe(0.00000001);
 
     await sell(auth, cycle, coinId, 0.00000001).expect(201); // full dust exit
@@ -200,7 +205,10 @@ describe('Core 4 + migration 012: fractional round-trade quantities', () => {
   });
 
   test('precision beyond 8 significant decimal places is rejected with an explicit error, never rounded', async () => {
-    const { cycle, participant, coinId } = await setupJoinedRound({ coinPrice: 1 });
+    // £10/coin: precision rejections fire before any value judgement, and the
+    // trailing-zero buy below (0.004 × £10 = £0.04) clears the £0.01
+    // minimum-notional rule.
+    const { cycle, participant, coinId } = await setupJoinedRound({ coinPrice: 10 });
     const auth = `Bearer ${tokenFor(1)}`;
 
     for (const excessive of [

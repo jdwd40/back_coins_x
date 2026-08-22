@@ -21,7 +21,7 @@
 // lazily inside the function, by which time the module graph is fully loaded.
 
 const db = require('../db/connection');
-const { GAME_STARTING_CASH, GAME_QUANTITY_DECIMALS, GAME_QUANTITY_MAX, resolveGameStartingCash } = require('./gameConstants');
+const { GAME_STARTING_CASH, GAME_QUANTITY_DECIMALS, GAME_QUANTITY_MAX, GAME_MIN_TRADE_VALUE, resolveGameStartingCash } = require('./gameConstants');
 
 // Must match gameCycleService's GAME_CYCLE_ADVISORY_LOCK_KEY. It is
 // re-declared here (not imported) to keep this module free of any top-level
@@ -52,6 +52,22 @@ function round2(value) {
 function formatQuantityText(value) {
   if (!Number.isFinite(value)) return '0';
   return value.toFixed(GAME_QUANTITY_DECIMALS).replace(/0+$/, '').replace(/\.$/, '');
+}
+
+// Minimum-notional guard (fcoins_y #6 follow-up): a live-priced trade whose
+// AUTHORITATIVE consideration (round2 of quantity × server-side locked
+// price) falls below one penny is rejected BEFORE any write. Without this a
+// buy mints holdings for £0.00 and a sell destroys holdings for £0.00 —
+// repeatably. The rounded total is what the ledger records, so the rounded
+// total is what is judged. Collapsed-coin £0 exits are exempt: see the sell
+// path.
+function assertMinTradeValue(total, side) {
+  if (total < GAME_MIN_TRADE_VALUE) {
+    throw new GameRoundError(
+      `Trade value must be at least £${GAME_MIN_TRADE_VALUE.toFixed(2)}. This ${side} totals £${total.toFixed(2)} at the current price.`,
+      400
+    );
+  }
 }
 
 // Plain decimal strings only: digits with at most one fractional part
@@ -384,6 +400,11 @@ async function buyRoundTrade({ userId, apocalypseId, coinId, quantity: rawQuanti
     // The price is always the server-side locked row — never client input.
     const total = round2(quantity * price);
 
+    // Minimum notional: a positive quantity whose 2-decimal cost rounds to
+    // £0.00 would mint holdings for free (repeatable). Reject before any
+    // write. (Buys only reach here at a live price > 0.)
+    assertMinTradeValue(total, 'buy');
+
     // Atomic affordability: the debit itself enforces sufficient round cash,
     // so concurrent buys can never overspend or drive cash negative.
     const { rowCount } = await client.query(
@@ -500,6 +521,16 @@ async function sellRoundTrade({ userId, apocalypseId, coinId, quantity: rawQuant
       );
     }
 
+    // Compute the authoritative proceeds BEFORE any write. A collapsed coin
+    // has price exactly £0: the Core 3 exit path stands — total is exactly 0
+    // and the credit adds exactly zero cash (a dead holding has no value to
+    // protect). At any LIVE price, a sale whose rounded proceeds fall below
+    // one penny would silently destroy holdings for £0.00 — reject it.
+    const total = round2(quantity * price);
+    if (price > 0) {
+      assertMinTradeValue(total, 'sale');
+    }
+
     // Atomic decrement: the guarded UPDATE is the oversell backstop even if
     // the row state changed between the lock check and the write.
     const { rowCount } = await client.query(
@@ -514,10 +545,6 @@ async function sellRoundTrade({ userId, apocalypseId, coinId, quantity: rawQuant
         400
       );
     }
-
-    // A collapsed coin has price exactly £0: total is exactly 0 and the
-    // credit adds exactly zero cash.
-    const total = round2(quantity * price);
 
     await client.query(
       `UPDATE apocalypse_participants

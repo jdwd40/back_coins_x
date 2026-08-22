@@ -21,6 +21,16 @@ const GAME_QUANTITY_DECIMALS = 8;
 // request a clean 400 instead of a PostgreSQL numeric-overflow 500.
 const GAME_QUANTITY_MAX = 10000000000;
 
+// Minimum notional (fcoins_y #6 follow-up): money is DECIMAL(18,2), so a
+// positive fractional quantity can have an authoritative 2-decimal
+// consideration of £0.00 (e.g. 0.004 of a £1 coin). Such a BUY would mint
+// holdings for zero round cash and such a SELL would destroy holdings for
+// zero proceeds — both repeatable. Every live-priced trade must therefore
+// settle for at least one penny AFTER the authoritative round2 money
+// rounding. Quantity precision is unaffected: 0.004 JDC at £2.50+ is a
+// perfectly valid £0.01+ trade.
+const GAME_MIN_TRADE_VALUE = 0.01;
+
 // Validate a monetary game constant: it must be a positive, finite number
 // representable exactly at the application's 2-decimal money precision (the
 // same precision PostgreSQL DECIMAL(18,2) stores). Values with more than two
@@ -65,6 +75,7 @@ module.exports = {
   GAME_STARTING_CASH,
   GAME_QUANTITY_DECIMALS,
   GAME_QUANTITY_MAX,
+  GAME_MIN_TRADE_VALUE,
   validateGameStartingCash,
   resolveGameStartingCash
 };
