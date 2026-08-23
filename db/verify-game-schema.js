@@ -808,6 +808,134 @@ async function verifyBots(q, problems) {
   }
 }
 
+// --- Issue #18: passive economy (cash-event ledger / tick claims / event
+//     schedule) -----------------------------------------------------------
+
+const EXPECTED_CASH_EVENT_COLUMNS = [
+  ['cash_event_id', 'integer', 'NO'],
+  ['participant_id', 'integer', 'NO'],
+  ['cycle_id', 'integer', 'NO'],
+  ['user_id', 'integer', 'NO'],
+  ['type', 'character varying', 'NO'],
+  ['amount', 'numeric', 'NO'],
+  ['balance_before', 'numeric', 'NO'],
+  ['balance_after', 'numeric', 'NO'],
+  ['description', 'character varying', 'NO'],
+  ['event_key', 'character varying', 'NO'],
+  ['created_at', 'timestamp with time zone', 'NO']
+];
+
+const EXPECTED_ECONOMY_TICK_COLUMNS = [
+  ['tick_pk', 'integer', 'NO'],
+  ['cycle_id', 'integer', 'NO'],
+  ['kind', 'character varying', 'NO'],
+  ['tick_id', 'bigint', 'NO'],
+  ['executed_at', 'timestamp with time zone', 'NO']
+];
+
+const EXPECTED_ECONOMY_EVENT_COLUMNS = [
+  ['event_pk', 'integer', 'NO'],
+  ['cycle_id', 'integer', 'NO'],
+  ['event_key', 'character varying', 'NO'],
+  ['scheduled_at', 'timestamp with time zone', 'NO'],
+  ['amount', 'numeric', 'NO'],
+  ['description', 'character varying', 'NO'],
+  ['executed_at', 'timestamp with time zone', 'YES'],
+  ['created_at', 'timestamp with time zone', 'NO']
+];
+
+async function verifyEconomy(q, problems) {
+  await verifyCore4Table(q, problems, 'apocalypse_cash_events', 'cash_event_id', EXPECTED_CASH_EVENT_COLUMNS, {
+    uniques: ['^UNIQUE \\(cycle_id, participant_id, type, event_key\\)'],
+    fks: [
+      { target: 'apocalypse_participants', pattern: '^FOREIGN KEY \\(participant_id, cycle_id, user_id\\)' }
+    ],
+    checks: [
+      { label: "type IN ('FEE', 'TAX', 'EVENT')", pattern: 'FEE.*TAX.*EVENT' },
+      { label: 'amount > 0', pattern: 'amount > \\(??0' },
+      { label: 'balance_before >= 0', pattern: 'balance_before >= \\(??0' },
+      { label: 'balance_after >= 0', pattern: 'balance_after >= \\(??0' },
+      { label: 'balance_after = balance_before - amount', pattern: 'balance_after.*balance_before.*amount' }
+    ],
+    nowDefaults: ['created_at']
+  });
+
+  await verifyCore4Table(q, problems, 'apocalypse_economy_ticks', 'tick_pk', EXPECTED_ECONOMY_TICK_COLUMNS, {
+    uniques: ['^UNIQUE \\(cycle_id, kind, tick_id\\)'],
+    fks: [{ target: 'apocalypse_cycles', pattern: '^FOREIGN KEY \\(cycle_id\\)' }],
+    checks: [
+      { label: "kind IN ('FEE', 'TAX')", pattern: 'FEE.*TAX' },
+      { label: 'tick_id >= 0', pattern: 'tick_id >= \\(??0' }
+    ],
+    nowDefaults: ['executed_at']
+  });
+
+  await verifyCore4Table(q, problems, 'apocalypse_economy_events', 'event_pk', EXPECTED_ECONOMY_EVENT_COLUMNS, {
+    uniques: ['^UNIQUE \\(cycle_id, event_key\\)'],
+    fks: [{ target: 'apocalypse_cycles', pattern: '^FOREIGN KEY \\(cycle_id\\)' }],
+    checks: [{ label: 'amount > 0', pattern: 'amount > \\(??0' }],
+    nowDefaults: ['created_at']
+  });
+
+  // Lookup/due indexes.
+  for (const { name, table } of [
+    { name: 'idx_apocalypse_cash_events_cycle', table: 'apocalypse_cash_events' },
+    { name: 'idx_apocalypse_cash_events_participant', table: 'apocalypse_cash_events' },
+    { name: 'idx_apocalypse_economy_events_due', table: 'apocalypse_economy_events' }
+  ]) {
+    const idx = await q(
+      `SELECT 1 FROM pg_class c
+       JOIN pg_index i ON i.indexrelid = c.oid
+       WHERE c.relname = '${name}' AND i.indrelid = to_regclass('public.${table}')`
+    );
+    if (idx.rowCount === 0) problems.push(`missing index ${name}`);
+  }
+
+  // Live-data invariants (only when the tables exist AND carry the columns
+  // the invariants read — an incompatible stub table must produce shape
+  // problems above, not a crash here).
+  const tables = await q(
+    `SELECT to_regclass('public.apocalypse_cash_events') AS ce,
+            to_regclass('public.apocalypse_economy_ticks') AS et,
+            to_regclass('public.apocalypse_economy_events') AS ee`
+  );
+  const hasColumns = async (table, names) => {
+    const { rows } = await q(
+      `SELECT count(*)::int AS n FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = '${table}'
+         AND column_name = ANY('{${names.join(',')}}')`
+    );
+    return rows[0].n === names.length;
+  };
+
+  if (tables.rows[0].ce && await hasColumns('apocalypse_cash_events', ['type', 'amount', 'balance_before', 'balance_after'])) {
+    // Every ledger row explains its mutation exactly and is never negative.
+    const badLedger = await q(
+      `SELECT count(*)::int AS n FROM apocalypse_cash_events
+       WHERE amount <= 0 OR balance_before < 0 OR balance_after < 0
+          OR balance_after <> balance_before - amount
+          OR type NOT IN ('FEE', 'TAX', 'EVENT')`
+    );
+    if (badLedger.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${badLedger.rows[0].n} cash events with invalid amount/balance chain/type`);
+  }
+  if (tables.rows[0].et && await hasColumns('apocalypse_economy_ticks', ['kind', 'tick_id'])) {
+    const badTicks = await q(
+      `SELECT count(*)::int AS n FROM apocalypse_economy_ticks
+       WHERE tick_id < 0 OR kind NOT IN ('FEE', 'TAX')`
+    );
+    if (badTicks.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${badTicks.rows[0].n} economy tick rows with negative tick id or invalid kind`);
+  }
+  if (tables.rows[0].ee && await hasColumns('apocalypse_economy_events', ['scheduled_at', 'executed_at', 'amount'])) {
+    // An event can never execute before its scheduled instant, and persisted
+    // amounts are always positive.
+    const badEvents = await q(
+      `SELECT count(*)::int AS n FROM apocalypse_economy_events
+       WHERE amount <= 0 OR (executed_at IS NOT NULL AND executed_at < scheduled_at)`
+    );
+    if (badEvents.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${badEvents.rows[0].n} economy events with non-positive amount or executed before their scheduled time`);
+  }
+}
+
 // --- Core 6: settlement results (apocalypse_results + immutability) -------
 
 const EXPECTED_RESULT_COLUMNS = [
@@ -972,6 +1100,7 @@ async function verifyGameSchema({ query } = {}) {
   await verifyCollapseSchedule(q, problems);
   await verifyRoundState(q, problems);
   await verifyBots(q, problems);
+  await verifyEconomy(q, problems);
   await verifyResults(q, problems);
 
   return { ok: problems.length === 0, problems };
@@ -981,7 +1110,7 @@ if (require.main === module) {
   verifyGameSchema()
     .then(async ({ ok, problems }) => {
       if (ok) {
-        console.log('game schema verification PASSED (apocalypse_cycles [SETTLING lifecycle + settlement observability], coins.cycle_baseline_price, canonical coin catalogue [migrations 013 + 014 retirement], coin_collapse_schedule, apocalypse_participants, apocalypse_holdings, apocalypse_transactions, users.is_bot, apocalypse_bots, apocalypse_bot_ticks, apocalypse_results [immutable])');
+        console.log('game schema verification PASSED (apocalypse_cycles [SETTLING lifecycle + settlement observability], coins.cycle_baseline_price, canonical coin catalogue [migrations 013 + 014 retirement], coin_collapse_schedule, apocalypse_participants, apocalypse_holdings, apocalypse_transactions, users.is_bot, apocalypse_bots, apocalypse_bot_ticks, apocalypse_cash_events, apocalypse_economy_ticks, apocalypse_economy_events, apocalypse_results [immutable])');
         await db.end();
         return;
       }

@@ -6,7 +6,8 @@ const {
   sellGameTrade,
   getLiveLeaderboard,
   getCycleResults,
-  getRecentLeaderboards
+  getRecentLeaderboards,
+  getMyParticipant
 } = require('../controllers/game.controller');
 const { authenticateToken } = require('../middleware/auth.middleware');
 
@@ -26,5 +27,9 @@ gameRouter.get('/results/:cycleId', getCycleResults);
 gameRouter.post('/join', authenticateToken, joinGame);
 gameRouter.post('/trades/buy', authenticateToken, buyGameTrade);
 gameRouter.post('/trades/sell', authenticateToken, sellGameTrade);
+
+// Issue #18 / frontend #11: authenticated player-safe Cash + recent
+// FEE/TAX/EVENT cash events. Read-only; reconciles the lifecycle first.
+gameRouter.get('/participant', authenticateToken, getMyParticipant);
 
 exports.gameRouter = gameRouter;

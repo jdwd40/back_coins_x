@@ -3,6 +3,7 @@ const db = require('./db/connection');
 const logger = require('./utils/logger');
 const gameCycleWorker = require('./game/gameCycleWorker');
 const botWorker = require('./game/botWorker');
+const economyWorker = require('./game/economyWorker');
 const marketSimulator = require('./models/market-simulator');
 
 // Top-level production JWT check (executes on require, before any listen or startServer).
@@ -56,6 +57,7 @@ const startServer = async (port = PORT) => {
       if (process.env.NODE_ENV === 'production') {
         gameCycleWorker.start();
         botWorker.start();
+        economyWorker.start();
       }
       console.log('Express server started successfully');
       console.log(`Server is running on port ${port}`);
@@ -106,6 +108,11 @@ const shutdown = (signal = 'unknown') => {
       botWorker.stop();
     } catch (err) {
       console.error('[LIFECYCLE] Error stopping bot worker:', err.message);
+    }
+    try {
+      economyWorker.stop();
+    } catch (err) {
+      console.error('[LIFECYCLE] Error stopping economy worker:', err.message);
     }
     try {
       marketSimulator.stop();

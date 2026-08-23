@@ -15,6 +15,13 @@ const settlementService = require('./gameSettlementService');
 // one joinRound retry requires it lazily), exactly like the settlement
 // chain above.
 const gameRoundService = require('./gameRoundService');
+// Issue #18: passive economic pressure. Every cycle start (and every
+// recovery of a pre-existing ACTIVE cycle) persists the cycle's
+// deterministic Apocalypse event schedule via economyService. Load order is
+// safe: economyService never requires this module at the top level (its
+// pass/player-view entry points require it lazily), exactly like the
+// settlement chain above.
+const economyService = require('./economyService');
 
 // Default global apocalypse cycle length: 30 minutes.
 const DEFAULT_GAME_CYCLE_DURATION_MS = 30 * 60 * 1000;
@@ -158,6 +165,10 @@ async function ensureActiveCycle({ now, durationMs, generateSeed }) {
       // Apocalypse with exactly the authoritative starting cash — no JOIN
       // step, no human online required. Set-based and idempotent.
       await gameRoundService.initializeCycleParticipants(client, active.cycle_id);
+      // Issue #18: persist this cycle's deterministic Apocalypse event
+      // schedule atomically with the cycle start — derived from the cycle's
+      // persisted seed, so restarts observe it and never reroll it.
+      await economyService.ensureCycleEconomy(client, active);
     } else {
       // Recovery path: a pre-existing active cycle gets its schedule created
       // if (and only if) it is missing. No baseline reset mid-cycle.
@@ -167,6 +178,10 @@ async function ensureActiveCycle({ now, durationMs, generateSeed }) {
       // automatic participation existed. ON CONFLICT DO NOTHING makes this
       // a no-op for everyone already initialized; nobody is ever reset.
       await gameRoundService.initializeCycleParticipants(client, active.cycle_id);
+      // Issue #18: ensure the live cycle's persisted event schedule exists —
+      // covers cycles created before the economy engine shipped. ON
+      // CONFLICT DO NOTHING: the persisted schedule is never rerolled.
+      await economyService.ensureCycleEconomy(client, active);
       // While the cycle is live, reconcile its persisted due collapse rows.
       // An expired cycle's collapses run at exactly cycle end during
       // settlement, not here.

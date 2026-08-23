@@ -30,6 +30,9 @@ const seed = async (shouldEnd = false) => {
       DROP TABLE IF EXISTS "apocalypse_bot_ticks" CASCADE;
       DROP TABLE IF EXISTS "apocalypse_bots" CASCADE;
       DROP TABLE IF EXISTS "apocalypse_results" CASCADE;
+      DROP TABLE IF EXISTS "apocalypse_cash_events" CASCADE;
+      DROP TABLE IF EXISTS "apocalypse_economy_events" CASCADE;
+      DROP TABLE IF EXISTS "apocalypse_economy_ticks" CASCADE;
       DROP TABLE IF EXISTS "apocalypse_transactions" CASCADE;
       DROP TABLE IF EXISTS "apocalypse_holdings" CASCADE;
       DROP TABLE IF EXISTS "apocalypse_participants" CASCADE;
@@ -225,6 +228,15 @@ const seed = async (shouldEnd = false) => {
       'utf8'
     );
     await db.query(leaderboardEligibleMigration);
+
+    console.log('📦 Applying passive-economy migration (db/migrations/016_create_apocalypse_economy.sql)...');
+    // Issue #18 cash-event ledger / economy tick claims / deterministic
+    // event schedule DDL sourced from the production migration only.
+    const economyMigration = require('fs').readFileSync(
+      require('path').join(__dirname, 'migrations', '016_create_apocalypse_economy.sql'),
+      'utf8'
+    );
+    await db.query(economyMigration);
 
     console.log('📦 Inserting coins data...');
     // Insert coins data

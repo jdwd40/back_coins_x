@@ -32,6 +32,46 @@ const GAME_QUANTITY_MAX = 10000000000;
 // perfectly valid £0.01+ trade.
 const GAME_MIN_TRADE_VALUE = 0.01;
 
+// ---------------------------------------------------------------------------
+// Issue #18: passive economic pressure (fees / taxes / Apocalypse events).
+// These are the single authoritative game-design values for the economy
+// engine — do not scatter literals. Validated env overrides are resolved in
+// game/economyConfig.js (resolveEconomyConfig), which is the only reader.
+//
+// Defaults are tuned for the default 30-minute cycle so a zero-trade
+// participant finishes around £9,680 — inside the issue's £9,500–£9,800
+// target band:
+//   FEE:   £5.00 every 2 minutes   -> 14 ticks per 30-min cycle  = £70
+//   TAX:   £10.00 every 5 minutes  -> 5 ticks per 30-min cycle   = £50
+//   EVENT: 2 deterministic events  -> £50–£150 each (seeded)     = ~£200
+// ---------------------------------------------------------------------------
+
+// Recurring fee: a fixed charge every GAME_FEE_TICK_INTERVAL_MS of ACTIVE
+// cycle time. Tick 1 lands at cycle start + one interval; a tick exactly at
+// cycle end never fires (the cycle is no longer ACTIVE).
+const GAME_FEE_TICK_INTERVAL_MS = 2 * 60 * 1000;
+const GAME_FEE_AMOUNT = 5.0;
+
+// Recurring tax: an independent fixed deduction on its own cadence, so fee
+// and tax pressure can be tuned independently.
+const GAME_TAX_TICK_INTERVAL_MS = 5 * 60 * 1000;
+const GAME_TAX_AMOUNT = 10.0;
+
+// Apocalypse events: a fixed number per cycle, scheduled deterministically
+// from the cycle's persisted seed inside this fraction window of the cycle
+// (deliberately before the 70% collapse window opens), each debiting a
+// seeded amount in [GAME_EVENT_MIN_AMOUNT, GAME_EVENT_MAX_AMOUNT].
+const GAME_EVENT_COUNT = 2;
+const GAME_EVENT_MIN_FRACTION = 0.1;
+const GAME_EVENT_MAX_FRACTION = 0.6;
+const GAME_EVENT_MIN_AMOUNT = 50.0;
+const GAME_EVENT_MAX_AMOUNT = 150.0;
+
+// Economy worker wakeup cadence. Wakeups only claim/apply due persisted
+// ticks and events, so the wakeup frequency never changes amounts — it only
+// bounds how late a due debit lands.
+const GAME_ECONOMY_WORKER_INTERVAL_MS = 30 * 1000;
+
 // Validate a monetary game constant: it must be a positive, finite number
 // representable exactly at the application's 2-decimal money precision (the
 // same precision PostgreSQL DECIMAL(18,2) stores). Values with more than two
@@ -77,6 +117,16 @@ module.exports = {
   GAME_QUANTITY_DECIMALS,
   GAME_QUANTITY_MAX,
   GAME_MIN_TRADE_VALUE,
+  GAME_FEE_TICK_INTERVAL_MS,
+  GAME_FEE_AMOUNT,
+  GAME_TAX_TICK_INTERVAL_MS,
+  GAME_TAX_AMOUNT,
+  GAME_EVENT_COUNT,
+  GAME_EVENT_MIN_FRACTION,
+  GAME_EVENT_MAX_FRACTION,
+  GAME_EVENT_MIN_AMOUNT,
+  GAME_EVENT_MAX_AMOUNT,
+  GAME_ECONOMY_WORKER_INTERVAL_MS,
   validateGameStartingCash,
   resolveGameStartingCash
 };

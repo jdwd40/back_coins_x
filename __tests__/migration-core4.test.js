@@ -16,16 +16,18 @@ const MIGRATION_011 = '011_create_apocalypse_results.sql';
 const MIGRATION_012 = '012_fractional_round_quantities.sql';
 
 // Simulate the pre-Core-4 production state: Coins schema + data + Core 1/3
-// game tables, but no round-state tables. The Core 6 results table carries a
-// composite FK into apocalypse_participants, so dropping participants CASCADE
-// would silently strip that FK; the simulation removes the Core 6 objects
-// explicitly first, and re-running applies 009 AND 011 in order. Migration
+// game tables, but no round-state tables. The Core 6 results table and the
+// issue #18 cash-event ledger carry composite FKs into
+// apocalypse_participants, so dropping participants CASCADE would silently
+// strip those FKs; the simulation removes the dependent objects explicitly
+// first, and re-running applies 009, 011 AND 016 in order. Migration
 // 012 only ALTERS the two quantity columns (no new tables), so no schema
 // drop is needed for it — its tracking row is removed so the rerun re-applies
 // the DECIMAL(18,2) -> DECIMAL(18,8) widening on the freshly recreated tables.
 async function dropCore4Schema() {
   await db.query('DROP TABLE IF EXISTS apocalypse_results CASCADE');
   await db.query('DROP FUNCTION IF EXISTS apocalypse_results_immutable()');
+  await db.query('DROP TABLE IF EXISTS apocalypse_cash_events CASCADE');
   await db.query('DROP TABLE IF EXISTS apocalypse_transactions CASCADE');
   await db.query('DROP TABLE IF EXISTS apocalypse_holdings CASCADE');
   await db.query('DROP TABLE IF EXISTS apocalypse_participants CASCADE');
@@ -33,11 +35,14 @@ async function dropCore4Schema() {
 
 // Migration 015 (leaderboard_eligible) alters apocalypse_results, which
 // dropCore4Schema drops — its tracking row must be cleared too so
-// runMigrations restores the canonical post-#19 schema.
+// runMigrations restores the canonical post-#19 schema. Migration 016
+// (issue #18 economy) recreates apocalypse_cash_events; its other tables
+// (apocalypse_economy_ticks/events) survive and are shape-verified no-ops.
 const MIGRATION_015 = '015_leaderboard_eligible.sql';
+const MIGRATION_016 = '016_create_apocalypse_economy.sql';
 
 async function dropCore4Tracking() {
-  await db.query('DELETE FROM schema_migrations WHERE migration = ANY($1)', [[MIGRATION_009, MIGRATION_011, MIGRATION_012, MIGRATION_015]]);
+  await db.query('DELETE FROM schema_migrations WHERE migration = ANY($1)', [[MIGRATION_009, MIGRATION_011, MIGRATION_012, MIGRATION_015, MIGRATION_016]]);
 }
 
 describe('Core 4: tracked production migration 009', () => {
@@ -61,7 +66,7 @@ describe('Core 4: tracked production migration 009', () => {
     await dropCore4Tracking();
 
     const result = await runMigrations({ log: () => {} });
-    expect(result.applied).toEqual([MIGRATION_009, MIGRATION_011, MIGRATION_012, MIGRATION_015]); // Core 4, Core 6, 012 widening, #19 eligibility column
+    expect(result.applied).toEqual([MIGRATION_009, MIGRATION_011, MIGRATION_012, MIGRATION_015, MIGRATION_016]); // Core 4, Core 6, 012 widening, #19 eligibility column, #18 economy ledger
 
     const verification = await verifyGameSchema();
     expect(verification.problems).toEqual([]);

@@ -1,11 +1,12 @@
 const { getGameState } = require('../game/gameCycleService');
 const gameRoundService = require('../game/gameRoundService');
 const gameResultsService = require('../game/gameResultsService');
+const economyService = require('../game/economyService');
 
-// Map Core 4/6 domain errors (which carry an explicit status) to responses;
-// anything else falls through to the generic error middleware.
+// Map Core 4/6/economy domain errors (which carry an explicit status) to
+// responses; anything else falls through to the generic error middleware.
 function handleGameError(err, res, next) {
-  if (err && (err.name === 'GameRoundError' || err.name === 'GameResultsError') && err.status) {
+  if (err && (err.name === 'GameRoundError' || err.name === 'GameResultsError' || err.name === 'GameEconomyError') && err.status) {
     return res.status(err.status).json({ status: 'error', message: err.message });
   }
   return next(err);
@@ -104,6 +105,23 @@ exports.getRecentLeaderboards = async (req, res, next) => {
   try {
     const recent = await gameResultsService.getRecentLeaderboards({ limit: req.query.limit });
     res.status(200).json({ status: 'success', data: recent });
+  } catch (err) {
+    handleGameError(err, res, next);
+  }
+};
+
+// Issue #18 / frontend #11: authenticated player-safe view of the caller's
+// current-round Cash plus their recent FEE/TAX/EVENT ledger rows (source
+// type, amount, resulting balance, timestamp, public description). Only
+// EXECUTED debits are returned — the internal future event schedule and the
+// cycle seed are never exposed.
+exports.getMyParticipant = async (req, res, next) => {
+  try {
+    const data = await economyService.getPlayerRoundEconomy({
+      userId: req.user.user_id,
+      limit: req.query.limit
+    });
+    res.status(200).json({ status: 'success', data });
   } catch (err) {
     handleGameError(err, res, next);
   }
