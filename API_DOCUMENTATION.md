@@ -217,3 +217,118 @@ Most endpoints require JWT authentication. Users must first register and then lo
    - New users start with 1000.00 in funds
    - Transaction endpoints validate sufficient funds before processing
    - Funds are automatically updated after buy/sell transactions
+
+## Crypto Chaos Operator Diagnostics (issue #21)
+
+Read-only diagnostics for one Apocalypse cycle (current or completed). All
+three routes are GET-only and run inside a PostgreSQL `BEGIN READ ONLY`
+transaction — they cannot reconcile, settle, roll over or mutate any game
+state, and they never take the game advisory lock.
+
+### Access control
+
+This backend has no admin role, and the player JWT only establishes a
+player identity, so diagnostics are gated by a dedicated operator bearer
+token instead:
+
+- Server env var `GAME_DIAGNOSTICS_TOKEN` (high-entropy secret; never
+  committed, never exposed to the frontend).
+- Send `Authorization: Bearer <token>`.
+- Token unset/blank on the server: every diagnostics route answers
+  `404 { "message": "Route not found" }` (fail closed — the API is
+  indistinguishable from absent).
+- Missing or wrong token: `401 { "msg": "Authentication required" }`
+  (timing-safe comparison).
+
+Nothing internal is ever exposed: no cycle seed, no future (unexecuted)
+collapse/event schedule, no auth data. Only EXECUTED cash-event ledger rows
+are read.
+
+### Cycle selection
+
+All routes accept optional `?cycleId=APOC-NNNN`. Omitted means the current
+cycle: the ACTIVE cycle when one exists, otherwise the most recent cycle of
+any status as persisted (diagnostics never force a rollover). Unknown id:
+404; malformed id: 400.
+
+### GET /api/game/diagnostics/participants
+
+Per-participant summary for the cycle:
+
+```json
+{
+  "status": "success",
+  "data": {
+    "cycleId": "APOC-0007",
+    "status": "ACTIVE",
+    "startTime": "…", "endTime": "…", "settledAt": null,
+    "participantCount": 6,
+    "participants": [
+      {
+        "participantId": 42, "userId": 9, "username": "bot-momentum",
+        "kind": "BOT", "personality": "momentum",
+        "joinedAt": "…",
+        "startingCash": 10000, "currentCash": 9870.5, "finalCash": null,
+        "status": "ACTIVE",
+        "holdings": [{ "coinId": 3, "symbol": "…", "quantity": 12.5 }],
+        "buyCount": 4, "sellCount": 1,
+        "passiveDebitCount": 3, "passiveDebitTotal": 45.75
+      }
+    ]
+  }
+}
+```
+
+`kind` is `HUMAN` or `BOT` (from `users.is_bot`); `personality` is the Core
+5 roster strategy for bots, null for humans. `currentCash`/`finalCash` come
+from the authoritative `apocalypse_participants` row, never from replaying
+any stream. `passiveDebitCount`/`passiveDebitTotal` aggregate the #18
+FEE/TAX/EVENT ledger. Retired coins keep their history readable.
+
+### GET /api/game/diagnostics/activity
+
+Bounded, paginated merged activity stream: BUY/SELL from
+`apocalypse_transactions` plus FEE/TAX/EVENT from `apocalypse_cash_events`.
+
+Query params: `limit` (integer 1–200, default 50), `offset` (integer ≥ 0,
+default 0), `order` (`asc`|`desc`, default `desc` — reverse-chronological).
+Invalid values are a 400, never silently coerced.
+
+Each row: `cycleId`, `source` (`TRADE`|`LEDGER`), `type`
+(`BUY`|`SELL`|`FEE`|`TAX`|`EVENT`), `participantId`, `userId`, `username`,
+`kind`, `amount` (trade total or debit amount), trade-only `coinId`,
+`symbol`, `quantity`, `price`, human-readable `description`, and the
+authoritative `occurredAt` timestamp. The envelope also carries `total`
+(all activity rows in the cycle), `returned`, `limit`, `offset`, `order`.
+Empty cycles return `total: 0, activities: []`.
+
+### GET /api/game/diagnostics/bots
+
+Aggregate bot behaviour for the cycle, from `apocalypse_bot_ticks` (no
+manual JSON parsing required):
+
+```json
+{
+  "status": "success",
+  "data": {
+    "cycleId": "APOC-0007", "status": "ACTIVE",
+    "startTime": "…", "endTime": "…", "settledAt": null,
+    "tickCount": 12, "firstTickAt": "…", "lastTickAt": "…",
+    "actionsRecorded": 48,
+    "executed": { "total": 20, "buy": 14, "sell": 6 },
+    "skipped": { "total": 26, "hold": 10, "byReason": { "hold": 10, "cooldown": 16 } },
+    "rejected": { "total": 2, "byReason": { "Insufficient round holdings.": 2 } },
+    "perBot": [
+      { "botKey": "…", "personality": "momentum", "actions": 12,
+        "executedBuys": 5, "executedSells": 2, "holds": 3,
+        "skipped": 5, "rejected": 0 }
+    ]
+  }
+}
+```
+
+`skipped.byReason` breaks down every skip (`hold`, `cooldown`,
+`max-actions-per-tick`, `min-trade-value`, `trade-size-cap`); `hold` counts
+deliberate HOLD decisions separately. `rejected.total` counts domain
+rejections recorded in the tick ledger, with `rejected.byReason` breaking
+down their (already player-facing) GameRoundError messages.

@@ -9,6 +9,7 @@ const { usersRouter } = require('./routes/users.routes');
 const { transactionsRouter } = require('./routes/transactions.routes');
 const { marketRouter } = require('./routes/market.routes');
 const { gameRouter } = require('./routes/game.routes');
+const { gameDiagnosticsRouter } = require('./routes/gameDiagnostics.routes');
 
 const marketSimulator = require('./models/market-simulator');
 
@@ -66,6 +67,9 @@ app.use('/api/users', usersRouter);
 app.use('/api/transactions', transactionsRouter);
 app.use('/api/market', marketRouter);
 app.use('/api/game', gameRouter);
+// Issue #21: restricted read-only operator diagnostics (token-gated; 404
+// when GAME_DIAGNOSTICS_TOKEN is unset).
+app.use('/api/game/diagnostics', gameDiagnosticsRouter);
 
 // Error handling middleware
 app.use((err, req, res, next) => {
