@@ -31,12 +31,26 @@
 // the PERSISTED apocalypse_bots.last_action_at (never in-memory state), and
 // a maximum number of executed actions per tick. Executed trades stamp
 // last_action_at so the cooldown survives restarts and holds across
-// processes.
+// processes. Issue #20 adds central exit/exposure safeguards (validated in
+// botConfig as phase boundaries + per-personality profiles): every BUY is
+// clamped by the per-coin exposure cap, the personality's invested-fraction
+// cap and minimum cash reserve, and rising public apocalypsePercent drives
+// universal profit-taking/loss-cutting/liquidation pressure.
 
 const crypto = require('crypto');
 const bcrypt = require('bcrypt');
 const db = require('../db/connection');
-const { BOT_ROSTER, BOT_STRATEGIES, resolveBotConfig } = require('./botConfig');
+const {
+  BOT_ROSTER,
+  BOT_STRATEGIES,
+  resolveBotConfig,
+  BOT_MID_PHASE_PERCENT,
+  BOT_LATE_PHASE_PERCENT,
+  BOT_EXTREME_PHASE_PERCENT,
+  BOT_MID_PHASE_INVESTED_SCALE,
+  DEFAULT_BOT_MAX_COIN_EXPOSURE_FRACTION,
+  BOT_PERSONALITY_PROFILES
+} = require('./botConfig');
 const { GAME_MIN_TRADE_VALUE } = require('./gameConstants');
 const gameRoundService = require('./gameRoundService');
 const { reconcileCycle, deriveProgress } = require('./gameCycleService');
@@ -216,10 +230,14 @@ async function buildPublicMarketState({ cycle, participant, now = new Date(), qu
 
 // ---------------------------------------------------------------------------
 // Pure decision layer. Deterministic given (strategy, shaped state, random,
-// maxTradeSize). Every BUY is constructed so quantity * price can never
-// exceed cash NOR the configured per-trade size cap; every SELL so quantity
-// can never exceed the actual holding; collapsed or zero-priced coins are
-// never bought. Returns { type, coinId?, quantity? }.
+// maxTradeSize, maxCoinExposureFraction). Every BUY is constructed so
+// quantity * price can never exceed cash NOR the configured per-trade size
+// cap NOR the central exposure safeguards (per-coin exposure, invested
+// fraction, minimum cash reserve); every SELL so quantity can never exceed
+// the actual holding; collapsed or zero-priced coins are never bought. As
+// public apocalypsePercent rises, every personality progressively prefers
+// Cash over open positions (issue #20). Returns
+// { type, coinId?, quantity?, reason? } — reason explains HOLDs.
 // ---------------------------------------------------------------------------
 function validateMarketState(marketState) {
   if (!marketState || typeof marketState !== 'object') {
@@ -249,6 +267,21 @@ function recentChange(coin) {
   return (last - first) / first;
 }
 
+// Short-window relative change over the most recent `window` public history
+// points — the reachable trend signal Momentum Mike trades on. A grinding
+// market-wide decline rarely produces a positive FULL-window change (which
+// is why the old momentum entry almost never fired in production); the
+// recent window reacts to genuine short-term moves instead.
+function shortMomentum(coin, window = 4) {
+  const history = coin.history;
+  if (!Array.isArray(history) || history.length < 2) return 0;
+  const slice = history.slice(-Math.min(window, history.length));
+  const first = slice[0];
+  const last = slice[slice.length - 1];
+  if (!(first > 0)) return 0;
+  return (last - first) / first;
+}
+
 // Recent relative change for a held position, looked up in the public coin
 // state by coinId (0 when the coin has no usable history).
 function holdingChange(marketState, holding) {
@@ -256,10 +289,41 @@ function holdingChange(marketState, holding) {
   return coin ? recentChange(coin) : 0;
 }
 
-// A bounded sell of a held position: never more than the actual holding.
+// The universal liquidation-pressure phase, derived ONLY from public
+// Apocalypse progress. No collapse-schedule knowledge is involved: the same
+// shaped state at a higher apocalypsePercent simply prefers Cash more.
+function liquidationPhase(apocalypsePercent) {
+  if (apocalypsePercent >= BOT_EXTREME_PHASE_PERCENT) return 'extreme';
+  if (apocalypsePercent >= BOT_LATE_PHASE_PERCENT) return 'late';
+  if (apocalypsePercent >= BOT_MID_PHASE_PERCENT) return 'mid';
+  return 'early';
+}
+
+// Value the bot's portfolio from the shaped public state. Collapsed or
+// zero-priced coins are worth £0 (dead) and can never recover cash.
+function portfolioSnapshot(marketState) {
+  const cash = Math.max(0, marketState.cash);
+  const livePriceOf = (coinId) => {
+    const coin = marketState.coins.find((c) => c.coinId === coinId);
+    return coin && coin.collapsed !== true && coin.currentPrice > 0 ? coin.currentPrice : 0;
+  };
+  const holdings = marketState.holdings
+    .filter((h) => h.quantity > 0)
+    .map((holding) => {
+      const price = livePriceOf(holding.coinId);
+      return { holding, price, value: round2(holding.quantity * price) };
+    });
+  const investedValue = round2(holdings.reduce((sum, entry) => sum + entry.value, 0));
+  return { cash, holdings, investedValue, wealth: round2(cash + investedValue) };
+}
+
+// A bounded sell of a held position: never more than the actual holding. A
+// full exit sells the EXACT (fractional) holding — rounding an 8-decimal
+// quantity UP to 2dp would oversell and be rejected by the shared service,
+// which is the last thing an endgame liquidation should do.
 function boundedSell(holding, fraction) {
-  const quantity = fraction >= 1 ? round2(holding.quantity) : floor2(holding.quantity * fraction);
-  if (quantity <= 0) return { type: 'HOLD' };
+  const quantity = fraction >= 1 ? holding.quantity : floor2(holding.quantity * fraction);
+  if (!(quantity > 0)) return { type: 'HOLD' };
   return { type: 'SELL', coinId: holding.coinId, quantity };
 }
 
@@ -271,6 +335,31 @@ function spendFor(cash, fraction, maxTradeSize) {
   return round2(Math.max(0, Math.min(capped, cash)));
 }
 
+// Issue #20 central exposure safeguards, applied to EVERY bot BUY in one
+// place. A proposed spend is clamped so that after the trade:
+//   * cash stays at or above the personality's minimum reserve
+//     (minCashReserveFraction of total wealth);
+//   * total invested value stays at or below the personality's invested cap
+//     (maxInvestedFraction of wealth, scaled down in the mid phase);
+//   * the target coin stays at or below the central per-coin exposure cap
+//     (maxCoinExposureFraction of wealth).
+// Returns the clamped spend, or null when the rules leave nothing to buy
+// with — repeated BUY decisions can never violate these rules.
+function clampBuySpend({ spend, coinId, snapshot, profile, maxCoinExposureFraction, investedCapScale }) {
+  const { cash, wealth, investedValue } = snapshot;
+  if (!(wealth > 0) || !(spend > 0)) return null;
+  const coinEntry = snapshot.holdings.find((e) => e.holding.coinId === coinId);
+  const coinValue = coinEntry ? coinEntry.value : 0;
+  const allowed = Math.min(
+    spend,
+    cash - profile.minCashReserveFraction * wealth,
+    profile.maxInvestedFraction * investedCapScale * wealth - investedValue,
+    maxCoinExposureFraction * wealth - coinValue
+  );
+  if (!(allowed > 0)) return null;
+  return round2(allowed);
+}
+
 // Construct a bounded BUY for `coin`: floor-quantized so the total can never
 // exceed `spend` (itself a capped fraction of cash). Returns HOLD when
 // unaffordable.
@@ -280,21 +369,58 @@ function boundedBuy(coin, spend) {
   return { type: 'BUY', coinId: coin.coinId, quantity };
 }
 
-// The canonical Core 5 personalities. Each is REQUIRED to be observably,
-// deterministically distinct:
-//   conservative — small stakes, acts less often, preserves cash, and sells
-//                  defensively once a holding declines meaningfully.
-//   momentum     — buys into a rising coin, and reduces a position after a
-//                  negative move.
-//   dip_buyer    — buys a meaningfully dropped coin that is still alive, and
-//                  sells into a meaningful recovery.
-//   reckless     — aggressive: a large stake on a deterministically chosen
-//                  eligible coin whenever cash remains.
-const CONSERVATIVE_DECLINE_THRESHOLD = -0.05; // defensive sell trigger
-const DIP_MEANINGFUL_DROP = -0.10; // dip-buyer entry threshold
-const DIP_RECOVERY_THRESHOLD = 0.10; // dip-buyer exit threshold
+// The worst-performing LIVE holding (lowest public full-window change,
+// deterministic coinId tie-break). Dead holdings are excluded: a collapsed
+// coin is worth £0 and selling it recovers no cash.
+function worstLiveHolding(marketState, snapshot) {
+  const ranked = snapshot.holdings
+    .filter((entry) => entry.price > 0)
+    .map((entry) => ({ entry, change: holdingChange(marketState, entry.holding) }))
+    .sort((a, b) => a.change - b.change || a.entry.holding.coinId - b.entry.holding.coinId);
+  return ranked.length > 0 ? ranked[0].entry : null;
+}
 
-function decideBotAction({ strategy, marketState, random, maxTradeSize = Infinity }) {
+// A personality BUY guarded by the central exposure safeguards: clamps the
+// desired stake and degrades to an explained HOLD when the rules leave
+// nothing to buy with.
+function guardedBuy({ coin, snapshot, profile, maxTradeSize, maxCoinExposureFraction, investedCapScale }) {
+  const desired = spendFor(snapshot.cash, profile.stakeFraction, maxTradeSize);
+  const spend = clampBuySpend({
+    spend: desired,
+    coinId: coin.coinId,
+    snapshot,
+    profile,
+    maxCoinExposureFraction,
+    investedCapScale
+  });
+  if (spend === null) return { type: 'HOLD', reason: 'exposure-limits' };
+  const buy = boundedBuy(coin, spend);
+  if (buy.type === 'HOLD') return { type: 'HOLD', reason: 'exposure-limits' };
+  return buy;
+}
+
+// The canonical Core 5 personalities, extended for issue #20 with real exit
+// strategies under shared, central exposure safeguards. Each personality is
+// REQUIRED to be observably, deterministically distinct — and each now has
+// reachable SELL behaviour (profit-taking AND loss-cutting):
+//   conservative — small stakes, acts less often, preserves cash, takes
+//                  modest profits early, dumps meaningful decliners in full,
+//                  and holds the strongest late-game cash target.
+//   momentum     — buys reachable positive SHORT-window momentum, halves a
+//                  position whose trend reverses, takes profit on solid
+//                  full-window gains.
+//   dip_buyer    — buys a meaningfully dropped coin that is still alive,
+//                  sells into a meaningful recovery, and cuts a dip that
+//                  keeps collapsing instead of averaging down forever.
+//   reckless     — aggressive large stakes, but locks big wins, panic-cuts
+//                  deep losses, and is capped so it cannot buy down to ~£0.
+function decideBotAction({
+  strategy,
+  marketState,
+  random,
+  maxTradeSize = Infinity,
+  maxCoinExposureFraction = DEFAULT_BOT_MAX_COIN_EXPOSURE_FRACTION
+}) {
   if (!BOT_STRATEGIES.includes(strategy)) {
     throw new BotServiceError(`unknown bot strategy ${JSON.stringify(strategy)}`, 400);
   }
@@ -302,75 +428,146 @@ function decideBotAction({ strategy, marketState, random, maxTradeSize = Infinit
   if (typeof random !== 'function') {
     throw new BotServiceError('bot decision requires a random function', 400);
   }
+  const profile = BOT_PERSONALITY_PROFILES[strategy];
 
   const alive = marketState.coins.filter((c) => c.collapsed !== true && c.currentPrice > 0);
-  const cash = Math.max(0, marketState.cash);
-  const holdings = marketState.holdings.filter((h) => h.quantity > 0);
+  const snapshot = portfolioSnapshot(marketState);
+  const phase = liquidationPhase(marketState.apocalypsePercent);
+
+  // Universal endgame pressure. As public Apocalypse progress rises, every
+  // personality progressively prefers Cash over open positions — without
+  // any knowledge of the future collapse schedule.
+  if (phase === 'extreme') {
+    // Aggressively liquidate surviving holdings before collapse/settlement.
+    const worst = worstLiveHolding(marketState, snapshot);
+    if (worst) return boundedSell(worst.holding, 1);
+    return { type: 'HOLD', reason: 'extreme-no-live-holdings' };
+  }
+  if (phase === 'late') {
+    // Reduce exposure toward the personality's late-game cash target; no
+    // new positions are opened this close to the end.
+    const cashFraction = snapshot.wealth > 0 ? snapshot.cash / snapshot.wealth : 1;
+    const worst = worstLiveHolding(marketState, snapshot);
+    if (worst && cashFraction < profile.lateCashTargetFraction) {
+      return boundedSell(worst.holding, profile.lateSellFraction);
+    }
+    return { type: 'HOLD', reason: 'late-cash-target-met' };
+  }
+
+  // Early/mid phases: normal personality strategy. The mid phase still
+  // trades, but the invested-fraction cap is scaled down so exposure starts
+  // shrinking before the late phase forbids new entries entirely.
+  const investedCapScale = phase === 'mid' ? BOT_MID_PHASE_INVESTED_SCALE : 1;
+
+  // Ranked live holdings with their public full-window change.
+  const rankedHoldings = snapshot.holdings
+    .filter((entry) => entry.price > 0)
+    .map((entry) => ({ entry, change: holdingChange(marketState, entry.holding) }));
 
   switch (strategy) {
     case 'conservative': {
-      // Defensive first: dump the worst-declining holding in full once its
-      // public history shows a meaningful decline.
-      const declining = holdings
-        .map((holding) => ({ holding, change: holdingChange(marketState, holding) }))
-        .filter((entry) => entry.change <= CONSERVATIVE_DECLINE_THRESHOLD)
-        .sort((a, b) => a.change - b.change || a.holding.coinId - b.holding.coinId);
+      // Capital preservation first: dump the worst meaningful decliner in
+      // full, then take a modest profit on the best gainer.
+      const declining = rankedHoldings
+        .filter((e) => e.change <= profile.lossCutThreshold)
+        .sort((a, b) => a.change - b.change || a.entry.holding.coinId - b.entry.holding.coinId);
       if (declining.length > 0) {
-        return boundedSell(declining[0].holding, 1);
+        return boundedSell(declining[0].entry.holding, profile.lossSellFraction);
+      }
+      const gainers = rankedHoldings
+        .filter((e) => e.change >= profile.profitTakeThreshold)
+        .sort((a, b) => b.change - a.change || a.entry.holding.coinId - b.entry.holding.coinId);
+      if (gainers.length > 0) {
+        return boundedSell(gainers[0].entry.holding, profile.profitSellFraction);
       }
       // Preserve cash: act less often, and only with a SMALL stake on the
       // most stable surviving coin.
       if (alive.length === 0) return { type: 'HOLD' };
-      if (random() >= 0.5) return { type: 'HOLD' };
+      if (random() >= profile.activityGate) return { type: 'HOLD' };
       const stable = alive
         .map((coin) => ({ coin, change: Math.abs(recentChange(coin)) }))
         .sort((a, b) => a.change - b.change || a.coin.coinId - b.coin.coinId)[0].coin;
-      return boundedBuy(stable, spendFor(cash, 0.05, maxTradeSize));
+      return guardedBuy({ coin: stable, snapshot, profile, maxTradeSize, maxCoinExposureFraction, investedCapScale });
     }
     case 'momentum': {
-      // Reduce after a negative move: halve the worst-performing holding.
-      const losers = holdings
-        .map((holding) => ({ holding, change: holdingChange(marketState, holding) }))
-        .filter((entry) => entry.change < 0)
-        .sort((a, b) => a.change - b.change || a.holding.coinId - b.holding.coinId);
-      if (losers.length > 0) {
-        return boundedSell(losers[0].holding, 0.5);
+      // Trend reversal first: halve the holding whose SHORT-window momentum
+      // has turned negative (weakest trend first).
+      const reversed = rankedHoldings
+        .map((e) => {
+          const coin = marketState.coins.find((c) => c.coinId === e.entry.holding.coinId);
+          return { ...e, momentum: coin ? shortMomentum(coin, profile.momentumWindow) : 0 };
+        })
+        .filter((e) => e.momentum < 0)
+        .sort((a, b) => a.momentum - b.momentum || a.entry.holding.coinId - b.entry.holding.coinId);
+      if (reversed.length > 0) {
+        return boundedSell(reversed[0].entry.holding, profile.reversalSellFraction);
+      }
+      // Then take profit on a solid full-window gain rather than holding
+      // indefinitely.
+      const gainers = rankedHoldings
+        .filter((e) => e.change >= profile.profitTakeThreshold)
+        .sort((a, b) => b.change - a.change || a.entry.holding.coinId - b.entry.holding.coinId);
+      if (gainers.length > 0) {
+        return boundedSell(gainers[0].entry.holding, profile.profitSellFraction);
       }
       if (alive.length === 0) return { type: 'HOLD' };
-      // Chase the strongest recent riser. Deterministic tie-break by coinId;
-      // the seeded random only chooses among the top risers.
+      // Chase the strongest recent riser — reachable by design (short
+      // window, low entry bar). Deterministic tie-break by coinId; the
+      // seeded random only chooses among the top risers.
       const risers = alive
-        .map((coin) => ({ coin, change: recentChange(coin) }))
-        .filter((entry) => entry.change > 0)
-        .sort((a, b) => b.change - a.change || a.coin.coinId - b.coin.coinId);
+        .map((coin) => ({ coin, momentum: shortMomentum(coin, profile.momentumWindow) }))
+        .filter((entry) => entry.momentum >= profile.momentumEntryThreshold)
+        .sort((a, b) => b.momentum - a.momentum || a.coin.coinId - b.coin.coinId);
       if (risers.length === 0) return { type: 'HOLD' };
       const pick = risers[Math.floor(random() * Math.min(2, risers.length))].coin;
-      return boundedBuy(pick, spendFor(cash, 0.10, maxTradeSize));
+      return guardedBuy({ coin: pick, snapshot, profile, maxTradeSize, maxCoinExposureFraction, investedCapScale });
     }
     case 'dip_buyer': {
-      // Sell into a meaningful recovery on a held position.
-      const recovered = holdings
-        .map((holding) => ({ holding, change: holdingChange(marketState, holding) }))
-        .filter((entry) => entry.change >= DIP_RECOVERY_THRESHOLD)
-        .sort((a, b) => b.change - a.change || a.holding.coinId - b.holding.coinId);
+      // Sell into a meaningful recovery on a held position (best first).
+      const recovered = rankedHoldings
+        .filter((e) => e.change >= profile.recoveryExitThreshold)
+        .sort((a, b) => b.change - a.change || a.entry.holding.coinId - b.entry.holding.coinId);
       if (recovered.length > 0) {
-        return boundedSell(recovered[0].holding, 1);
+        return boundedSell(recovered[0].entry.holding, 1);
+      }
+      // Cut a dip that keeps collapsing instead of averaging down forever.
+      const collapsing = rankedHoldings
+        .filter((e) => e.change <= profile.lossCutThreshold)
+        .sort((a, b) => a.change - b.change || a.entry.holding.coinId - b.entry.holding.coinId);
+      if (collapsing.length > 0) {
+        return boundedSell(collapsing[0].entry.holding, profile.lossSellFraction);
       }
       if (alive.length === 0) return { type: 'HOLD' };
       // Buy the deepest MEANINGFUL drop among coins that are still alive.
+      // The central exposure caps stop repeated dip buys from consuming
+      // nearly all cash without an exit.
       const dropped = alive
         .map((coin) => ({ coin, change: recentChange(coin) }))
-        .filter((entry) => entry.change <= DIP_MEANINGFUL_DROP)
+        .filter((entry) => entry.change <= profile.dipEntryThreshold)
         .sort((a, b) => a.change - b.change || a.coin.coinId - b.coin.coinId);
       if (dropped.length === 0) return { type: 'HOLD' };
-      return boundedBuy(dropped[0].coin, spendFor(cash, 0.15, maxTradeSize));
+      return guardedBuy({ coin: dropped[0].coin, snapshot, profile, maxTradeSize, maxCoinExposureFraction, investedCapScale });
     }
     case 'reckless': {
-      // Aggressive: always buys a LARGE stake on a deterministically chosen
-      // eligible (alive, positive-priced) coin whenever cash remains.
+      // Lock a big speculative win (best gainer first), then panic-cut a
+      // deep loser. Otherwise: a large stake on a deterministically chosen
+      // eligible coin, bounded by the central caps so endless buying can no
+      // longer spend the bankroll down toward £0.
+      const winners = rankedHoldings
+        .filter((e) => e.change >= profile.profitTakeThreshold)
+        .sort((a, b) => b.change - a.change || a.entry.holding.coinId - b.entry.holding.coinId);
+      if (winners.length > 0) {
+        return boundedSell(winners[0].entry.holding, profile.profitSellFraction);
+      }
+      const deepLosers = rankedHoldings
+        .filter((e) => e.change <= profile.lossCutThreshold)
+        .sort((a, b) => a.change - b.change || a.entry.holding.coinId - b.entry.holding.coinId);
+      if (deepLosers.length > 0) {
+        return boundedSell(deepLosers[0].entry.holding, profile.lossSellFraction);
+      }
       if (alive.length === 0) return { type: 'HOLD' };
       const pick = alive[Math.floor(random() * alive.length)];
-      return boundedBuy(pick, spendFor(cash, 0.40, maxTradeSize));
+      return guardedBuy({ coin: pick, snapshot, profile, maxTradeSize, maxCoinExposureFraction, investedCapScale });
     }
     default:
       // Unreachable: strategy validated above.
@@ -512,7 +709,8 @@ async function runBotTick({ tickId: rawTickId, now = new Date() } = {}) {
         strategy: bot.strategy,
         marketState,
         random,
-        maxTradeSize: config.maxTradeSize
+        maxTradeSize: config.maxTradeSize,
+        maxCoinExposureFraction: config.maxCoinExposureFraction
       });
       // Authoritative per-trade size-cap enforcement at the service layer,
       // immediately before the shared trade call. The minimum-notional rule
@@ -593,6 +791,10 @@ module.exports = {
   createBotRandom,
   ensureBotsProvisioned,
   buildPublicMarketState,
+  liquidationPhase,
+  shortMomentum,
+  portfolioSnapshot,
+  clampBuySpend,
   decideBotAction,
   enforceTradeSizeCap,
   enforceMinTradeValue,

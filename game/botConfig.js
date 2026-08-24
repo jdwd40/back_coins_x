@@ -251,6 +251,183 @@ function validateBotsEnabled(raw) {
   throw new Error(`GAME_BOTS_ENABLED must be "true" or "false"; received ${JSON.stringify(raw)}`);
 }
 
+// ---------------------------------------------------------------------------
+// Issue #20: centralized exit strategy + exposure safeguards.
+//
+// These are the single authoritative game-design values for HOW bots exit
+// positions and how much exposure they may carry — do not scatter literals.
+// Everything here is a function of PUBLIC information only (apocalypse
+// progress, live prices, public price history, the bot's own cash/holdings);
+// nothing here can see the collapse schedule.
+// ---------------------------------------------------------------------------
+
+// Universal liquidation-pressure phases, keyed ONLY off public Apocalypse
+// progress (apocalypsePercent). The same boundaries apply to every
+// personality; the profiles below decide how strongly each one reacts.
+const BOT_MID_PHASE_PERCENT = 40; // below: normal personality strategy
+const BOT_LATE_PHASE_PERCENT = 70; // mid: profit-taking/cut weak positions
+const BOT_EXTREME_PHASE_PERCENT = 90; // late: reduce exposure; extreme: liquidate
+
+// In the mid phase, new BUYs still happen but the personality's invested
+// fraction cap is scaled down by this factor (exposure starts shrinking
+// before the late phase forbids new entries entirely).
+const BOT_MID_PHASE_INVESTED_SCALE = 0.5;
+
+// Central exposure safeguard: no single coin may exceed this fraction of the
+// bot's total round wealth (cash + live holdings value). Validated and
+// env-overridable like every other runtime knob.
+const DEFAULT_BOT_MAX_COIN_EXPOSURE_FRACTION = 0.5;
+const MIN_BOT_MAX_COIN_EXPOSURE_FRACTION = 0.01;
+const MAX_BOT_MAX_COIN_EXPOSURE_FRACTION = 1;
+
+// The canonical personality trading profiles. Every strategy of the
+// canonical roster has exactly one profile; the profiles are what keep the
+// personalities observably distinct under the shared phase rules.
+//   stakeFraction           — BUY size as a fraction of current cash
+//   maxInvestedFraction     — total holdings value cap, as a fraction of wealth
+//   minCashReserveFraction  — cash floor, as a fraction of wealth
+//   profitTakeThreshold     — relative gain that triggers profit-taking
+//   profitSellFraction      — fraction of the position sold on profit-taking
+//   lossCutThreshold        — relative decline that triggers loss-cutting
+//   lossSellFraction        — fraction of the position sold on loss-cutting
+//   lateCashTargetFraction  — late-phase cash target, as a fraction of wealth
+//   lateSellFraction        — fraction of the worst position sold per late tick
+// Plus personality-specific entries documented inline.
+const BOT_PERSONALITY_PROFILES = Object.freeze({
+  // Conservative Carl: preserve capital. Small stakes, a high cash reserve,
+  // quick modest profit-taking, fast full loss-cutting, and the strongest
+  // late-game cash target of the roster.
+  conservative: Object.freeze({
+    stakeFraction: 0.05,
+    activityGate: 0.5, // only acts when the seeded random lands below this
+    maxInvestedFraction: 0.4,
+    minCashReserveFraction: 0.3,
+    profitTakeThreshold: 0.08,
+    profitSellFraction: 0.5,
+    lossCutThreshold: -0.05,
+    lossSellFraction: 1,
+    lateCashTargetFraction: 0.7,
+    lateSellFraction: 1
+  }),
+  // Momentum Mike: trades the short-term trend. Buys reachable positive
+  // short-window momentum, halves a position whose momentum reverses, takes
+  // profit on solid full-window gains.
+  momentum: Object.freeze({
+    stakeFraction: 0.1,
+    momentumWindow: 4, // recent history points the trend is measured over
+    momentumEntryThreshold: 0.01, // deliberately reachable entry bar
+    maxInvestedFraction: 0.6,
+    minCashReserveFraction: 0.1,
+    profitTakeThreshold: 0.12,
+    profitSellFraction: 0.5,
+    reversalSellFraction: 0.5, // sell fraction when a holding's trend reverses
+    lateCashTargetFraction: 0.5,
+    lateSellFraction: 0.5
+  }),
+  // Dip Buyer Dana: buys meaningful dips, sells meaningful recoveries, cuts
+  // a dip that keeps collapsing instead of averaging down forever, and is
+  // exposure-capped so repeated dip buys cannot consume nearly all cash.
+  dip_buyer: Object.freeze({
+    stakeFraction: 0.15,
+    dipEntryThreshold: -0.1,
+    recoveryExitThreshold: 0.1,
+    maxInvestedFraction: 0.6,
+    minCashReserveFraction: 0.15,
+    lossCutThreshold: -0.25,
+    lossSellFraction: 1,
+    lateCashTargetFraction: 0.5,
+    lateSellFraction: 0.5
+  }),
+  // Reckless Ray: still the aggressor — the largest stakes and the highest
+  // invested cap — but locks big wins, panic-cuts only deep losses, and the
+  // invested cap + cash reserve mean he can no longer buy down toward £0.
+  reckless: Object.freeze({
+    stakeFraction: 0.4,
+    maxInvestedFraction: 0.8,
+    minCashReserveFraction: 0.02,
+    profitTakeThreshold: 0.3,
+    profitSellFraction: 0.5,
+    lossCutThreshold: -0.5,
+    lossSellFraction: 1,
+    lateCashTargetFraction: 0.3,
+    lateSellFraction: 0.5
+  })
+});
+
+// Validate the personality profiles. Called at module load: a malformed
+// profile is a build-time bug, so it throws immediately. Every canonical
+// strategy must have exactly one profile; each field is checked against its
+// own range (fractions in (0, 1], signed thresholds, positive integers).
+function validateBotPersonalityProfiles(profiles = BOT_PERSONALITY_PROFILES) {
+  // field -> [strategies that require it, range checker]
+  const isFraction = (v) => typeof v === 'number' && Number.isFinite(v) && v > 0 && v <= 1;
+  const isFiniteNumber = (v) => typeof v === 'number' && Number.isFinite(v);
+  const isPositiveInteger = (v) => Number.isInteger(v) && v > 0;
+  const REQUIREMENTS = [
+    ['stakeFraction', BOT_STRATEGIES, isFraction],
+    ['maxInvestedFraction', BOT_STRATEGIES, isFraction],
+    ['minCashReserveFraction', BOT_STRATEGIES, isFraction],
+    ['profitTakeThreshold', ['conservative', 'momentum', 'reckless'], (v) => isFiniteNumber(v) && v > 0],
+    ['profitSellFraction', ['conservative', 'momentum', 'reckless'], isFraction],
+    ['lateCashTargetFraction', BOT_STRATEGIES, isFraction],
+    ['lateSellFraction', BOT_STRATEGIES, isFraction],
+    ['lossCutThreshold', ['conservative', 'dip_buyer', 'reckless'], (v) => isFiniteNumber(v) && v < 0],
+    ['lossSellFraction', ['conservative', 'dip_buyer', 'reckless'], isFraction],
+    ['activityGate', ['conservative'], isFraction],
+    ['momentumWindow', ['momentum'], isPositiveInteger],
+    ['momentumEntryThreshold', ['momentum'], (v) => isFiniteNumber(v) && v > 0],
+    ['reversalSellFraction', ['momentum'], isFraction],
+    ['dipEntryThreshold', ['dip_buyer'], (v) => isFiniteNumber(v) && v < 0],
+    ['recoveryExitThreshold', ['dip_buyer'], (v) => isFiniteNumber(v) && v > 0]
+  ];
+  for (const strategy of BOT_STRATEGIES) {
+    const profile = profiles[strategy];
+    if (!profile || typeof profile !== 'object') {
+      throw new Error(`BOT_PERSONALITY_PROFILES is missing a profile for strategy ${strategy}`);
+    }
+    for (const [field, strategies, check] of REQUIREMENTS) {
+      if (!strategies.includes(strategy)) continue;
+      if (!check(profile[field])) {
+        throw new Error(
+          `BOT_PERSONALITY_PROFILES.${strategy}.${field} is missing or out of range; received ${String(profile[field])}`
+        );
+      }
+    }
+  }
+  return profiles;
+}
+
+// Validate the central per-coin exposure cap: a finite fraction in (0, 1].
+function validateBotMaxCoinExposureFraction(raw) {
+  if (raw === undefined || raw === null) return DEFAULT_BOT_MAX_COIN_EXPOSURE_FRACTION;
+  if (typeof raw === 'string' && raw.trim() === '') return DEFAULT_BOT_MAX_COIN_EXPOSURE_FRACTION;
+
+  let value = raw;
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim();
+    if (!/^[+-]?(\d+(\.\d+)?|\.\d+)$/.test(trimmed)) {
+      throw new Error(
+        `GAME_BOT_MAX_COIN_EXPOSURE_FRACTION must be a numeric fraction; received ${JSON.stringify(raw)}`
+      );
+    }
+    value = Number(trimmed);
+  }
+  if (typeof value !== 'number' || Number.isNaN(value) || !Number.isFinite(value)) {
+    throw new Error(`GAME_BOT_MAX_COIN_EXPOSURE_FRACTION must be finite; received ${String(raw)}`);
+  }
+  if (value < MIN_BOT_MAX_COIN_EXPOSURE_FRACTION) {
+    throw new Error(
+      `GAME_BOT_MAX_COIN_EXPOSURE_FRACTION ${value} is below the minimum of ${MIN_BOT_MAX_COIN_EXPOSURE_FRACTION}`
+    );
+  }
+  if (value > MAX_BOT_MAX_COIN_EXPOSURE_FRACTION) {
+    throw new Error(
+      `GAME_BOT_MAX_COIN_EXPOSURE_FRACTION ${value} exceeds the maximum of ${MAX_BOT_MAX_COIN_EXPOSURE_FRACTION}`
+    );
+  }
+  return value;
+}
+
 // Resolve the effective bot runtime config. Validation runs on every
 // resolution, so a bad config throws before any tick can run on it.
 function resolveBotConfig(env = process.env) {
@@ -259,17 +436,31 @@ function resolveBotConfig(env = process.env) {
     tickIntervalMs: validateBotTickIntervalMs(env.GAME_BOT_TICK_INTERVAL_MS),
     maxTradeSize: validateBotMaxTradeSize(env.GAME_BOT_MAX_TRADE_SIZE),
     cooldownMs: validateBotCooldownMs(env.GAME_BOT_COOLDOWN_MS),
-    maxActionsPerTick: validateBotMaxActionsPerTick(env.GAME_BOT_MAX_ACTIONS_PER_TICK)
+    maxActionsPerTick: validateBotMaxActionsPerTick(env.GAME_BOT_MAX_ACTIONS_PER_TICK),
+    maxCoinExposureFraction: validateBotMaxCoinExposureFraction(env.GAME_BOT_MAX_COIN_EXPOSURE_FRACTION)
   };
 }
 
 // Module-load roster validation: a malformed roster can never reach a tick.
 validateBotRoster();
+// Module-load profile validation: a malformed exit/exposure profile can
+// never reach a decision either.
+validateBotPersonalityProfiles();
 
 module.exports = {
   BOT_STRATEGIES,
   BOT_ROSTER,
   validateBotRoster,
+  BOT_MID_PHASE_PERCENT,
+  BOT_LATE_PHASE_PERCENT,
+  BOT_EXTREME_PHASE_PERCENT,
+  BOT_MID_PHASE_INVESTED_SCALE,
+  DEFAULT_BOT_MAX_COIN_EXPOSURE_FRACTION,
+  MIN_BOT_MAX_COIN_EXPOSURE_FRACTION,
+  MAX_BOT_MAX_COIN_EXPOSURE_FRACTION,
+  BOT_PERSONALITY_PROFILES,
+  validateBotPersonalityProfiles,
+  validateBotMaxCoinExposureFraction,
   DEFAULT_BOT_TICK_INTERVAL_MS,
   MIN_BOT_TICK_INTERVAL_MS,
   MAX_BOT_TICK_INTERVAL_MS,

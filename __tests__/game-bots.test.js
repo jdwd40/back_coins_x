@@ -277,10 +277,18 @@ describe('Core 5: deterministic decisions from public state only', () => {
     const holding = shapedState({ holdings: [{ coinId: 2, symbol: 'BBB', quantity: 4 }] });
     const sell = botService.decideBotAction({ strategy: 'conservative', marketState: holding, random: () => 0.1 });
     expect(sell).toEqual({ type: 'SELL', coinId: 2, quantity: 4 });
-    // A holding that has NOT declined is preserved, not sold.
-    const calm = shapedState({ holdings: [{ coinId: 1, symbol: 'AAA', quantity: 4 }] });
-    expect(botService.decideBotAction({ strategy: 'conservative', marketState: calm, random: () => 0.1 }).type)
-      .not.toBe('SELL');
+    // Issue #20: a holding with a modest gain is SOLD (half) to take profit —
+    // capital preservation now includes realizing gains, not just avoiding
+    // losses. A small move below the profit bar is still preserved.
+    const gainer = shapedState({ holdings: [{ coinId: 1, symbol: 'AAA', quantity: 4 }] });
+    const profit = botService.decideBotAction({ strategy: 'conservative', marketState: gainer, random: () => 0.1 });
+    expect(profit).toEqual({ type: 'SELL', coinId: 1, quantity: 2 }); // +100% >= +8% bar, sell half
+    const flat = shapedState({
+      coins: [{ coinId: 5, symbol: 'EEE', currentPrice: 10.4, collapsed: false, history: [10, 10.4] }],
+      holdings: [{ coinId: 5, symbol: 'EEE', quantity: 4 }]
+    });
+    expect(botService.decideBotAction({ strategy: 'conservative', marketState: flat, random: () => 0.1 }).type)
+      .not.toBe('SELL'); // +4% is below both the +8% profit bar and the -5% loss bar
   });
 
   test('momentum: chooses the rising coin, reduces a position after a negative move', () => {
