@@ -560,6 +560,8 @@ const EXPECTED_PARTICIPANT_COLUMNS = [
   ['peak_wealth', 'numeric', 'NO'],
   ['status', 'character varying', 'NO'],
   ['final_cash', 'numeric', 'YES'],
+  ['power', 'integer', 'NO'],
+  ['power_updated_at', 'timestamp with time zone', 'NO'],
   ['created_at', 'timestamp with time zone', 'NO'],
   ['updated_at', 'timestamp with time zone', 'NO']
 ];
@@ -571,6 +573,7 @@ const EXPECTED_HOLDING_COLUMNS = [
   ['user_id', 'integer', 'NO'],
   ['coin_id', 'integer', 'NO'],
   ['quantity', 'numeric', 'NO'],
+  ['cost_basis', 'numeric', 'NO'],
   ['created_at', 'timestamp with time zone', 'NO'],
   ['updated_at', 'timestamp with time zone', 'NO']
 ];
@@ -599,10 +602,11 @@ async function verifyRoundState(q, problems) {
       { label: 'starting_cash > 0', pattern: 'starting_cash > \\(??0' },
       { label: 'current_cash >= 0', pattern: 'current_cash >= \\(??0' },
       { label: 'peak_wealth >= 0', pattern: 'peak_wealth >= \\(??0' },
+      { label: 'power >= 0', pattern: 'power >= \\(??0' },
       { label: "status IN ('ACTIVE', 'FINALIZED')", pattern: 'ACTIVE.*FINALIZED' },
       { label: 'final_cash consistency with status', pattern: 'final_cash IS NULL.*FINALIZED' }
     ],
-    nowDefaults: ['joined_at', 'created_at', 'updated_at']
+    nowDefaults: ['joined_at', 'power_updated_at', 'created_at', 'updated_at']
   });
 
   await verifyCore4Table(q, problems, 'apocalypse_holdings', 'holding_id', EXPECTED_HOLDING_COLUMNS, {
@@ -611,7 +615,10 @@ async function verifyRoundState(q, problems) {
       { target: 'apocalypse_participants', pattern: '^FOREIGN KEY \\(participant_id, cycle_id, user_id\\)' },
       { target: 'coins', pattern: '^FOREIGN KEY \\(coin_id\\)' }
     ],
-    checks: [{ label: 'quantity >= 0', pattern: 'quantity >= \\(??0' }]
+    checks: [
+      { label: 'quantity >= 0', pattern: 'quantity >= \\(??0' },
+      { label: 'cost_basis >= 0', pattern: 'cost_basis >= \\(??0' }
+    ]
   });
 
   await verifyCore4Table(q, problems, 'apocalypse_transactions', 'round_transaction_id', EXPECTED_ROUND_TX_COLUMNS, {
@@ -707,6 +714,22 @@ async function verifyRoundState(q, problems) {
       `SELECT count(*)::int AS n FROM apocalypse_holdings WHERE quantity < 0`
     );
     if (negativeHoldings.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${negativeHoldings.rows[0].n} holdings with negative quantity`);
+  }
+  // V2-2 (migration 018): stored Power is never negative, and a holding's
+  // remaining cost basis is never negative and is exactly £0 once the
+  // position is fully closed (a zero-quantity row is history, not value).
+  if (tables.rows[0].p && await hasColumns('apocalypse_participants', ['power', 'power_updated_at'])) {
+    const badPower = await q(
+      `SELECT count(*)::int AS n FROM apocalypse_participants WHERE power < 0`
+    );
+    if (badPower.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${badPower.rows[0].n} participants with negative stored Power`);
+  }
+  if (tables.rows[0].h && await hasColumns('apocalypse_holdings', ['quantity', 'cost_basis'])) {
+    const badBasis = await q(
+      `SELECT count(*)::int AS n FROM apocalypse_holdings
+       WHERE cost_basis < 0 OR (quantity = 0 AND cost_basis <> 0)`
+    );
+    if (badBasis.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${badBasis.rows[0].n} holdings with negative cost basis or residual basis on a closed position`);
   }
   if (tables.rows[0].t && await hasColumns('apocalypse_transactions', ['quantity', 'price', 'total_amount', 'type'])) {
     const badTx = await q(

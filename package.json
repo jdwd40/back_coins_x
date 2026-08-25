@@ -14,6 +14,7 @@
     "migrate": "node db/migrate.js",
     "verify:game-schema": "node db/verify-game-schema.js",
     "simulate": "node simulation/run.js",
+    "simulate:power": "node simulation/run.js --mode power",
     "clear-price-history": "node clear-price-history.js"
   },
   "keywords": [],

@@ -21,6 +21,7 @@ process.env.PGHOST = process.env.PGHOST || 'localhost';
 const fs = require('fs');
 const path = require('path');
 const { runBatch, buildReport, DEFAULT_BASE_SEED, ALL_STRATEGY_IDS } = require('./batch');
+const { runPowerStudy, buildPowerReport, POWER_STUDY_BASE_SEED, ALL_PLAYER_IDS } = require('./powerStudy');
 
 function parseArgs(argv) {
   const args = {};
@@ -75,9 +76,98 @@ function printSummary(report) {
   console.log(`GATE VERDICT: ${gate.pass ? 'PASS' : 'FAIL'}`);
 }
 
+function printPowerSummary(report) {
+  const { config, gate, players, paired } = report;
+  console.log('=== Crypto Chaos V2-2 multi-round Power study ===');
+  console.log(`sequences: ${config.sequences} x ${config.roundsPerSequence} consecutive rounds | baseSeed: ${config.baseSeed} | economy: ${config.economy ? 'on' : 'off'} | observation: ${config.observationMs}ms | starting cash: ${formatMoney(config.startingCash)}`);
+  const pc = config.powerConfig;
+  console.log(`power: max ${pc.maxPower}, +1 per ${pc.regenMsPerPoint / 1000}s, buy cost max(1, ceil(total/${pc.buyCostDivisor})), max open positions ${pc.maxOpenPositions}`);
+  console.log('');
+  const header = ['player', 'medianROI', 'meanROI', 'profit%', 'trades/r', 'startPow', 'endPow', 'starved%', 'blkPow', 'blkPos', 'pow/£'];
+  console.log(header.map((h) => h.padStart(11)).join(''));
+  for (const [id, p] of Object.entries(players)) {
+    console.log([
+      id.padEnd(11),
+      `${p.medianRoi}%`.padStart(11),
+      `${p.meanRoi}%`.padStart(11),
+      `${p.profitableRoundPct}%`.padStart(11),
+      String(p.tradesPerRound).padStart(11),
+      String(p.powerAtRoundStart.mean).padStart(11),
+      String(p.powerAtRoundEnd.mean).padStart(11),
+      `${p.starvedTickPct}%`.padStart(11),
+      String(p.opportunitiesSkippedByPower).padStart(11),
+      String(p.positionLimitBlocked).padStart(11),
+      String(p.powerPerPoundDeployed).padStart(11)
+    ].join(''));
+  }
+  console.log('');
+  if (paired.DIP_BOOM && paired.DIP_BOOM.RANDOM) {
+    console.log(`DIP_BOOM vs RANDOM paired win rate: ${paired.DIP_BOOM.RANDOM.winRatePct}% (median diff ${formatMoney(paired.DIP_BOOM.RANDOM.medianDiff)})`);
+  }
+  if (paired.LATE_ENTRANT && paired.LATE_ENTRANT.RANDOM) {
+    console.log(`LATE_ENTRANT vs RANDOM paired win rate: ${paired.LATE_ENTRANT.RANDOM.winRatePct}% (median ROI ${players.LATE_ENTRANT.medianRoi}%)`);
+  }
+  if (players.RETURNING && players.AGGRESSIVE_POWER && players.CONSERVATIVE_POWER) {
+    console.log(`RETURNING median ROI: ${players.RETURNING.medianRoi}% | AGGRESSIVE mean start Power: ${players.AGGRESSIVE_POWER.powerAtRoundStart.mean} | CONSERVATIVE mean end Power: ${players.CONSERVATIVE_POWER.powerAtRoundEnd.mean}`);
+  }
+  console.log('');
+  console.log('=== V2-2 gate ===');
+  for (const [name, criterion] of Object.entries(gate)) {
+    if (name === 'pass') continue;
+    console.log(`${criterion.pass === null ? 'SKIP' : criterion.pass ? 'PASS' : 'FAIL'}  ${name}: ${JSON.stringify(criterion)}`);
+  }
+  console.log('');
+  console.log(`GATE VERDICT: ${gate.pass === null ? 'SKIPPED (partial roster)' : gate.pass ? 'PASS' : 'FAIL'}`);
+}
+
 function main() {
   const args = parseArgs(process.argv);
   const mode = args.mode || 'tune';
+
+  if (mode === 'power') {
+    const sequences = Number(args.sequences || 40);
+    const roundsPerSequence = Number(args['rounds-per-sequence'] || args.rounds || 24);
+    const baseSeed = args['base-seed'] || POWER_STUDY_BASE_SEED;
+    const economy = args.economy !== 'off';
+    const observationMs = Number(args['observation-ms'] || 15000);
+    const playerIds = args.players ? String(args.players).split(',') : ALL_PLAYER_IDS;
+    const powerConfig = {};
+    if (args['power-max'] !== undefined) powerConfig.maxPower = Number(args['power-max']);
+    if (args['power-regen-ms'] !== undefined) powerConfig.regenMsPerPoint = Number(args['power-regen-ms']);
+    if (args['power-divisor'] !== undefined) powerConfig.buyCostDivisor = Number(args['power-divisor']);
+    if (args['max-positions'] !== undefined) powerConfig.maxOpenPositions = Number(args['max-positions']);
+
+    const startedAt = Date.now();
+    const study = runPowerStudy({
+      sequences,
+      roundsPerSequence,
+      baseSeed,
+      observationMs,
+      economy,
+      playerIds,
+      powerConfig: Object.keys(powerConfig).length > 0 ? powerConfig : null,
+      onProgress: (done, total) => {
+        if (!args.json) process.stdout.write(`\rprogress: ${done}/${total} sequence-rounds`);
+      }
+    });
+    if (!args.json) process.stdout.write('\n');
+    const report = buildPowerReport(study);
+    report.runtimeMs = Date.now() - startedAt;
+    report.mode = mode;
+
+    const outPath = args.out || path.join(__dirname, 'output', `${mode}-latest.json`);
+    fs.mkdirSync(path.dirname(outPath), { recursive: true });
+    fs.writeFileSync(outPath, JSON.stringify(report, null, 2));
+
+    if (args.json) {
+      console.log(JSON.stringify(report));
+    } else {
+      printPowerSummary(report);
+      console.log(`\nreport written to ${outPath} (${report.runtimeMs}ms)`);
+    }
+    process.exit(report.gate.pass ? 0 : 1);
+  }
+
   const rounds = Number(args.rounds || (mode === 'gate' ? 2000 : 200));
   const baseSeed = args['base-seed'] || DEFAULT_BASE_SEED;
   const economy = args.economy !== 'off';

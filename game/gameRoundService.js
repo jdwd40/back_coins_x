@@ -21,7 +21,16 @@
 // lazily inside the function, by which time the module graph is fully loaded.
 
 const db = require('../db/connection');
-const { GAME_STARTING_CASH, GAME_QUANTITY_DECIMALS, GAME_QUANTITY_MAX, GAME_MIN_TRADE_VALUE, resolveGameStartingCash } = require('./gameConstants');
+const {
+  GAME_STARTING_CASH,
+  GAME_QUANTITY_DECIMALS,
+  GAME_QUANTITY_MAX,
+  GAME_MIN_TRADE_VALUE,
+  resolveGameStartingCash,
+  resolveGamePowerMax,
+  resolveGameMaxOpenPositions
+} = require('./gameConstants');
+const powerDomain = require('./powerDomain');
 
 // Must match gameCycleService's GAME_CYCLE_ADVISORY_LOCK_KEY. It is
 // re-declared here (not imported) to keep this module free of any top-level
@@ -222,11 +231,18 @@ async function refreshWealthAndPeak(client, participantId) {
 
 // Read the full public round state for a participant row. isBot is the safe
 // public Core 5 marker (users.is_bot); strategy internals are never exposed.
+// V2-2: also exposes the server-authoritative Power view (current effective
+// Power from lazy timestamp reconciliation, max, regen cadence, the next
+// regen instant and the raw stored pair so a client can interpolate) and the
+// per-holding cost-basis economics (weighted-average entry, remaining basis,
+// live value and unrealised P&L). Nothing here leaks the seed, future
+// collapses or any other hidden state.
 async function getParticipantRoundState(participantId, queryable = db) {
   const { rows } = await queryable.query(
     `SELECT p.participant_id, p.cycle_id, ac.apocalypse_id, p.user_id,
             p.joined_at, p.starting_cash, p.current_cash, p.peak_wealth,
-            p.status, p.final_cash, p.created_at, p.updated_at,
+            p.status, p.final_cash, p.power, p.power_updated_at,
+            p.created_at, p.updated_at,
             u.is_bot,
             COALESCE(SUM(h.quantity * c.current_price), 0) AS holdings_value
      FROM apocalypse_participants p
@@ -241,7 +257,7 @@ async function getParticipantRoundState(participantId, queryable = db) {
   if (rows.length === 0) return null;
   const row = rows[0];
   const holdings = (await queryable.query(
-    `SELECT h.coin_id, c.symbol, h.quantity, c.current_price,
+    `SELECT h.coin_id, c.symbol, h.quantity, h.cost_basis, c.current_price,
             h.quantity * c.current_price AS current_value
      FROM apocalypse_holdings h
      JOIN coins c ON c.coin_id = h.coin_id
@@ -251,6 +267,21 @@ async function getParticipantRoundState(participantId, queryable = db) {
   )).rows;
   const currentCash = parseFloat(row.current_cash);
   const holdingsValue = parseFloat(row.holdings_value);
+
+  // V2-2 Power view: lazy reconciliation of the stored pair against the
+  // authoritative read instant. Read-only — nothing is persisted here.
+  const powerConfig = powerDomain.resolvePowerConfig();
+  const powerReadMs = Date.now();
+  const storedPower = Number(row.power);
+  const powerUpdatedAtMs = new Date(row.power_updated_at).getTime();
+  const reconciled = powerDomain.reconcilePower({
+    storedPower,
+    updatedAtMs: powerUpdatedAtMs,
+    nowMs: powerReadMs,
+    maxPower: powerConfig.maxPower,
+    regenMsPerPoint: powerConfig.regenMsPerPoint
+  });
+
   return {
     participantId: row.participant_id,
     cycleId: row.cycle_id,
@@ -265,13 +296,34 @@ async function getParticipantRoundState(participantId, queryable = db) {
     peakWealth: parseFloat(row.peak_wealth),
     status: row.status,
     finalCash: row.final_cash === null ? null : parseFloat(row.final_cash),
-    holdings: holdings.map((h) => ({
-      coinId: h.coin_id,
-      symbol: h.symbol,
-      quantity: parseFloat(h.quantity),
-      currentPrice: parseFloat(h.current_price),
-      currentValue: parseFloat(h.current_value)
-    }))
+    power: {
+      current: reconciled.power,
+      max: powerConfig.maxPower,
+      regenMsPerPoint: powerConfig.regenMsPerPoint,
+      secondsPerPoint: powerConfig.regenMsPerPoint / 1000,
+      nextPointAt: reconciled.nextPointAtMs === null ? null : new Date(reconciled.nextPointAtMs).toISOString(),
+      storedPower,
+      powerUpdatedAt: new Date(row.power_updated_at).toISOString(),
+      asOf: new Date(powerReadMs).toISOString()
+    },
+    holdings: holdings.map((h) => {
+      const quantity = parseFloat(h.quantity);
+      const costBasis = parseFloat(h.cost_basis);
+      const currentPrice = parseFloat(h.current_price);
+      const currentValue = parseFloat(h.current_value);
+      const unrealizedPnl = round2(currentValue - costBasis);
+      return {
+        coinId: h.coin_id,
+        symbol: h.symbol,
+        quantity,
+        costBasis,
+        averageEntryPrice: quantity > 0 ? Math.round((costBasis / quantity) * 10000) / 10000 : null,
+        currentPrice,
+        currentValue,
+        unrealizedPnl,
+        unrealizedPnlPct: costBasis > 0 ? Math.round((unrealizedPnl / costBasis) * 10000) / 100 : null
+      };
+    })
   };
 }
 
@@ -311,13 +363,29 @@ async function joinRound({ userId, now = new Date() } = {}) {
       // Create exactly once. ON CONFLICT DO NOTHING makes a repeated or
       // concurrent join a pure no-op: starting cash, cash, join time and
       // peak are never reset.
+      // V2-2: the persistent Power pair (power, power_updated_at) is carried
+      // VERBATIM from the user's most recent earlier-cycle participant, so
+      // Power survives apocalypse rollover, restart and inactivity; lazy
+      // reconciliation against real elapsed time does the rest. A user with
+      // no earlier participant (new player) starts at the full game-design
+      // maximum, stamped now.
       const inserted = await client.query(
         `INSERT INTO apocalypse_participants
-           (cycle_id, user_id, starting_cash, current_cash, peak_wealth, status)
-         VALUES ($1, $2, $3, $3, $3, 'ACTIVE')
+           (cycle_id, user_id, starting_cash, current_cash, peak_wealth, status, power, power_updated_at)
+         SELECT $1, $2, $3, $3, $3, 'ACTIVE',
+                COALESCE(prev.power, $4),
+                COALESCE(prev.power_updated_at, now())
+         FROM (SELECT 1) AS seed_row
+         LEFT JOIN LATERAL (
+           SELECT p.power, p.power_updated_at
+           FROM apocalypse_participants p
+           WHERE p.user_id = $2 AND p.cycle_id < $1
+           ORDER BY p.cycle_id DESC
+           LIMIT 1
+         ) prev ON true
          ON CONFLICT (cycle_id, user_id) DO NOTHING
          RETURNING participant_id`,
-        [cycle.cycle_id, userId, startingCash]
+        [cycle.cycle_id, userId, startingCash, resolveGamePowerMax()]
       );
 
       let participantId;
@@ -415,13 +483,84 @@ async function buyRoundTrade({ userId, apocalypseId, coinId, quantity: rawQuanti
     // write. (Buys only reach here at a live price > 0.)
     assertMinTradeValue(total, 'buy');
 
-    // Atomic affordability: the debit itself enforces sufficient round cash,
-    // so concurrent buys can never overspend or drive cash negative.
+    // Cash affordability pre-check from the row-locked participant (the
+    // atomic debit below remains the concurrency backstop). Checked before
+    // Power so the rejection names the binding constraint.
+    const participantCash = parseFloat(participant.current_cash);
+    if (total > participantCash) {
+      throw new GameRoundError(
+        `Insufficient round cash. You need £${total.toFixed(2)} but have £${participantCash.toFixed(2)}.`,
+        400
+      );
+    }
+
+    // V2-2 position limit: at most GAME_MAX_OPEN_POSITIONS distinct OPEN
+    // LIVE positions. A live position is a holding with quantity > 0 whose
+    // coin has NOT collapsed in this cycle; collapsed and zero-quantity
+    // holdings are history and never consume a slot. Adding to an existing
+    // live position (same coin) is always allowed. Enforced HERE, inside
+    // the advisory-locked transaction — never only in a controller/client.
+    const { rows: liveRows } = await client.query(
+      `SELECT h.coin_id
+       FROM apocalypse_holdings h
+       WHERE h.participant_id = $1 AND h.quantity > 0
+         AND NOT EXISTS (
+           SELECT 1 FROM coin_collapse_schedule s
+           WHERE s.cycle_id = h.cycle_id AND s.coin_id = h.coin_id
+             AND s.executed_at IS NOT NULL
+         )`,
+      [participant.participant_id]
+    );
+    const positionLimit = powerDomain.evaluatePositionLimit({
+      liveCoinIds: liveRows.map((r) => r.coin_id),
+      coinId: coinIdNum
+    });
+    if (!positionLimit.allowed) {
+      throw new GameRoundError(
+        `Position limit reached: you may hold at most ${resolveGameMaxOpenPositions()} different open live positions and already have ${positionLimit.openPositions}. Sell one down before opening a new coin, or add to an existing position.`,
+        400
+      );
+    }
+
+    // V2-2 Power: a BUY costs 1 + floor(total / divisor) Power, computed
+    // by the SAME shared domain the simulator uses. The stored pair from the
+    // row-locked participant is reconciled against the authoritative now;
+    // the post-spend pair is written atomically with the cash debit below,
+    // so a failed buy (any throw before/inside this transaction) consumes NO
+    // Power. A SELL never touches this path and always costs zero Power.
+    const powerCost = powerDomain.buyPowerCost(total);
+    const powerSpend = powerDomain.spendPower({
+      storedPower: Number(participant.power),
+      updatedAtMs: new Date(participant.power_updated_at).getTime(),
+      nowMs,
+      cost: powerCost
+    });
+    if (!powerSpend) {
+      const { power: effectivePower } = powerDomain.reconcilePower({
+        storedPower: Number(participant.power),
+        updatedAtMs: new Date(participant.power_updated_at).getTime(),
+        nowMs
+      });
+      const regenSeconds = Math.round(powerDomain.resolvePowerConfig().regenMsPerPoint / 1000);
+      throw new GameRoundError(
+        `Insufficient Power. This buy costs ${powerCost} Power but you have ${effectivePower}. Power regenerates +1 every ${regenSeconds} seconds; selling is always free.`,
+        400
+      );
+    }
+
+    // Atomic affordability + Power spend: the debit itself enforces
+    // sufficient round cash, so concurrent buys can never overspend cash OR
+    // Power. The participant row is already locked FOR UPDATE and every game
+    // mutation serialises on the advisory lock, so the JS-computed post-
+    // spend Power pair cannot race.
     const { rowCount } = await client.query(
       `UPDATE apocalypse_participants
-       SET current_cash = current_cash - $1, updated_at = now()
-       WHERE participant_id = $2 AND status = 'ACTIVE' AND current_cash >= $1`,
-      [total, participant.participant_id]
+       SET current_cash = current_cash - $1,
+           power = $2,
+           power_updated_at = $3,
+           updated_at = now()
+       WHERE participant_id = $4 AND status = 'ACTIVE' AND current_cash >= $1`,
+      [total, powerSpend.power, new Date(powerSpend.updatedAtMs), participant.participant_id]
     );
     if (rowCount !== 1) {
       const { rows: fresh } = await client.query(
@@ -434,13 +573,17 @@ async function buyRoundTrade({ userId, apocalypseId, coinId, quantity: rawQuanti
       );
     }
 
+    // V2-2 cost basis: a BUY adds its rounded consideration to the remaining
+    // basis (weighted-average accounting), in the same upsert, in SQL so the
+    // DECIMAL(18,2) arithmetic is exact.
     await client.query(
-      `INSERT INTO apocalypse_holdings (participant_id, cycle_id, user_id, coin_id, quantity)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO apocalypse_holdings (participant_id, cycle_id, user_id, coin_id, quantity, cost_basis)
+       VALUES ($1, $2, $3, $4, $5, $6)
        ON CONFLICT (participant_id, coin_id)
        DO UPDATE SET quantity = apocalypse_holdings.quantity + EXCLUDED.quantity,
+                     cost_basis = ROUND(apocalypse_holdings.cost_basis + EXCLUDED.cost_basis, 2),
                      updated_at = now()`,
-      [participant.participant_id, cycle.cycle_id, userId, coinIdNum, quantity]
+      [participant.participant_id, cycle.cycle_id, userId, coinIdNum, quantity, total]
     );
 
     const { rows: txRows } = await client.query(
@@ -543,9 +686,15 @@ async function sellRoundTrade({ userId, apocalypseId, coinId, quantity: rawQuant
 
     // Atomic decrement: the guarded UPDATE is the oversell backstop even if
     // the row state changed between the lock check and the write.
+    // V2-2 cost basis: the same statement removes the PROPORTIONATE share of
+    // the remaining basis (SET expressions read the pre-update quantity, so
+    // cost_basis * (quantity - $1) / quantity is exactly the weighted-
+    // average remainder; a full sale zeroes it). A SELL never touches Power.
     const { rowCount } = await client.query(
       `UPDATE apocalypse_holdings
-       SET quantity = quantity - $1, updated_at = now()
+       SET quantity = quantity - $1,
+           cost_basis = ROUND(cost_basis * (quantity - $1) / quantity, 2),
+           updated_at = now()
        WHERE holding_id = $2 AND quantity >= $1`,
       [quantity, holding.holding_id]
     );
@@ -611,14 +760,26 @@ async function sellRoundTrade({ userId, apocalypseId, coinId, quantity: rawQuant
 // ---------------------------------------------------------------------------
 async function initializeCycleParticipants(client, cycleId) {
   const startingCash = resolveGameStartingCash();
+  // V2-2: each new participant's Power pair is carried verbatim from the
+  // user's most recent earlier-cycle participant (persistent Power across
+  // rollover); brand-new players start at the full game-design maximum.
   const { rowCount } = await client.query(
     `INSERT INTO apocalypse_participants
-       (cycle_id, user_id, starting_cash, current_cash, peak_wealth, status)
-     SELECT $1, u.user_id, $2, $2, $2, 'ACTIVE'
+       (cycle_id, user_id, starting_cash, current_cash, peak_wealth, status, power, power_updated_at)
+     SELECT $1, u.user_id, $2, $2, $2, 'ACTIVE',
+            COALESCE(prev.power, $3),
+            COALESCE(prev.power_updated_at, now())
      FROM users u
+     LEFT JOIN LATERAL (
+       SELECT p.power, p.power_updated_at
+       FROM apocalypse_participants p
+       WHERE p.user_id = u.user_id AND p.cycle_id < $1
+       ORDER BY p.cycle_id DESC
+       LIMIT 1
+     ) prev ON true
      ORDER BY u.user_id
      ON CONFLICT (cycle_id, user_id) DO NOTHING`,
-    [cycleId, startingCash]
+    [cycleId, startingCash, resolveGamePowerMax()]
   );
   return rowCount;
 }

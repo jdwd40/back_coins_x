@@ -238,7 +238,89 @@ const STRATEGIES = {
       }
       return actions;
     }
+  },
+
+  // -----------------------------------------------------------------------
+  // V2-2 Power-era strategies. Each still acts ONLY on the legal public
+  // observation (which now includes the player's own Power balance).
+  // -----------------------------------------------------------------------
+
+  CONSERVATIVE_POWER: {
+    id: 'CONSERVATIVE_POWER',
+    description: 'Power-conscious DIP_BOOM: smaller stakes, keeps a Power reserve, exits earlier.',
+    usesFuture: false,
+    usesOwnRandom: false,
+    decide(observation) {
+      const actions = [];
+      for (const holding of observation.portfolio.holdings) {
+        const signal = findSignal(observation, holding.coinId);
+        if (signal.dead) continue;
+        if (signal.phase === 'BOOM' || (signal.phase === 'RISE' && signal.momentum !== 'UP' && holding.unrealizedPct >= 5)) {
+          actions.push(sellAllAction(holding)); // banks gains early
+        } else if (holding.unrealizedPct <= -10) {
+          actions.push(sellAllAction(holding));
+        }
+      }
+      // Reserve policy: never dip below 20 Power if the balance is visible.
+      const power = observation.portfolio.power;
+      if (power && power.current < 20) return actions;
+      return actions.concat(dipEntries(observation, { maxPositions: 3, spendFraction: 0.15, maxBuys: 1 }));
+    }
+  },
+
+  AGGRESSIVE_POWER: {
+    id: 'AGGRESSIVE_POWER',
+    description: 'Maximum deployment: large stakes into every dip, adds on every re-dip, no Power reserve.',
+    usesFuture: false,
+    usesOwnRandom: false,
+    decide(observation) {
+      const actions = [];
+      for (const holding of observation.portfolio.holdings) {
+        const signal = findSignal(observation, holding.coinId);
+        if (signal.dead) continue;
+        if (signal.phase === 'BOOM' && signal.momentum !== 'UP') {
+          actions.push(sellAllAction(holding));
+        } else if (signal.phase === 'DIP' && observation.portfolio.cash >= 10) {
+          // Averaging down on every re-dip: repeated Power spend on adds.
+          const spend = Math.floor(observation.portfolio.cash * 0.25 * 100) / 100;
+          if (spend >= 1) actions.push({ action: 'buy', coinId: holding.coinId, spend });
+        }
+      }
+      return actions.concat(dipEntries(observation, { maxPositions: 3, spendFraction: 0.45, maxBuys: 2 }));
+    }
+  },
+
+  SPLITTER: {
+    id: 'SPLITTER',
+    description: 'Adversarial trade-splitting attacker: identical DIP_BOOM decisions, but every buy chopped into fragments to dodge Power.',
+    usesFuture: false,
+    usesOwnRandom: false,
+    decide(observation) {
+      const base = STRATEGIES.DIP_BOOM.decide(observation);
+      const fragmented = [];
+      for (const action of base) {
+        if (action.action !== 'buy') {
+          fragmented.push(action);
+          continue;
+        }
+        // Split each intended buy into two equal fragments (the per-tick
+        // client cap is 2 buys — the attacker fragments as far as one tick
+        // allows, paying a separate ceiling + minimum on every piece).
+        const piece = Math.floor((action.spend / 2) * 100) / 100;
+        if (piece >= 1) {
+          fragmented.push({ action: 'buy', coinId: action.coinId, spend: piece });
+          fragmented.push({ action: 'buy', coinId: action.coinId, spend: round2Down(action.spend - piece) });
+        } else {
+          fragmented.push(action);
+        }
+      }
+      return fragmented.filter((a) => a.action !== 'buy' || a.spend >= 1);
+    }
   }
 };
+
+function round2Down(value) {
+  return Math.floor(value * 100) / 100;
+}
 
 module.exports = { STRATEGIES };

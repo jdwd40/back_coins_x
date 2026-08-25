@@ -16,6 +16,7 @@
 
 const { createSeededRandom } = require('../game/seededRandom');
 const { GAME_STARTING_CASH } = require('../game/gameConstants');
+const powerDomain = require('../game/powerDomain');
 
 const DEFAULT_OBSERVATION_MS = 15 * 1000;
 const QUANTITY_DECIMALS = 8;
@@ -76,7 +77,9 @@ function executeSell(portfolio, coinId, fraction, price) {
 // Build the strategy-facing observation for one tick from the precomputed
 // per-round signal grid. Contains ONLY legal public information: per-coin
 // public signals + dead state, the player's own cash/holdings economics,
-// apocalypse progress and remaining time.
+// apocalypse progress and remaining time. When the round is played with a
+// Power account the observation also carries the player's own current
+// effective Power — exactly what the live public participant state exposes.
 function buildObservation(env, portfolio, t, tickIndex, context, trades) {
   const coins = context.signalGrid[tickIndex];
   const signalByCoin = new Map(coins.map((c) => [c.coinId, c]));
@@ -101,6 +104,20 @@ function buildObservation(env, portfolio, t, tickIndex, context, trades) {
     });
   }
 
+  const portfolioView = { cash: portfolio.cash, holdings };
+  if (portfolio.powerAccount) {
+    portfolioView.power = {
+      current: powerDomain.reconcilePower({
+        storedPower: portfolio.powerAccount.power,
+        updatedAtMs: portfolio.powerAccount.updatedAtMs,
+        nowMs: (portfolio.powerTimeOffsetMs || 0) + t,
+        maxPower: portfolio.powerConfig.maxPower,
+        regenMsPerPoint: portfolio.powerConfig.regenMsPerPoint
+      }).power,
+      max: portfolio.powerConfig.maxPower
+    };
+  }
+
   return {
     t,
     tickIndex,
@@ -108,7 +125,7 @@ function buildObservation(env, portfolio, t, tickIndex, context, trades) {
     remainingMs: Math.max(0, env.durationMs - t),
     startingCash: context.startingCash,
     coins,
-    portfolio: { cash: portfolio.cash, holdings },
+    portfolio: portfolioView,
     trades
   };
 }
@@ -170,13 +187,62 @@ function getPerfectView(context) {
   return context.perfectView;
 }
 
+// Quote a buy exactly the way the live domain would compute it: the 8dp
+// quantity for the spend at the server price and the rounded 2dp
+// consideration. Returns null when the trade cannot execute at all.
+function quoteBuy(portfolio, spend, price) {
+  if (!(price > 0) || !(spend >= MIN_TRADE_VALUE)) return null;
+  const budget = Math.min(spend, portfolio.cash);
+  const quantity = floorToDecimals(budget / price, QUANTITY_DECIMALS);
+  if (!(quantity > 0)) return null;
+  const total = round2(quantity * price);
+  if (total < MIN_TRADE_VALUE || total > portfolio.cash) return null;
+  return { quantity, total };
+}
+
 // Run one strategy through one precomputed round context. Deterministic
 // given the environment seed (a strategy's own pseudo-randomness, when any,
 // is keyed off the same seed).
-function runRound(context, strategy, { startingCash = GAME_STARTING_CASH } = {}) {
+//
+// V2-2 options (all optional — omitting them reproduces V2-1 behaviour
+// exactly):
+//   powerAccount: { power, updatedAtMs } mutated IN PLACE across rounds, so
+//     a multi-round study carries one persistent Power balance per player
+//     (new players start at the game-design max, stamped at 0). Every buy is
+//     charged the SHARED live domain cost (game/powerDomain.buyPowerCost)
+//     reconciled lazily at the tick instant; a buy the account cannot cover
+//     is skipped and counted. Sells never touch Power.
+//   maxPositions: the live position limit (default Infinity = V2-1 parity).
+//     Live positions are quantity > 0 and not collapsed, exactly the live
+//     SQL rule; a buy opening a NEW position beyond the cap is skipped and
+//     counted.
+//   joinAtMs: late entrant — the strategy observes/acts only from this
+//     round time onward. The participant exists from round start (live
+//     auto-participation parity): economy debits and Power regeneration
+//     apply for the whole round regardless.
+//   powerConfig: explicit tunable overrides for tuning studies.
+//   timeOffsetMs: global-clock offset for the Power timestamps. Multi-round
+//     studies run one continuous real clock across consecutive rounds
+//     (round r occupies [r*duration, (r+1)*duration) on the study clock), so
+//     lazy regeneration keeps working across rollover — exactly like the
+//     live game, where wall-clock time simply continues.
+function runRound(context, strategy, {
+  startingCash = GAME_STARTING_CASH,
+  powerAccount = null,
+  maxPositions = Infinity,
+  joinAtMs = 0,
+  powerConfig: powerConfigOverrides = null,
+  timeOffsetMs = 0
+} = {}) {
   const { env, ticks, gridByCoin } = context;
   context.startingCash = startingCash;
   const portfolio = createPortfolio(startingCash);
+  const powerConfig = powerDomain.resolvePowerConfig(powerConfigOverrides || {});
+  if (powerAccount) {
+    portfolio.powerAccount = powerAccount;
+    portfolio.powerConfig = powerConfig;
+    portfolio.powerTimeOffsetMs = timeOffsetMs;
+  }
   const ctx = {
     rng: strategy.usesOwnRandom ? createSeededRandom(`${env.seed}:v2-sim-strategy:${strategy.id}`) : null,
     perfect: strategy.usesFuture ? getPerfectView(context) : null
@@ -187,6 +253,41 @@ function runRound(context, strategy, { startingCash = GAME_STARTING_CASH } = {})
   let investedTicks = 0;
   let debitIndex = 0;
 
+  // V2-2 instrumentation.
+  let powerSum = 0;
+  let powerSamples = 0;
+  let starvedTicks = 0;
+  let attemptedBuys = 0;
+  let executedBuys = 0;
+  let blockedByPower = 0;
+  let blockedByPosition = 0;
+  let powerSpent = 0;
+  let cashDeployed = 0;   // sum of executed buy totals
+  let cashRecovered = 0;  // sum of executed sell proceeds
+  let debitsPaid = 0;     // sum of actually-applied economy debits
+  let basisRemoved = 0;   // cost basis removed by sells
+  let positionLimitViolations = 0;
+
+  const liveCoinIdsAt = (t) => {
+    const ids = [];
+    for (const [coinId, holding] of portfolio.holdings) {
+      if (holding.quantity > 0 && !env.isDead(coinId, t)) ids.push(coinId);
+    }
+    return ids;
+  };
+
+  const reconcileAccountAt = (t) => powerDomain.reconcilePower({
+    storedPower: powerAccount ? powerAccount.power : 0,
+    updatedAtMs: powerAccount ? powerAccount.updatedAtMs : 0,
+    nowMs: timeOffsetMs + t,
+    maxPower: powerConfig.maxPower,
+    regenMsPerPoint: powerConfig.regenMsPerPoint
+  }).power;
+
+  // Effective Power at the START of the round, from the INCOMING account
+  // pair (before this round's first action).
+  const powerStart = powerAccount ? reconcileAccountAt(0) : null;
+
   for (let i = 0; i < ticks.length; i++) {
     const t = ticks[i];
 
@@ -194,27 +295,93 @@ function runRound(context, strategy, { startingCash = GAME_STARTING_CASH } = {})
     // order, clamped at available cash (exactly like applyRoundDebit).
     while (debitIndex < env.debits.length && env.debits[debitIndex].atMs <= t) {
       const debit = env.debits[debitIndex];
-      portfolio.cash = round2(Math.max(0, portfolio.cash - Math.min(debit.amount, portfolio.cash)));
+      const applied = Math.min(debit.amount, portfolio.cash);
+      portfolio.cash = round2(Math.max(0, portfolio.cash - applied));
+      debitsPaid = round2(debitsPaid + applied);
       debitIndex += 1;
     }
 
-    const observation = buildObservation(env, portfolio, t, i, context, trades);
-    const actions = strategy.decide(observation, ctx) || [];
+    // Power telemetry for this tick (and the starvation measure: unable to
+    // afford even the cheapest possible buy).
+    if (powerAccount) {
+      const effective = reconcileAccountAt(t);
+      powerSum += effective;
+      powerSamples += 1;
+      if (effective < 1) starvedTicks += 1;
+    }
 
-    let buysThisTick = 0;
-    for (const action of actions) {
-      const price = gridByCoin.get(action.coinId)[i];
-      if (action.action === 'buy') {
-        if (buysThisTick >= 2) continue; // a real client cannot fire unlimited simultaneous orders
-        if (executeBuy(portfolio, action.coinId, action.spend, price)) {
-          trades += 1;
+    if (t >= joinAtMs) {
+      const observation = buildObservation(env, portfolio, t, i, context, trades);
+      const actions = strategy.decide(observation, ctx) || [];
+
+      let buysThisTick = 0;
+      for (const action of actions) {
+        const price = gridByCoin.get(action.coinId)[i];
+        if (action.action === 'buy') {
+          if (buysThisTick >= 2) continue; // a real client cannot fire unlimited simultaneous orders
           buysThisTick += 1;
-        }
-      } else if (action.action === 'sell') {
-        if (executeSell(portfolio, action.coinId, action.fraction, price)) {
-          trades += 1;
+          attemptedBuys += 1;
+
+          const quote = quoteBuy(portfolio, action.spend, price);
+          if (!quote) continue;
+
+          // Position limit: the live SQL rule via the shared predicate.
+          if (maxPositions !== Infinity) {
+            const verdict = powerDomain.evaluatePositionLimit({
+              liveCoinIds: liveCoinIdsAt(t),
+              coinId: action.coinId,
+              maxOpenPositions: maxPositions
+            });
+            if (!verdict.allowed) {
+              blockedByPosition += 1;
+              continue;
+            }
+          }
+
+          // Power: the SHARED live cost + lazy reconciliation, charged only
+          // when the buy actually executes.
+          if (powerAccount) {
+            const cost = powerDomain.buyPowerCost(quote.total, { buyCostDivisor: powerConfig.buyCostDivisor });
+            const spendResult = powerDomain.spendPower({
+              storedPower: powerAccount.power,
+              updatedAtMs: powerAccount.updatedAtMs,
+              nowMs: timeOffsetMs + t,
+              cost,
+              maxPower: powerConfig.maxPower,
+              regenMsPerPoint: powerConfig.regenMsPerPoint
+            });
+            if (!spendResult) {
+              blockedByPower += 1;
+              continue;
+            }
+            powerAccount.power = spendResult.power;
+            powerAccount.updatedAtMs = spendResult.updatedAtMs;
+            powerSpent += cost;
+          }
+
+          const cashBefore = portfolio.cash;
+          if (executeBuy(portfolio, action.coinId, action.spend, price)) {
+            trades += 1;
+            executedBuys += 1;
+            cashDeployed = round2(cashDeployed + (cashBefore - portfolio.cash));
+          }
+        } else if (action.action === 'sell') {
+          const holding = portfolio.holdings.get(action.coinId);
+          const basisBefore = holding ? holding.costBasis : 0;
+          const cashBefore = portfolio.cash;
+          if (executeSell(portfolio, action.coinId, action.fraction, price)) {
+            trades += 1;
+            const after = portfolio.holdings.get(action.coinId);
+            basisRemoved = round2(basisRemoved + (basisBefore - (after ? after.costBasis : 0)));
+            cashRecovered = round2(cashRecovered + (portfolio.cash - cashBefore));
+          }
         }
       }
+    }
+
+    // Invariant: the position cap can never be exceeded.
+    if (maxPositions !== Infinity && liveCoinIdsAt(t).length > maxPositions) {
+      positionLimitViolations += 1;
     }
 
     // Equity for drawdown/time-in-market: cash + live holdings value.
@@ -231,6 +398,16 @@ function runRound(context, strategy, { startingCash = GAME_STARTING_CASH } = {})
   // wealth is cash only — any position still open is worth exactly £0.
   const finalCash = round2(portfolio.cash);
 
+  // Accounting invariants (cost-basis/P&L correctness through the round):
+  //   cash identity: finalCash == startingCash - deployed + recovered - debits
+  //   basis identity: deployed == Σ remaining basis + Σ basis removed
+  // Both books are kept in exact 2dp arithmetic; drift beyond a penny per
+  // book is a genuine accounting defect.
+  const cashDrift = Math.abs(round2(finalCash - round2(startingCash - cashDeployed + cashRecovered - debitsPaid)));
+  let remainingBasis = 0;
+  for (const [, holding] of portfolio.holdings) remainingBasis = round2(remainingBasis + holding.costBasis);
+  const basisDrift = Math.abs(round2(cashDeployed - round2(remainingBasis + basisRemoved)));
+
   // Max drawdown over the equity curve (fraction of running peak).
   let peak = -Infinity;
   let maxDrawdown = 0;
@@ -238,6 +415,8 @@ function runRound(context, strategy, { startingCash = GAME_STARTING_CASH } = {})
     peak = Math.max(peak, equity);
     if (peak > 0) maxDrawdown = Math.max(maxDrawdown, (peak - equity) / peak);
   }
+
+  const powerAt = (t) => reconcileAccountAt(t);
 
   return {
     strategyId: strategy.id,
@@ -247,7 +426,21 @@ function runRound(context, strategy, { startingCash = GAME_STARTING_CASH } = {})
     trades,
     timeInMarket: ticks.length > 0 ? Math.round((investedTicks / ticks.length) * 10000) / 10000 : 0,
     maxDrawdown: Math.round(maxDrawdown * 10000) / 10000,
-    equityCurve
+    equityCurve,
+    // V2-2 power study fields (null when the round ran without Power).
+    powerStart,
+    powerEnd: powerAccount ? powerAt(env.durationMs) : null,
+    meanTickPower: powerAccount && powerSamples > 0 ? Math.round((powerSum / powerSamples) * 100) / 100 : null,
+    starvedTickPct: powerAccount && powerSamples > 0 ? Math.round((starvedTicks / powerSamples) * 10000) / 100 : null,
+    attemptedBuys,
+    executedBuys,
+    blockedByPower,
+    blockedByPosition,
+    powerSpent: powerAccount ? powerSpent : null,
+    cashDeployed,
+    cashDrift,
+    basisDrift,
+    positionLimitViolations
   };
 }
 
@@ -256,6 +449,7 @@ module.exports = {
   createPortfolio,
   executeBuy,
   executeSell,
+  quoteBuy,
   buildObservation,
   createRoundContext,
   runRound

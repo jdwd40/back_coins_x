@@ -45,9 +45,15 @@ const MIGRATION_016 = '016_create_apocalypse_economy.sql';
 // Core 4's so the simulated pre-Core-4 state converges to the canonical
 // post-V2 schema.
 const MIGRATION_017 = '017_v2_price_precision.sql';
+// Migration 018 (V2-2 Power + cost basis) only ALTERS apocalypse_participants
+// and apocalypse_holdings (no new tables) — its tracking row is cleared for
+// the same reason as 012/017: the rerun re-applies the ALTERs (and their
+// deterministic backfills, no-ops on the empty recreated tables) onto the
+// freshly recreated Core 4 tables.
+const MIGRATION_018 = '018_v2_power_and_cost_basis.sql';
 
 async function dropCore4Tracking() {
-  await db.query('DELETE FROM schema_migrations WHERE migration = ANY($1)', [[MIGRATION_009, MIGRATION_011, MIGRATION_012, MIGRATION_015, MIGRATION_016, MIGRATION_017]]);
+  await db.query('DELETE FROM schema_migrations WHERE migration = ANY($1)', [[MIGRATION_009, MIGRATION_011, MIGRATION_012, MIGRATION_015, MIGRATION_016, MIGRATION_017, MIGRATION_018]]);
 }
 
 describe('Core 4: tracked production migration 009', () => {
@@ -71,7 +77,7 @@ describe('Core 4: tracked production migration 009', () => {
     await dropCore4Tracking();
 
     const result = await runMigrations({ log: () => {} });
-    expect(result.applied).toEqual([MIGRATION_009, MIGRATION_011, MIGRATION_012, MIGRATION_015, MIGRATION_016, MIGRATION_017]); // Core 4, Core 6, 012 widening, #19 eligibility column, #18 economy ledger, V2-1 price precision
+    expect(result.applied).toEqual([MIGRATION_009, MIGRATION_011, MIGRATION_012, MIGRATION_015, MIGRATION_016, MIGRATION_017, MIGRATION_018]); // Core 4, Core 6, 012 widening, #19 eligibility column, #18 economy ledger, V2-1 price precision, V2-2 Power + cost basis
 
     const verification = await verifyGameSchema();
     expect(verification.problems).toEqual([]);
