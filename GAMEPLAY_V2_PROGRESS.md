@@ -423,3 +423,109 @@ The UI contract explicitly covers all 13 answers: Cash, Power, regen rate, count
 ### V2-5 next action
 
 Before V2-6, read the complete plan, both progress files and both repository states again. Push only `gameplay-v2-20260824` as backup, then run final backend/frontend verification, final large simulation batches against the final gameplay code, regression checks and the complete morning report. Do not merge or deploy.
+
+## V2-6 — COMPLETE / OVERNIGHT RUN COMPLETE
+
+Final checkpoint timestamp: `2026-08-25T08:55:00+01:00`
+
+### Final repository state
+
+- Backend final HEAD: `3670f2578a6af458c38d3219178a21a1d5a0b185`
+- Frontend final HEAD: `b189d6927819c4e6178377bfab5df27ccfe94574`
+- Both branches: `gameplay-v2-20260824`, synchronized with origin.
+- No merge, no main/master push, no deployment, no production restart, no production migration and no production-data mutation.
+- `.hermes/desktop-attachments/` remains untracked and was never committed.
+- Stages completed: **V2-1, V2-2, V2-3, V2-4, V2-5, V2-6**.
+- Stage stopped at: **none**. The overnight goal is complete.
+
+### Final gameplay parameters
+
+- Market archetypes: ZIP, MOON, BULL, HODL, DEGEN, RUG; shared deterministic cycle `DIP → RISE → BOOM → FALL → DIP`.
+- Shared market domain: 1×→3× apocalypse amplitude, exponent 2; normal seeded noise and archetype-specific cycle/swing parameters remain in one live/simulator domain.
+- Power: max **100**, lazy regeneration **+1 per 30 seconds**, buy cost **1 + floor(total notional / £125)**, sell cost **0**.
+- Position limit: **3 open live positions**, buy-only enforcement; sells unrestricted.
+- Cost basis/P&L: weighted-average entry, remaining cost basis, current value, unrealized and realized P&L.
+- Escalation bands: NORMAL 0–40%, ELEVATED 40–70%, HIGH 70–90%, EXTREME 90–100%.
+- Collapse window: begins at 70%; public risk is coarse STABLE/SHAKY/DANGER/CRITICAL and intentionally schedule-independent.
+- Selected V2 passive economy study scale: **0.25** versus legacy scale 1; live default remains explicitly configuration-controlled for compatibility.
+- Bot roster: Conservative, Momentum, Dip Buyer, Reckless; all use legal public signals and shared trade/Power/position services.
+
+### Final simulation evidence
+
+#### V2-1 paired strategy gate — 2,000 seeded rounds
+
+- DIP_BOOM: median ROI **271.37%**, mean ROI 1111.83%, profitable rounds 100%.
+- RANDOM: median ROI **-53.76%**, mean ROI -8.67%, profitable rounds 5.45%.
+- LATE_SELLER: median ROI **22.38%**, profitable rounds 70.65%.
+- HOLD_FOREVER: median ROI **-98.20%**, profitable rounds 0%, worst drawdown 98.34%.
+- SPAM: median ROI **-11.46%**, 229.51 trades/round.
+- PUBLIC_SIGNAL_EXPLOITER: median ROI **231.42%**; it did not beat DIP_BOOM.
+- PERFECT_INFORMATION: median ROI **454.25%**, confirming legal play is below an information upper bound.
+- CONSERVATIVE_POWER: median ROI 94.29%.
+- AGGRESSIVE_POWER: median ROI -98.83%.
+- SPLITTER: median ROI 271.69%.
+- OVERSTAYER: median ROI -22.90%.
+- RISK_AWARE: median ROI 326.17%.
+- Paired DIP_BOOM vs RANDOM: **99.55% win rate**, median final-cash difference £32,120.14.
+- V2-1 gate: **PASS**; no trivial public-signal exploit.
+
+#### V2-2 Power gate — 40 sequences × 24 consecutive rounds
+
+- DIP_BOOM vs RANDOM: **82.60% paired win rate**.
+- DIP_BOOM median ROI 14.31%; RANDOM comparison remained negative.
+- SPAM median ROI -4.07%; DIP_BOOM vs SPAM 78.85%.
+- Power blocks: 194,944 SPAM buys; 169,129 aggressive buys.
+- DIP_BOOM median start Power 17; starved tick rate 1.87%; no majority-starved run.
+- Returning player mean start Power 39.95.
+- Position limit exercised; zero cash/basis/position invariant violations.
+- V2-2 gate: **PASS**.
+
+#### V2-3 escalation/risk/economy gate — 30 sequences × 24 consecutive rounds
+
+- NORMAL→EXTREME median tick movement: 2.09% → 2.95% → 4.14% → 5.15%.
+- Equal 3-minute swing: 18.99% → 28.39% → 40.65% → 51.60%; EXTREME/NORMAL ratio 2.72×.
+- HIGH band: 6.5 mean live coins and 86.66% legal-entry opportunity ticks.
+- Risk ordinal NORMAL→HIGH→EXTREME: 0.611 → 1.756 → 2.503.
+- Public-risk next-collapse classifier: 22.71% versus 22.86% chance over 5,760 samples; no schedule leak.
+- DIP_BOOM median ROI 17.11%; RANDOM -5.69%; paired win rate 83.06%.
+- LATE_SELLER paired 73.06%; OVERSTAYER paired 80.83%; HOLD_FOREVER median -57.87%.
+- V2 economy median debits £80.37/round; erased-gain rounds 0.18%.
+- Zero cash/basis/position invariant violations; 725,774 Power blocks and 149,679 position blocks.
+- V2-3 gate: **PASS**.
+
+#### V2-4 bot gate — 24 sequences × 16 consecutive rounds
+
+- Conservative: median ROI +2.21%, 69.01% profitable, 57.03 trades/round.
+- Momentum: +0.45%, 53.13% profitable, 57.75 trades/round.
+- Dip Buyer: +13.93%, 78.65% profitable, 6.35 trades/round.
+- Reckless: -6.84%, 39.58% profitable, 20.26 trades/round.
+- DIP_BOOM benchmark: +18.55% median ROI.
+- Dip Buyer vs DIP_BOOM: 34.11% paired win rate, median gap -4.62 points; gate threshold passed.
+- Conservative risky entries 0%; Reckless 48.99%; Dip Buyer DIP entries 97.5%; Momentum RISE entries 100%.
+- Zero invariant violations; max open positions 3; zero-Power sells 73/73.
+- No dominant bot personality; no majority-starved rounds.
+- Hidden-information checks: 185,856 decisions, 0 violations.
+- V2-4 gate: **PASS**, all 9 criteria.
+
+### Final verification totals
+
+- Backend full suite: **74 suites passed / 1 known baseline suite-order failure; 710 tests passed / 1 known baseline failure**.
+- Known baseline failure: `game-public-state-no-seed.test.js` settle-lifecycle timeout/deadlock in the existing settlement/collapse path; the failing suite varies with suite order (`game-cycle-worker.test.js` also reproduced the same reseed deadlock family). The worker suite passes isolated 5/5, and the public-state suite has passed isolated in prior runs. No final V2 code path is implicated; this is explicitly retained as the pre-existing baseline failure permitted by the plan.
+- Backend test schema verification: **PASS**, no reported schema problems.
+- Backend focused V2/bot/race/migration run: **20 suites / 237 tests passed**.
+- Frontend unit tests: **130/130 passed**.
+- Frontend UI contract: **passed** and covers all 13 mobile-readability answers.
+- Frontend lint: **0 errors**, six existing warnings.
+- Frontend TypeScript: `npx tsc --noEmit` **passed**.
+- Frontend production build: **passed**; only existing Browserslist and chunk-size warnings.
+- `git diff --check`: **passed** in both repositories.
+
+### Final regression and readiness assessment
+
+Verified through the final backend suite, focused tests, API contracts and simulations: authentication boundaries, £10,000 starting Cash, automatic participation, ACTIVE→SETTLING→COMPLETED lifecycle, holdings, transactions, settlement/results, leaderboard, rollover, dead-coin £0 behavior, centralized frontend API, stale/offline trade blocking, profile/history preservation and production isolation remain covered. No browser/device screenshot was claimed; the frontend readiness evidence is the typed contract, 130 unit tests, UI contract, lint, TypeScript and production build.
+
+- V2 reached the UI stage: **YES**.
+- Human play-test readiness: **YES — branch ready for local inspection/play-testing**. Deployment was intentionally not performed.
+- Unresolved V2 defects: the known pre-existing full-suite settlement/worker reseed deadlock flake; existing frontend lint warnings; build advisories; no newly discovered V2 gameplay gate failures.
+- Final status: **Crypto Chaos V2 gameplay pivot complete and backed up on `gameplay-v2-20260824`**.
+- Do not merge, deploy or begin another milestone.
