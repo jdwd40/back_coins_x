@@ -238,6 +238,15 @@ const seed = async (shouldEnd = false) => {
     );
     await db.query(economyMigration);
 
+    console.log('📦 Applying V2 price-precision migration (db/migrations/017_v2_price_precision.sql)...');
+    // V2-1 price-precision widen (2dp -> 4dp on price/value columns),
+    // sourced from the production migration only.
+    const pricePrecisionMigration = require('fs').readFileSync(
+      require('path').join(__dirname, 'migrations', '017_v2_price_precision.sql'),
+      'utf8'
+    );
+    await db.query(pricePrecisionMigration);
+
     console.log('📦 Inserting coins data...');
     // Insert coins data
     const coinsData = require(process.env.NODE_ENV === 'test' 

@@ -7,7 +7,8 @@ const {
   getLiveLeaderboard,
   getCycleResults,
   getRecentLeaderboards,
-  getMyParticipant
+  getMyParticipant,
+  getMarketSignals
 } = require('../controllers/game.controller');
 const { authenticateToken } = require('../middleware/auth.middleware');
 
@@ -15,6 +16,11 @@ const gameRouter = express.Router();
 
 // Public, read-only global cycle state.
 gameRouter.get('/state', getGameState);
+
+// V2-1 public, read-only coarse market signals (price, recent movement,
+// coarse current phase, momentum, archetype, approximate ranges, dead
+// state). Reconcile-then-read; never carries seed or future information.
+gameRouter.get('/market-signals', getMarketSignals);
 
 // Core 6 public read-only leaderboard/results APIs. Reads reconcile-then-read
 // (leaderboard) or serve the immutable settlement snapshot (results/recent).

@@ -12,6 +12,10 @@ const { verifyGameSchema } = require('../db/verify-game-schema');
 const { assertDisposableTestDatabase } = require('./helpers/testDatabaseGuard');
 
 const MIGRATION_008 = '008_create_coin_collapse_schedule.sql';
+// Migration 017 (V2-1 price precision) widens the columns 008 creates; its
+// tracking row must be cleared alongside 008's so a simulated pre-Core-3
+// state converges back to the canonical post-V2 schema.
+const MIGRATION_017 = '017_v2_price_precision.sql';
 
 // Simulate the pre-Core-3 production state: Coins schema + data + Core 1 game
 // table, but no collapse schedule and no baseline column. An initial runner
@@ -23,7 +27,7 @@ async function dropCore3Schema() {
 }
 
 async function dropCore3Tracking() {
-  await db.query('DELETE FROM schema_migrations WHERE migration = $1', [MIGRATION_008]);
+  await db.query('DELETE FROM schema_migrations WHERE migration = ANY($1)', [[MIGRATION_008, MIGRATION_017]]);
 }
 
 describe('Core 3: tracked production migration 008', () => {
@@ -42,7 +46,7 @@ describe('Core 3: tracked production migration 008', () => {
 
     const result = await runMigrations({ log: () => {} });
 
-    expect(result.applied).toEqual([MIGRATION_008]); // only Core 3 was missing
+    expect(result.applied).toEqual([MIGRATION_008, MIGRATION_017]); // Core 3 + the V2-1 widen of its columns
 
     const verification = await verifyGameSchema();
     expect(verification.problems).toEqual([]);
@@ -56,7 +60,7 @@ describe('Core 3: tracked production migration 008', () => {
     for (const coin of coinsAfter.rows) {
       expect(coin.cycle_baseline_price).toBe(coin.current_price);
     }
-    expect(coinsAfter.rows[0].cycle_baseline_price).toBe('999.99');
+    expect(coinsAfter.rows[0].cycle_baseline_price).toBe('999.9900');
 
     // The schedule table starts empty — no collapse state is fabricated.
     const { rows } = await db.query('SELECT count(*)::int AS n FROM coin_collapse_schedule');
@@ -75,7 +79,7 @@ describe('Core 3: tracked production migration 008', () => {
 
     await runMigrations({ log: () => {} });
     const { rows } = await db.query('SELECT cycle_baseline_price FROM coins WHERE coin_id = (SELECT min(coin_id) FROM coins)');
-    expect(rows[0].cycle_baseline_price).toBe('42.50');
+    expect(rows[0].cycle_baseline_price).toBe('42.5000'); // 4dp post-migration-017
   });
 
   test('safe rerun: tracked migration is skipped entirely', async () => {

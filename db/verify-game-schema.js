@@ -1090,6 +1090,45 @@ async function verifyResults(q, problems) {
   }
 }
 
+// --- V2-1: price precision (migration 017) ----------------------------------
+// Every column the V2 cyclical market writes per-unit coin prices into must
+// persist 4 decimal places (money columns stay at 2dp). Each table is
+// guarded independently so a missing table is reported, not crashed on.
+const V2_PRICE_PRECISION_COLUMNS = [
+  ['coins', 'current_price'],
+  ['coins', 'cycle_baseline_price'],
+  ['coin_collapse_schedule', 'baseline_price'],
+  ['price_history', 'price'],
+  ['market_history', 'total_value'],
+  ['apocalypse_transactions', 'price'],
+  ['transactions', 'price'],
+  ['portfolios', 'average_purchase_price'],
+  ['coin_statistics', 'all_time_high'],
+  ['coin_statistics', 'all_time_low']
+];
+
+async function verifyV2PricePrecision(q, problems) {
+  for (const [table, column] of V2_PRICE_PRECISION_COLUMNS) {
+    const reg = await q(`SELECT to_regclass($1) AS r`, [`public.${table}`]);
+    if (!reg.rows[0].r) {
+      problems.push(`missing table (V2 price precision check): ${table}`);
+      continue;
+    }
+    const col = await q(
+      `SELECT data_type, numeric_scale FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = $1 AND column_name = $2`,
+      [table, column]
+    );
+    if (col.rows.length === 0) {
+      problems.push(`missing column (V2 price precision check): ${table}.${column}`);
+      continue;
+    }
+    if (col.rows[0].data_type !== 'numeric' || col.rows[0].numeric_scale !== 4) {
+      problems.push(`column ${table}.${column}: type ${col.rows[0].data_type} scale ${col.rows[0].numeric_scale}, expected numeric scale 4 (migration 017)`);
+    }
+  }
+}
+
 async function verifyGameSchema({ query } = {}) {
   const q = query || ((...args) => db.query(...args));
   const problems = [];
@@ -1102,6 +1141,7 @@ async function verifyGameSchema({ query } = {}) {
   await verifyBots(q, problems);
   await verifyEconomy(q, problems);
   await verifyResults(q, problems);
+  await verifyV2PricePrecision(q, problems);
 
   return { ok: problems.length === 0, problems };
 }

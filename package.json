@@ -13,6 +13,7 @@
     "seed": "node db/seed.js",
     "migrate": "node db/migrate.js",
     "verify:game-schema": "node db/verify-game-schema.js",
+    "simulate": "node simulation/run.js",
     "clear-price-history": "node clear-price-history.js"
   },
   "keywords": [],

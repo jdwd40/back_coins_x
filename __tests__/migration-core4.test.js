@@ -40,9 +40,14 @@ async function dropCore4Schema() {
 // (apocalypse_economy_ticks/events) survive and are shape-verified no-ops.
 const MIGRATION_015 = '015_leaderboard_eligible.sql';
 const MIGRATION_016 = '016_create_apocalypse_economy.sql';
+// Migration 017 (V2-1 price precision) widens apocalypse_transactions.price,
+// which 009 recreates at 2dp — its tracking row must be cleared alongside
+// Core 4's so the simulated pre-Core-4 state converges to the canonical
+// post-V2 schema.
+const MIGRATION_017 = '017_v2_price_precision.sql';
 
 async function dropCore4Tracking() {
-  await db.query('DELETE FROM schema_migrations WHERE migration = ANY($1)', [[MIGRATION_009, MIGRATION_011, MIGRATION_012, MIGRATION_015, MIGRATION_016]]);
+  await db.query('DELETE FROM schema_migrations WHERE migration = ANY($1)', [[MIGRATION_009, MIGRATION_011, MIGRATION_012, MIGRATION_015, MIGRATION_016, MIGRATION_017]]);
 }
 
 describe('Core 4: tracked production migration 009', () => {
@@ -66,7 +71,7 @@ describe('Core 4: tracked production migration 009', () => {
     await dropCore4Tracking();
 
     const result = await runMigrations({ log: () => {} });
-    expect(result.applied).toEqual([MIGRATION_009, MIGRATION_011, MIGRATION_012, MIGRATION_015, MIGRATION_016]); // Core 4, Core 6, 012 widening, #19 eligibility column, #18 economy ledger
+    expect(result.applied).toEqual([MIGRATION_009, MIGRATION_011, MIGRATION_012, MIGRATION_015, MIGRATION_016, MIGRATION_017]); // Core 4, Core 6, 012 widening, #19 eligibility column, #18 economy ledger, V2-1 price precision
 
     const verification = await verifyGameSchema();
     expect(verification.problems).toEqual([]);
