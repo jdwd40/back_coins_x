@@ -1,30 +1,30 @@
+// V2-1: server-authoritative deterministic cyclical market writer.
+//
+// This class owns ONLY lifecycle (start/stop of the periodic write batch)
+// and persistence (coins + price_history + market_history, atomically, with
+// Core 4 peak reconciliation). All pricing mathematics live in the shared
+// gameplay domain (game/marketDomain.js) — the exact same functions the
+// headless simulator (simulation/) calls. There is no random walk, no
+// Math.random(), no in-memory volatility/event state: prices are a pure
+// function of the persisted apocalypse cycle (seed + window), each coin's
+// persisted cycle_baseline_price, its gameplay-roster archetype and
+// authoritative time, so restarts reproduce identical prices from the
+// database alone.
+//
+// Core 2: the apocalypse volatility factor is resolved ONCE per batch from
+// authoritative Core 1 progress and passed to the domain as the amplitude
+// multiplier (it scales deviation-from-anchor, never the anchor path).
+// Core 3: collapsed coins are read from the persisted execution state and
+// excluded entirely — they stay exactly £0, and £0 never trips the
+// invalid-write guard.
+
 const db = require('../db/connection');
 const logger = require('../utils/logger');
 const gameCycleService = require('../game/gameCycleService');
 const { getApocalypseVolatility } = require('../game/apocalypseVolatility');
 const collapseScheduleService = require('../game/collapseScheduleService');
 const gameRoundService = require('../game/gameRoundService');
-// Market cycle types with more balanced effects
-const MARKET_CYCLES = {
-  STRONG_BOOM: { type: 'STRONG_BOOM', baseEffect: 0.005 },    // 0.5% max
-  MILD_BOOM: { type: 'MILD_BOOM', baseEffect: 0.002 },       // 0.2% max
-  STRONG_BUST: { type: 'STRONG_BUST', baseEffect: -0.005 },  // -0.5% max
-  MILD_BUST: { type: 'MILD_BUST', baseEffect: -0.002 },      // -0.2% max
-  STABLE: { type: 'STABLE', baseEffect: 0 }
-};
-
-// More balanced event impacts with longer durations
-const COIN_EVENTS = {
-  MAJOR_PARTNERSHIP: { type: 'MAJOR_PARTNERSHIP', multiplier: 1.05, duration: { min: 120000, max: 900000 } },  // +5%, 2-15 mins
-  MINOR_PARTNERSHIP: { type: 'MINOR_PARTNERSHIP', multiplier: 1.02, duration: { min: 120000, max: 900000 } },  // +2%
-  REGULATION_NEGATIVE: { type: 'REGULATION_NEGATIVE', multiplier: 0.95, duration: { min: 120000, max: 900000 } }, // -5%
-  REGULATION_POSITIVE: { type: 'REGULATION_POSITIVE', multiplier: 1.03, duration: { min: 120000, max: 900000 } }, // +3%
-  MAJOR_ADOPTION: { type: 'MAJOR_ADOPTION', multiplier: 1.08, duration: { min: 120000, max: 900000 } },        // +8%
-  MINOR_ADOPTION: { type: 'MINOR_ADOPTION', multiplier: 1.03, duration: { min: 120000, max: 900000 } },        // +3%
-  SCANDAL: { type: 'SCANDAL', multiplier: 0.93, duration: { min: 120000, max: 900000 } },                      // -7%
-  RUMOR_POSITIVE: { type: 'RUMOR_POSITIVE', multiplier: 1.01, duration: { min: 120000, max: 900000 } },        // +1%
-  RUMOR_NEGATIVE: { type: 'RUMOR_NEGATIVE', multiplier: 0.99, duration: { min: 120000, max: 900000 } }         // -1%
-};
+const marketDomain = require('../game/marketDomain');
 
 // Time range options for price history
 const TIME_RANGES = {
@@ -37,131 +37,51 @@ const TIME_RANGES = {
   'ALL': null                    // No time limit
 };
 
+// Map the batch's mean recent movement to the coarse market_history trend
+// vocabulary (the market_history CHECK constraint admits exactly these).
+function coarseMarketTrend(meanChangePct) {
+  if (meanChangePct >= 0.5) return 'STRONG_BOOM';
+  if (meanChangePct >= 0.1) return 'MILD_BOOM';
+  if (meanChangePct <= -0.5) return 'STRONG_BUST';
+  if (meanChangePct <= -0.1) return 'MILD_BUST';
+  return 'STABLE';
+}
+
 class MarketSimulator {
   constructor() {
-    this.currentCycle = null;
-    this.cycleTimeout = null;
-    this.priceUpdateInterval = 30000;  // Changed to 30 seconds
+    this.priceUpdateInterval = 30000;  // 30 seconds
     this.updateIntervalId = null;
-    this.coinEvents = new Map();
-    this.coinVolatility = new Map();
     this.isRunning = false;
-    this.lastPrices = new Map();
-    this.initialPrices = new Map();
+    // Observability for GET /api/market/status only; never pricing state.
+    this.lastBatch = null;
   }
 
-  // Initialize coin volatility profiles with more conservative values
-  async initializeCoinVolatility() {
-    const result = await db.query('SELECT coin_id, symbol, current_price FROM coins');
-    const coins = result.rows;
-
-    coins.forEach(coin => {
-      // Store initial price for mean reversion
-      this.initialPrices.set(coin.coin_id, parseFloat(coin.current_price));
-      
-      // Assign more conservative volatility (0.2 to 0.8)
-      const baseVolatility = 0.2 + (Math.random() * 0.6);
-      
-      this.coinVolatility.set(coin.coin_id, {
-        baseVolatility,
-        lastUpdate: new Date(),
-        trendDirection: Math.random() > 0.5 ? 1 : -1,
-        trendStrength: Math.random() * 0.002, // 0.2% max trend effect
-        trendDuration: this.getRandomDuration(30000, 60000), // 30s to 1m trend duration
-        trendStartTime: new Date()
-      });
-
-      logger.log(`[MARKET] Set volatility for ${coin.symbol}: ${baseVolatility}`);
+  // Price one live coin through the shared domain. Extracted as a method so
+  // a fundamentally invalid domain result can be guarded per coin and tests
+  // can observe the exact pricing calls of a batch.
+  calculateNewPrice(coin, marketContext) {
+    const point = marketDomain.evaluateMarketPoint({
+      seed: marketContext.seed,
+      coinId: coin.coin_id,
+      baselinePrice: parseFloat(coin.cycle_baseline_price),
+      roundStartMs: marketContext.roundStartMs,
+      nowMs: marketContext.nowMs,
+      amplitude: marketContext.amplitude
     });
+    return marketDomain.roundGamePrice(point.price);
   }
 
-  // Calculate new price with mean reversion and damping.
-  // volatilityMultiplier is the Core 2 apocalypse factor, resolved ONCE per
-  // updateAllPrices() batch from authoritative Core 1 state. It scales the
-  // volatility-sensitive directional movement amplitude (market-cycle, random
-  // and trend components); the event effect and the protective mean-reversion
-  // pull are intentionally not scaled. Any invalid multiplier (NaN, Infinity,
-  // zero, negative, missing) safely falls back to normal volatility (1).
-  calculateNewPrice(currentPrice, coinId, volatilityMultiplier = 1) {
-    const volatilityProfile = this.coinVolatility.get(coinId);
-    if (!volatilityProfile) return currentPrice;
-
-    const apocalypseFactor =
-      typeof volatilityMultiplier === 'number' && Number.isFinite(volatilityMultiplier) && volatilityMultiplier > 0
-        ? volatilityMultiplier
-        : 1;
-
-    const { baseVolatility, trendDirection, trendStrength } = volatilityProfile;
-    const initialPrice = this.initialPrices.get(coinId);
-
-    // Market cycle effect (reduced impact)
-    const marketEffect = this.currentCycle ?
-      (this.currentCycle.type === 'STABLE' ? 0 : this.currentCycle.baseEffect * baseVolatility * apocalypseFactor) : 0;
-
-    // Coin-specific event effect
-    const coinEvent = this.coinEvents.get(coinId);
-    const eventEffect = coinEvent ? (coinEvent.multiplier - 1) * 0.1 * baseVolatility : 0;
-
-    // Reduced random component (-0.2% to +0.2% * volatility), apocalypse-scaled
-    const randomEffect = ((Math.random() * 0.004) - 0.002) * baseVolatility * apocalypseFactor;
-
-    // Trend component with duration check
-    let trendEffect = 0;
-    const now = new Date();
-    if (now - volatilityProfile.trendStartTime >= volatilityProfile.trendDuration) {
-      // Update trend
-      volatilityProfile.trendDirection *= -1; // Reverse direction
-      volatilityProfile.trendStrength = Math.random() * 0.002;
-      volatilityProfile.trendDuration = this.getRandomDuration(30000, 60000);
-      volatilityProfile.trendStartTime = now;
-      this.coinVolatility.set(coinId, volatilityProfile);
-    }
-    trendEffect = trendDirection * trendStrength * apocalypseFactor;
-
-    // Mean reversion effect (pulls price back towards initial price)
-    const priceDeviation = (currentPrice - initialPrice) / initialPrice;
-    const meanReversionStrength = 0.001; // 0.1% max reversion effect
-    const meanReversionEffect = -priceDeviation * meanReversionStrength;
-
-    // Combine all effects
-    const totalEffect = marketEffect + eventEffect + randomEffect + trendEffect + meanReversionEffect;
-    
-    // Apply a much stricter change limit (0.5% max per update)
-    const maxChange = 0.005;
-    const limitedEffect = Math.max(Math.min(totalEffect, maxChange), -maxChange);
-    
-    // Calculate new price
-    let newPrice = currentPrice * (1 + limitedEffect);
-
-    // Enforce price bounds (between 20% and 500% of initial price)
-    const minPrice = initialPrice * 0.2;
-    const maxPrice = initialPrice * 5;
-    newPrice = Math.min(Math.max(newPrice, minPrice), maxPrice);
-
-    // Round based on price range
-    if (newPrice < 1) {
-      return Math.round(newPrice * 10000) / 10000; // 4 decimal places
-    } else if (newPrice < 100) {
-      return Math.round(newPrice * 100) / 100; // 2 decimal places
-    } else {
-      return Math.round(newPrice * 10) / 10; // 1 decimal place
-    }
-  }
-
-  // Start the market simulation
+  // Start the market writer
   async start() {
     if (this.isRunning) {
       logger.log('[MARKET] Already running');
       return;
     }
-    
+
     try {
-      logger.log('[MARKET] Starting simulation...');
-      await this.initializeCoinVolatility();
-      await this.startNewMarketCycle();
+      logger.log('[MARKET] Starting V2 cyclical market writer...');
       this.isRunning = true;
       this.startPriceUpdates();
-      
       logger.log('[MARKET] Successfully started');
     } catch (error) {
       logger.error('[MARKET] Failed to start:', error);
@@ -169,84 +89,17 @@ class MarketSimulator {
     }
   }
 
-  // Stop the market simulation
+  // Stop the market writer
   stop() {
-    logger.log('[MARKET] Stopping simulation...');
+    logger.log('[MARKET] Stopping market writer...');
     this.isRunning = false;
-    
+
     if (this.updateIntervalId) {
       clearInterval(this.updateIntervalId);
       this.updateIntervalId = null;
     }
-    
-    if (this.cycleTimeout) {
-      clearTimeout(this.cycleTimeout);
-      this.cycleTimeout = null;
-    }
-    
-    logger.log('[MARKET] Simulation stopped');
-  }
 
-  // Start a new market cycle
-  async startNewMarketCycle() {
-    if (!this.isRunning && this.currentCycle) return;
-
-    if (this.cycleTimeout) {
-      clearTimeout(this.cycleTimeout);
-      this.cycleTimeout = null;
-    }
-
-    const cycleTypes = Object.values(MARKET_CYCLES);
-    const randomCycle = cycleTypes[Math.floor(Math.random() * cycleTypes.length)];
-    const duration = this.getRandomDuration(120000, 600000); // Changed to 2-10 mins
-
-    this.currentCycle = {
-      ...randomCycle,
-      startTime: new Date(),
-      duration: duration
-    };
-
-    logger.log(`[MARKET] New cycle: ${this.currentCycle.type}, Effect: ${this.currentCycle.baseEffect}, Duration: ${duration}ms`);
-
-    this.cycleTimeout = setTimeout(() => {
-      this.startNewMarketCycle();
-    }, duration);
-
-    await this.initializeCoinEvents();
-  }
-
-  // Initialize random events for all coins
-  async initializeCoinEvents() {
-    const result = await db.query('SELECT coin_id FROM coins');
-    const coins = result.rows;
-
-    coins.forEach(coin => {
-      if (!this.coinEvents.has(coin.coin_id)) {
-        this.startNewCoinEvent(coin.coin_id);
-      }
-    });
-  }
-
-  // Start a new random event for a coin
-  startNewCoinEvent(coinId) {
-    if (!this.isRunning) return;
-
-    const events = Object.values(COIN_EVENTS);
-    const event = events[Math.floor(Math.random() * events.length)];
-    const duration = this.getRandomDuration(event.duration.min, event.duration.max);
-
-    const coinEvent = {
-      ...event,
-      startTime: new Date(),
-      duration: duration
-    };
-
-    this.coinEvents.set(coinId, coinEvent);
-
-    // Schedule next event
-    setTimeout(() => {
-      this.startNewCoinEvent(coinId);
-    }, duration);
+    logger.log('[MARKET] Market writer stopped');
   }
 
   // Start periodic price updates
@@ -263,7 +116,7 @@ class MarketSimulator {
           logger.error('[MARKET] Error in price update interval:', error);
           clearInterval(this.updateIntervalId);
           this.updateIntervalId = null;
-          
+
           if (this.isRunning) {
             logger.log('[MARKET] Attempting recovery in 5 seconds...');
             setTimeout(() => {
@@ -288,41 +141,57 @@ class MarketSimulator {
     startUpdateInterval();
   }
 
-  // Update prices for all coins based on current market conditions
+  // Update prices for all live coins from the shared cyclical domain.
   async updateAllPrices() {
     let client;
     try {
-      // Core 2: resolve the authoritative Core 1 apocalypse state ONCE per
-      // batch (before opening the write transaction so the cycle advisory
-      // lock and the coin row locks can never interleave), then translate
-      // progress into a single bounded volatility multiplier shared by every
-      // coin calculation in this batch. If Core 1 state is unreadable this
-      // throws here and the batch aborts before any write.
-      const gameState = await gameCycleService.getGameState();
-      const volatilityMultiplier = getApocalypseVolatility(gameState.apocalypsePercent);
+      // Resolve the authoritative Core 1 cycle ONCE per batch — before
+      // opening the write transaction, so the cycle advisory lock and the
+      // coin row locks can never interleave. reconcileCycle returns the
+      // full persisted cycle row; the seed is server-internal and never
+      // leaves this process. If Core 1 state is unreadable this throws here
+      // and the batch aborts before any write.
+      const cycle = await gameCycleService.reconcileCycle({});
+      const batchNowMs = Date.now();
+      const { apocalypsePercent } = gameCycleService.deriveProgress({
+        startTime: cycle.start_time,
+        endTime: cycle.end_time,
+        durationMs: cycle.duration_ms,
+        now: new Date(batchNowMs)
+      });
+      // Core 2: translate progress into a single bounded amplitude shared
+      // by every coin calculation in this batch.
+      const amplitude = getApocalypseVolatility(apocalypsePercent);
 
-      // Core 3: the getGameState() call above has already reconciled any due
-      // collapses (they execute inside the Core 1 lifecycle transaction, before
-      // this batch calculates prices). Read the persisted execution state of
-      // the ACTIVE cycle — never inferred from current_price === 0, never held
-      // in memory — so collapsed coins are excluded from this batch.
+      // Core 3: the reconcileCycle() call above has already reconciled any
+      // due collapses (they execute inside the Core 1 lifecycle transaction,
+      // before this batch calculates prices). Read the persisted execution
+      // state of the live cycle — never inferred from current_price === 0,
+      // never held in memory — so collapsed coins are excluded.
       const collapsedCoinIds = await collapseScheduleService.getCollapsedCoinIds();
+
+      const marketContext = {
+        seed: cycle.seed,
+        roundStartMs: new Date(cycle.start_time).getTime(),
+        nowMs: batchNowMs,
+        amplitude
+      };
 
       client = await db.getClient();
       await client.query('BEGIN');
       // Lock coins for consistent snapshot + atomic writes to coins + price_history + market_history
-      const result = await client.query('SELECT coin_id, current_price FROM coins FOR UPDATE');
+      const result = await client.query('SELECT coin_id, current_price, cycle_baseline_price FROM coins FOR UPDATE');
       const coins = result.rows;
       let totalMarketValue = 0;
+      let changePctSum = 0;
+      let changePctCount = 0;
 
       for (const coin of coins) {
-        // A coin collapsed in the ACTIVE cycle is dead for the rest of the
-        // cycle: the simulator must not calculate or write a new positive
-        // price for it. It stays exactly £0 (Core 2 multiplier and restarts
-        // cannot revive it); its £0 transition was already appended to
-        // price_history by the collapse execution, so no history row is
-        // written here either. Zero itself therefore never reaches the
-        // invalid-write guard below and never causes a batch rollback.
+        // A coin collapsed in the live cycle is dead for the rest of the
+        // cycle: the writer must not calculate or write a new positive
+        // price for it. It stays exactly £0; its £0 transition was already
+        // appended to price_history by the collapse execution, so no
+        // history row is written here either.
         if (collapsedCoinIds.has(coin.coin_id)) {
           if (parseFloat(coin.current_price) !== 0) {
             // Malformed persisted state: a collapsed coin with a non-zero
@@ -334,7 +203,7 @@ class MarketSimulator {
           }
           continue;
         }
-        const newPrice = this.calculateNewPrice(parseFloat(coin.current_price), coin.coin_id, volatilityMultiplier);
+        const newPrice = this.calculateNewPrice(coin, marketContext);
         // Never persist a corrupt value: an invalid price aborts the whole
         // batch (rollback below) instead of silently writing bad data.
         if (typeof newPrice !== 'number' || !Number.isFinite(newPrice) || newPrice <= 0) {
@@ -351,12 +220,28 @@ class MarketSimulator {
           [coin.coin_id, newPrice]
         );
         totalMarketValue += newPrice;
+
+        // Coarse recent movement for the market_history trend: same domain,
+        // same batch instant, one public-lookback behind.
+        const previousPrice = marketDomain.priceAt({
+          seed: marketContext.seed,
+          coinId: coin.coin_id,
+          baselinePrice: parseFloat(coin.cycle_baseline_price),
+          roundStartMs: marketContext.roundStartMs,
+          nowMs: marketContext.nowMs - marketDomain.PUBLIC_SIGNAL_LOOKBACK_MS,
+          amplitude
+        });
+        changePctSum += ((newPrice - previousPrice) / previousPrice) * 100;
+        changePctCount += 1;
       }
+
+      const meanChangePct = changePctCount > 0 ? changePctSum / changePctCount : 0;
+      const trend = coarseMarketTrend(meanChangePct);
 
       // Insert market_history from the same snapshot
       await client.query(
         'INSERT INTO market_history (total_value, market_trend) VALUES ($1, $2)',
-        [totalMarketValue, this.currentCycle?.type || 'STABLE']
+        [totalMarketValue, trend]
       );
 
       // Core 4: set-based peak reconciliation. One SQL statement lifts every
@@ -366,6 +251,7 @@ class MarketSimulator {
       await gameRoundService.reconcileActivePeaks(client);
 
       await client.query('COMMIT');
+      this.lastBatch = { trend, at: new Date(batchNowMs) };
     } catch (error) {
       if (client) {
         try { await client.query('ROLLBACK'); } catch (_) {}
@@ -387,12 +273,10 @@ class MarketSimulator {
     return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
   }
 
-  // Generate a random duration within a range
-  getRandomDuration(min, max) {
-    return Math.floor(Math.random() * (max - min + 1) + min);
-  }
-
-  // Get current market status
+  // Get current market status. V2-1: the cyclical domain holds no timers or
+  // in-memory cycles, so the status reports the writer's own cadence and
+  // the last batch's coarse trend. Random coin events no longer exist; the
+  // events field stays as a (now always empty) contract for API clients.
   getMarketStatus() {
     if (!this.isRunning) {
       return {
@@ -403,28 +287,18 @@ class MarketSimulator {
       };
     }
 
-    const now = new Date();
-    const cycleTimeRemaining = this.currentCycle ? 
-      Math.max(0, this.currentCycle.duration - (now - this.currentCycle.startTime)) : 0;
-
-    // Get active events with time remaining
-    const activeEvents = Array.from(this.coinEvents.entries()).map(([coinId, event]) => {
-      const eventTimeRemaining = Math.max(0, event.duration - (now - event.startTime));
-      return {
-        coinId,
-        type: event.type,
-        timeRemaining: this.formatTimeRemaining(eventTimeRemaining),
-        effect: event.multiplier > 1 ? 'POSITIVE' : 'NEGATIVE'
-      };
-    });
+    const now = Date.now();
+    const nextUpdateMs = this.lastBatch
+      ? Math.max(0, this.priceUpdateInterval - (now - this.lastBatch.at.getTime()))
+      : 0;
 
     return {
       status: 'RUNNING',
       currentCycle: {
-        type: this.currentCycle?.type || 'NONE',
-        timeRemaining: this.formatTimeRemaining(cycleTimeRemaining)
+        type: this.lastBatch?.trend || 'STABLE',
+        timeRemaining: this.formatTimeRemaining(nextUpdateMs)
       },
-      events: activeEvents
+      events: []
     };
   }
 

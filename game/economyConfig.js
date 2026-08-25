@@ -152,6 +152,38 @@ function validateEconomyEnabled(raw) {
   throw new Error(`GAME_ECONOMY_ENABLED must be "true" or "false"; received ${JSON.stringify(raw)}`);
 }
 
+// V2-3 economy scale: an explicit multiplier in [0, 1] applied to EVERY
+// passive deduction (fees, taxes and events) at resolution time.
+//   * 1 (default) preserves the legacy Core 7 game-design amounts exactly
+//     — production behaviour is unchanged without an explicit override.
+//   * 0 disables all passive deductions through the same code path (a
+//     weaker, explicit alternative to GAME_ECONOMY_ENABLED=false).
+//   * Values in between weaken the drains proportionally.
+// Values above 1 are rejected: V2 may only weaken or disable the passive
+// economy, never silently strengthen it. The scale changes AMOUNTS ONLY —
+// every debit still flows through the one shared atomic advisory-locked
+// debit path with the same claim/idempotency guarantees.
+function validateEconomyScale(raw) {
+  if (raw === undefined || raw === null) return 1;
+  if (typeof raw === 'string' && raw.trim() === '') return 1;
+  const value = parseNumber(raw, 'GAME_ECONOMY_SCALE');
+  if (!Number.isFinite(value)) {
+    throw new Error(`GAME_ECONOMY_SCALE must be finite; received ${String(raw)}`);
+  }
+  if (value < 0 || value > 1) {
+    throw new Error(`GAME_ECONOMY_SCALE must be in [0, 1] (V2 may only weaken or disable passive deductions); received ${value}`);
+  }
+  return value;
+}
+
+// Scale a configured amount to its effective value at exact 2dp money
+// precision. A scaled amount below one penny resolves to 0, which callers
+// treat as "this debit does not happen" (the shared debit path only ever
+// applies positive amounts).
+function scaleEconomyAmount(amount, scale) {
+  return Math.round(amount * scale * 100) / 100;
+}
+
 // Resolve the effective economy runtime config. Validation runs on every
 // resolution, so a bad config throws before any tick can run on it.
 function resolveEconomyConfig(env = process.env) {
@@ -167,6 +199,7 @@ function resolveEconomyConfig(env = process.env) {
   }
   return {
     enabled: validateEconomyEnabled(env.GAME_ECONOMY_ENABLED),
+    scale: validateEconomyScale(env.GAME_ECONOMY_SCALE),
     feeTickIntervalMs: validateIntervalMs(env.GAME_FEE_TICK_INTERVAL_MS, 'GAME_FEE_TICK_INTERVAL_MS', GAME_FEE_TICK_INTERVAL_MS, MIN_ECONOMY_TICK_INTERVAL_MS, MAX_ECONOMY_TICK_INTERVAL_MS),
     feeAmount: validateMoneyAmount(env.GAME_FEE_AMOUNT, 'GAME_FEE_AMOUNT', GAME_FEE_AMOUNT),
     taxTickIntervalMs: validateIntervalMs(env.GAME_TAX_TICK_INTERVAL_MS, 'GAME_TAX_TICK_INTERVAL_MS', GAME_TAX_TICK_INTERVAL_MS, MIN_ECONOMY_TICK_INTERVAL_MS, MAX_ECONOMY_TICK_INTERVAL_MS),
@@ -194,5 +227,7 @@ module.exports = {
   validateEventCount,
   validateEventFraction,
   validateEconomyEnabled,
+  validateEconomyScale,
+  scaleEconomyAmount,
   resolveEconomyConfig
 };

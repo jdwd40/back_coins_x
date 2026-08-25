@@ -2,6 +2,7 @@ const { getGameState } = require('../game/gameCycleService');
 const gameRoundService = require('../game/gameRoundService');
 const gameResultsService = require('../game/gameResultsService');
 const economyService = require('../game/economyService');
+const marketSignalsService = require('../game/marketSignalsService');
 
 // Map Core 4/6/economy domain errors (which carry an explicit status) to
 // responses; anything else falls through to the generic error middleware.
@@ -124,5 +125,17 @@ exports.getMyParticipant = async (req, res, next) => {
     res.status(200).json({ status: 'success', data });
   } catch (err) {
     handleGameError(err, res, next);
+  }
+};
+
+// V2-1: public read-only coarse market signals for the live round. The
+// payload is built entirely from the shared domain's public signal shape —
+// it can never contain the seed, exact timings, anchors or future state.
+exports.getMarketSignals = async (req, res, next) => {
+  try {
+    const data = await marketSignalsService.getPublicMarketSignals({});
+    res.status(200).json({ status: 'success', data });
+  } catch (err) {
+    next(err);
   }
 };

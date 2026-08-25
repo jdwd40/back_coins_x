@@ -33,6 +33,79 @@ const GAME_QUANTITY_MAX = 10000000000;
 const GAME_MIN_TRADE_VALUE = 0.01;
 
 // ---------------------------------------------------------------------------
+// Crypto Chaos V2-2: persistent Power + position limit.
+// These are the single authoritative game-design values for the Power
+// resource — do not scatter literals. Validated env overrides are resolved
+// by the resolvers below, which are the only readers; game/powerDomain.js
+// (shared by live trade code AND the simulator) consumes them.
+//
+// POWER is a persistent per-user resource (stored on each round participant
+// row and carried forward across apocalypse rollovers — see migration 018):
+//   * BUY costs Power; SELL always costs zero Power and is never blocked.
+//   * Power regenerates lazily from REAL elapsed time (+1 point per
+//     GAME_POWER_REGEN_MS_PER_POINT), clamped to [0, GAME_POWER_MAX].
+//   * Buy cost: 1 + floor(buyTotal / GAME_POWER_BUY_COST_DIVISOR) — a flat
+//     1-Power order charge plus one point per full £125. With the default
+//     divisor this lands near the plan's targets (£250 -> 3, £500 -> 5,
+//     £1,000 -> 9, £2,500 -> 21), and the per-order charge means splitting
+//     one large buy into fragments can NEVER cost less (see
+//     game/powerDomain.js for the multi-round evidence).
+//   * At most GAME_MAX_OPEN_POSITIONS distinct OPEN LIVE positions per
+//     participant; adding to an existing live position is always allowed.
+// ---------------------------------------------------------------------------
+
+// Maximum stored/effective Power. New players start full.
+const GAME_POWER_MAX = 100;
+// Lazy regeneration cadence: +1 Power per this many REAL elapsed
+// milliseconds. TUNED BY THE MULTI-ROUND STUDY: the plan's initial ~120s
+// starved skilled play (DIP_BOOM median ROI collapsed to ~1% with ~2.5
+// trades/round); 30s (60 points per 30-minute round, full 0->100 recharge in
+// 50 minutes) is where the V2-2 gate passes with margin — skilled play keeps
+// a clear edge, spam/aggressive play stays constrained, and no player is
+// ever majority-starved for a round.
+const GAME_POWER_REGEN_MS_PER_POINT = 30 * 1000;
+// Power cost divisor for buys: cost = 1 + floor(total / divisor). The flat
+// per-order charge is what makes transaction fragmentation cost at least as
+// much as the equivalent single buy.
+const GAME_POWER_BUY_COST_DIVISOR = 125;
+// Maximum number of distinct OPEN LIVE coin positions per participant. A
+// live position is a holding with quantity > 0 whose coin has NOT collapsed
+// in the participant's cycle; collapsed/zero-quantity holdings are history
+// and never consume a slot.
+const GAME_MAX_OPEN_POSITIONS = 3;
+
+// Validate a positive integer game constant (Power max / position limit).
+function validatePositiveIntegerConstant(name, raw) {
+  const value = typeof raw === 'string' && raw.trim() !== '' ? Number(raw) : raw;
+  if (typeof value !== 'number' || Number.isNaN(value) || !Number.isFinite(value) || !Number.isInteger(value) || value <= 0) {
+    throw new Error(`${name} must be a positive integer; received ${typeof raw === 'string' ? JSON.stringify(raw) : String(raw)}`);
+  }
+  return value;
+}
+
+// Validated env overrides; absent/empty means the game-design defaults.
+function resolveGamePowerMax(raw = process.env.GAME_POWER_MAX) {
+  if (raw === undefined || raw === null || (typeof raw === 'string' && raw.trim() === '')) return GAME_POWER_MAX;
+  return validatePositiveIntegerConstant('GAME_POWER_MAX', raw);
+}
+
+function resolveGamePowerRegenMsPerPoint(raw = process.env.GAME_POWER_REGEN_MS_PER_POINT) {
+  if (raw === undefined || raw === null || (typeof raw === 'string' && raw.trim() === '')) return GAME_POWER_REGEN_MS_PER_POINT;
+  return validatePositiveIntegerConstant('GAME_POWER_REGEN_MS_PER_POINT', raw);
+}
+
+// The buy-cost divisor is a money amount: positive, finite, exact 2dp.
+function resolveGamePowerBuyCostDivisor(raw = process.env.GAME_POWER_BUY_COST_DIVISOR) {
+  if (raw === undefined || raw === null || (typeof raw === 'string' && raw.trim() === '')) return GAME_POWER_BUY_COST_DIVISOR;
+  return validateGameStartingCash(raw); // identical money validation rules
+}
+
+function resolveGameMaxOpenPositions(raw = process.env.GAME_MAX_OPEN_POSITIONS) {
+  if (raw === undefined || raw === null || (typeof raw === 'string' && raw.trim() === '')) return GAME_MAX_OPEN_POSITIONS;
+  return validatePositiveIntegerConstant('GAME_MAX_OPEN_POSITIONS', raw);
+}
+
+// ---------------------------------------------------------------------------
 // Issue #18: passive economic pressure (fees / taxes / Apocalypse events).
 // These are the single authoritative game-design values for the economy
 // engine — do not scatter literals. Validated env overrides are resolved in
@@ -117,6 +190,10 @@ module.exports = {
   GAME_QUANTITY_DECIMALS,
   GAME_QUANTITY_MAX,
   GAME_MIN_TRADE_VALUE,
+  GAME_POWER_MAX,
+  GAME_POWER_REGEN_MS_PER_POINT,
+  GAME_POWER_BUY_COST_DIVISOR,
+  GAME_MAX_OPEN_POSITIONS,
   GAME_FEE_TICK_INTERVAL_MS,
   GAME_FEE_AMOUNT,
   GAME_TAX_TICK_INTERVAL_MS,
@@ -128,5 +205,9 @@ module.exports = {
   GAME_EVENT_MAX_AMOUNT,
   GAME_ECONOMY_WORKER_INTERVAL_MS,
   validateGameStartingCash,
-  resolveGameStartingCash
+  resolveGameStartingCash,
+  resolveGamePowerMax,
+  resolveGamePowerRegenMsPerPoint,
+  resolveGamePowerBuyCostDivisor,
+  resolveGameMaxOpenPositions
 };

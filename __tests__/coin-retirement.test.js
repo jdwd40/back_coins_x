@@ -107,11 +107,16 @@ describe('coin retirement (migration 014)', () => {
     const state = await buildPublicMarketState({
       cycle: {
         cycle_id: 0, // no schedule rows: nothing reads as collapsed
+        seed: 'retirement-bot-state-seed', // V2-4: evaluates public signals from the cycle seed
         start_time: new Date(Date.now() - 60000),
         end_time: new Date(Date.now() + LONG_DURATION_MS),
         duration_ms: LONG_DURATION_MS
       },
-      participant: { currentCash: 1000, holdings: [] }
+      participant: {
+        currentCash: 1000,
+        holdings: [],
+        power: { current: 100, max: 100, regenMsPerPoint: 30000 }
+      }
     });
     expect(state.coins).toHaveLength(10);
     expect(state.coins.some((c) => c.coinId === 100)).toBe(false);

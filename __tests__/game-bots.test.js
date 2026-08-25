@@ -62,17 +62,39 @@ async function legacyRowCounts(userId) {
   return { portfolios: pf.rows[0].n, transactions: tx.rows[0].n };
 }
 
-// Deterministic market state fixture: coin 1 rising (+100%), coin 2 falling
-// (-50%). Both alive.
+// Deterministic market state fixture in the exact V2-4 public shape: coin 1
+// rising (+100% full window, RISE/UP), coin 2 dipping (-50%, DIP). Both
+// alive. Holdings carry the (nullable) own-position economics keys.
+function v2Coin(overrides = {}) {
+  return {
+    coinId: 1, symbol: 'AAA', currentPrice: 20, collapsed: false, history: [10, 15, 20],
+    phase: 'RISE', momentum: 'UP', archetype: 'MOON', collapseRisk: 'SHAKY', recentChangePct: 100,
+    ...overrides
+  };
+}
+
+function v2Holding(overrides = {}) {
+  return {
+    coinId: 1, symbol: 'AAA', quantity: 4,
+    costBasis: null, averageEntryPrice: null, currentValue: null, unrealizedPnlPct: null,
+    ...overrides
+  };
+}
+
 function shapedState(overrides = {}) {
   return {
     apocalypsePercent: 20,
     cash: 1000,
     holdings: [],
     coins: [
-      { coinId: 1, symbol: 'AAA', currentPrice: 20, collapsed: false, history: [10, 15, 20] },
-      { coinId: 2, symbol: 'BBB', currentPrice: 10, collapsed: false, history: [20, 15, 10] }
+      v2Coin(),
+      v2Coin({
+        coinId: 2, symbol: 'BBB', currentPrice: 10, history: [20, 15, 10],
+        phase: 'DIP', momentum: 'DOWN', archetype: 'BULL', collapseRisk: 'STABLE', recentChangePct: -50
+      })
     ],
+    power: { current: 100, max: 100, regenMsPerPoint: 30000 },
+    openPositions: { open: 0, max: 3 },
     ...overrides
   };
 }
@@ -274,13 +296,24 @@ describe('Core 5: deterministic decisions from public state only', () => {
     expect(buy.quantity * 10).toBeLessThanOrEqual(500); // 5% of £10,000 at price 10
     // Defensive sell: a holding whose public history declined meaningfully is
     // dumped in full to protect cash.
-    const holding = shapedState({ holdings: [{ coinId: 2, symbol: 'BBB', quantity: 4 }] });
+    const holding = shapedState({ holdings: [v2Holding({ coinId: 2, symbol: 'BBB', quantity: 4 })] });
     const sell = botService.decideBotAction({ strategy: 'conservative', marketState: holding, random: () => 0.1 });
     expect(sell).toEqual({ type: 'SELL', coinId: 2, quantity: 4 });
-    // A holding that has NOT declined is preserved, not sold.
-    const calm = shapedState({ holdings: [{ coinId: 1, symbol: 'AAA', quantity: 4 }] });
-    expect(botService.decideBotAction({ strategy: 'conservative', marketState: calm, random: () => 0.1 }).type)
-      .not.toBe('SELL');
+    // Issue #20: a holding with a modest gain is SOLD (half) to take profit —
+    // capital preservation now includes realizing gains, not just avoiding
+    // losses. A small move below the profit bar is still preserved.
+    const gainer = shapedState({ holdings: [v2Holding({ coinId: 1, symbol: 'AAA', quantity: 4 })] });
+    const profit = botService.decideBotAction({ strategy: 'conservative', marketState: gainer, random: () => 0.1 });
+    expect(profit).toEqual({ type: 'SELL', coinId: 1, quantity: 2 }); // +100% >= +8% bar, sell half
+    const flat = shapedState({
+      coins: [v2Coin({
+        coinId: 5, symbol: 'EEE', currentPrice: 10.4, history: [10, 10.4],
+        phase: 'RISE', momentum: 'FLAT', collapseRisk: 'STABLE', recentChangePct: 4
+      })],
+      holdings: [v2Holding({ coinId: 5, symbol: 'EEE', quantity: 4 })]
+    });
+    expect(botService.decideBotAction({ strategy: 'conservative', marketState: flat, random: () => 0.1 }).type)
+      .not.toBe('SELL'); // +4% is below both the +8% profit bar and the -5% loss bar
   });
 
   test('momentum: chooses the rising coin, reduces a position after a negative move', () => {
@@ -292,8 +325,9 @@ describe('Core 5: deterministic decisions from public state only', () => {
     const allFalling = shapedState({ coins: [shapedState().coins[1]] });
     expect(botService.decideBotAction({ strategy: 'momentum', marketState: allFalling, random: () => 0 }).type)
       .toBe('HOLD');
-    // Reduces after negative: halves the declining holding.
-    const holding = shapedState({ holdings: [{ coinId: 2, symbol: 'BBB', quantity: 6 }] });
+    // Reduces after negative: halves the declining holding (public momentum
+    // DOWN on an underwater position).
+    const holding = shapedState({ holdings: [v2Holding({ coinId: 2, symbol: 'BBB', quantity: 6 })] });
     const reduce = botService.decideBotAction({ strategy: 'momentum', marketState: holding, random: () => 0 });
     expect(reduce).toEqual({ type: 'SELL', coinId: 2, quantity: 3 });
   });
@@ -301,22 +335,28 @@ describe('Core 5: deterministic decisions from public state only', () => {
   test('dip buyer: buys the meaningfully dropped surviving coin, sells into a recovery', () => {
     const state = shapedState();
     const buy = botService.decideBotAction({ strategy: 'dip_buyer', marketState: state, random: () => 0 });
-    expect(buy).toMatchObject({ type: 'BUY', coinId: 2 }); // the -50% drop, still alive
-    expect(buy.quantity * 10).toBeLessThanOrEqual(150); // 15% of cash at price 10
-    // A drop that is not meaningful (< 10%) is ignored.
+    expect(buy).toMatchObject({ type: 'BUY', coinId: 2 }); // the -50% DIP, still alive
+    expect(buy.quantity * 10).toBeLessThanOrEqual(300); // 30% of cash at price 10
+    // A drop that is not meaningful (a falling RISE reading) is ignored.
     const shallow = shapedState({
-      coins: [{ coinId: 3, symbol: 'CCC', currentPrice: 9.5, collapsed: false, history: [10, 9.5] }]
+      coins: [v2Coin({
+        coinId: 3, symbol: 'CCC', currentPrice: 9.5, history: [10, 9.5],
+        phase: 'RISE', momentum: 'DOWN', collapseRisk: 'STABLE', recentChangePct: -5
+      })]
     });
     expect(botService.decideBotAction({ strategy: 'dip_buyer', marketState: shallow, random: () => 0 }).type)
       .toBe('HOLD');
     // A meaningfully dropped coin that is DEAD is never bought.
     const dead = shapedState({
-      coins: [{ coinId: 4, symbol: 'DDD', currentPrice: 0, collapsed: true, history: [10, 0] }]
+      coins: [v2Coin({
+        coinId: 4, symbol: 'DDD', currentPrice: 0, collapsed: true, history: [10, 0],
+        phase: 'DEAD', momentum: 'FLAT', collapseRisk: 'DEAD', recentChangePct: null
+      })]
     });
     expect(botService.decideBotAction({ strategy: 'dip_buyer', marketState: dead, random: () => 0 }).type)
       .toBe('HOLD');
     // Sells into a meaningful recovery on a held position.
-    const recovered = shapedState({ holdings: [{ coinId: 1, symbol: 'AAA', quantity: 6 }] });
+    const recovered = shapedState({ holdings: [v2Holding({ coinId: 1, symbol: 'AAA', quantity: 6 })] });
     const sell = botService.decideBotAction({ strategy: 'dip_buyer', marketState: recovered, random: () => 0 });
     expect(sell).toEqual({ type: 'SELL', coinId: 1, quantity: 6 });
   });
@@ -334,7 +374,10 @@ describe('Core 5: deterministic decisions from public state only', () => {
     const conservative = botService.decideBotAction({ strategy: 'conservative', marketState: state, random: () => 0.1 });
     expect(buy0.quantity * 20).toBeGreaterThan(conservative.quantity * 10);
     // No eligible coin -> HOLD, never a throw.
-    const dead = shapedState({ coins: [{ coinId: 1, symbol: 'AAA', currentPrice: 0, collapsed: true, history: [5, 0] }] });
+    const dead = shapedState({ coins: [v2Coin({
+      currentPrice: 0, collapsed: true, history: [5, 0],
+      phase: 'DEAD', momentum: 'FLAT', collapseRisk: 'DEAD', recentChangePct: null
+    })] });
     expect(botService.decideBotAction({ strategy: 'reckless', marketState: dead, random: () => 0 }).type).toBe('HOLD');
   });
 
@@ -350,8 +393,14 @@ describe('Core 5: deterministic decisions from public state only', () => {
   test('a collapsed coin is never bought and an oversell/overbuy is impossible by construction', () => {
     const collapsedRiser = shapedState({
       coins: [
-        { coinId: 1, symbol: 'AAA', currentPrice: 0, collapsed: true, history: [10, 15, 20] },
-        { coinId: 2, symbol: 'BBB', currentPrice: 10, collapsed: false, history: [20, 15, 10] }
+        v2Coin({
+          currentPrice: 0, collapsed: true, history: [10, 15, 20],
+          phase: 'DEAD', momentum: 'FLAT', collapseRisk: 'DEAD', recentChangePct: null
+        }),
+        v2Coin({
+          coinId: 2, symbol: 'BBB', currentPrice: 10, history: [20, 15, 10],
+          phase: 'FALL', momentum: 'DOWN', collapseRisk: 'STABLE', recentChangePct: -50
+        })
       ]
     });
     const momentum = botService.decideBotAction({ strategy: 'momentum', marketState: collapsedRiser, random: () => 0.5 });
@@ -362,14 +411,17 @@ describe('Core 5: deterministic decisions from public state only', () => {
     }
 
     // Sell is always bounded by the actual holding.
-    const holding = shapedState({ holdings: [{ coinId: 1, symbol: 'AAA', quantity: 3 }] });
+    const holding = shapedState({ holdings: [v2Holding({ coinId: 1, symbol: 'AAA', quantity: 3 })] });
     const sell = botService.decideBotAction({ strategy: 'dip_buyer', marketState: holding, random: () => 0.5 });
     expect(sell.type).toBe('SELL'); // coin 1 recovered +100%
     expect(sell.quantity).toBeGreaterThan(0);
     expect(sell.quantity).toBeLessThanOrEqual(3);
 
     // No alive coins at all -> HOLD, never a throw.
-    const dead = shapedState({ coins: [{ coinId: 1, symbol: 'AAA', currentPrice: 0, collapsed: true, history: [5, 0] }] });
+    const dead = shapedState({ coins: [v2Coin({
+      currentPrice: 0, collapsed: true, history: [5, 0],
+      phase: 'DEAD', momentum: 'FLAT', collapseRisk: 'DEAD', recentChangePct: null
+    })] });
     for (const strategy of botConfig.BOT_STRATEGIES) {
       expect(botService.decideBotAction({ strategy, marketState: dead, random: () => 0.5 }).type).toBe('HOLD');
     }
@@ -404,16 +456,24 @@ describe('Core 5: deterministic decisions from public state only', () => {
     const state = await botService.buildPublicMarketState({ cycle, participant, now });
     expect(state.coins.length).toBeGreaterThan(0);
     for (const coin of state.coins) {
-      expect(Object.keys(coin).sort()).toEqual(['coinId', 'collapsed', 'currentPrice', 'history', 'symbol']);
+      expect(Object.keys(coin).sort()).toEqual([...botService.BOT_COIN_KEYS].sort());
     }
     if (scheduled.length > 0) {
       const futureDoomed = state.coins.find((c) => c.coinId === scheduled[0].coin_id);
       expect(futureDoomed.collapsed).toBe(false);
+      expect(futureDoomed.phase).not.toBe('DEAD');
     }
-    expect(Object.keys(state).sort()).toEqual(['apocalypsePercent', 'cash', 'coins', 'holdings']);
+    expect(Object.keys(state).sort()).toEqual([...botService.BOT_MARKET_STATE_KEYS].sort());
+    expect(Object.keys(state.power).sort()).toEqual([...botService.BOT_POWER_KEYS].sort());
+    expect(Object.keys(state.openPositions).sort()).toEqual([...botService.BOT_OPEN_POSITION_KEYS].sort());
+    for (const holding of state.holdings) {
+      expect(Object.keys(holding).sort()).toEqual([...botService.BOT_HOLDING_KEYS].sort());
+    }
     expect(state.cash).toBe(10000);
     expect(state.apocalypsePercent).toBeGreaterThanOrEqual(0);
     expect(state.apocalypsePercent).toBeLessThanOrEqual(100);
+    // The seed is never part of the shaped state, at any depth.
+    expect(JSON.stringify(state)).not.toContain(cycle.seed);
   });
 });
 

@@ -238,6 +238,25 @@ const seed = async (shouldEnd = false) => {
     );
     await db.query(economyMigration);
 
+    console.log('📦 Applying V2 price-precision migration (db/migrations/017_v2_price_precision.sql)...');
+    // V2-1 price-precision widen (2dp -> 4dp on price/value columns),
+    // sourced from the production migration only.
+    const pricePrecisionMigration = require('fs').readFileSync(
+      require('path').join(__dirname, 'migrations', '017_v2_price_precision.sql'),
+      'utf8'
+    );
+    await db.query(pricePrecisionMigration);
+
+    console.log('📦 Applying V2 Power/cost-basis migration (db/migrations/018_v2_power_and_cost_basis.sql)...');
+    // V2-2 participant Power columns + holdings cost basis (with the
+    // deterministic ledger backfill), sourced from the production migration
+    // only.
+    const powerCostBasisMigration = require('fs').readFileSync(
+      require('path').join(__dirname, 'migrations', '018_v2_power_and_cost_basis.sql'),
+      'utf8'
+    );
+    await db.query(powerCostBasisMigration);
+
     console.log('📦 Inserting coins data...');
     // Insert coins data
     const coinsData = require(process.env.NODE_ENV === 'test' 

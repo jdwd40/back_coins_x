@@ -21,6 +21,7 @@
 const crypto = require('crypto');
 const db = require('../db/connection');
 const logger = require('../utils/logger');
+const { createSeededRandom } = require('./seededRandom');
 
 // The collapse window opens at 70% of the cycle: the first scheduled collapse
 // happens exactly at cycleStart + cycleDuration * 0.70 and the last exactly at
@@ -62,20 +63,10 @@ function computeScheduleTimes({ startTime, endTime, coinCount }) {
   return times;
 }
 
-// Deterministic injectable random source: SHA-256 counter mode keyed by the
-// cycle seed. Same seed -> identical stream, in every process, forever.
-// Unit tests inject their own `random` to control the shuffle exactly.
-function createSeededRandom(seed) {
-  if (typeof seed !== 'string' || seed.length === 0) {
-    throw new Error(`collapse schedule seed must be a non-empty string; received ${typeof seed === 'string' ? JSON.stringify(seed) : String(seed)}`);
-  }
-  let counter = 0;
-  return function seededRandom() {
-    const digest = crypto.createHash('sha256').update(`${seed}:${counter}`).digest();
-    counter += 1;
-    return digest.readUInt32BE(0) / 0x100000000; // [0, 1)
-  };
-}
+// Deterministic injectable random source lives in game/seededRandom.js
+// (SHA-256 counter mode; same seed -> identical stream, in every process,
+// forever) and is re-exported below for existing callers. Unit tests inject
+// their own `random` to control the shuffle exactly.
 
 // Fisher-Yates with an injected random source. Never uses Math.random().
 function deterministicShuffle(items, random) {

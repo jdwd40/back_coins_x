@@ -63,3 +63,6 @@ build/
 
 # Yarn Integrity file
 .yarn-integrity
+
+# V2 simulation reports
+simulation/output/

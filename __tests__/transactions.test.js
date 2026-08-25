@@ -45,7 +45,7 @@ describe('Transactions API', () => {
             coin_id: 1,
             type: 'BUY',
             quantity: '0.50',
-            price: '50000.00',
+            price: '50000.0000', // 4dp post-migration-017
             total_amount: '25000.00',
             created_at: expect.any(String)
           });
@@ -88,7 +88,7 @@ describe('Transactions API', () => {
                 coin_id: 1,
                 type: 'SELL',
                 quantity: '0.50',
-                price: '55000.00',
+                price: '55000.0000', // 4dp post-migration-017
                 total_amount: '27500.00',
                 created_at: expect.any(String)
               });

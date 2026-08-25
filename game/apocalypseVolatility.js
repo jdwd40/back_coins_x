@@ -81,6 +81,26 @@ function resolveConfig(config) {
   return { minFactor, maxFactor, exponent };
 }
 
+// ---------------------------------------------------------------------------
+// V2-3 escalation bands. The curve above is the SINGLE amplitude shared by
+// the live market writer and the simulator (V2-1/V2-2 gates passed on it);
+// the V2-3 simulation study measures band behaviour on this exact curve, so
+// the curve itself is preserved unchanged. These bands are the centralized
+// vocabulary the V2-3 report and tests use to talk about escalation phases
+// — reporting only, no pricing effect.
+//   0-40   NORMAL    relatively normal cyclical trading
+//   40-70  ELEVATED  increased activity
+//   70-90  HIGH      larger/faster opportunities (collapse window open)
+//   90-100 EXTREME   extreme opportunity and danger
+// ---------------------------------------------------------------------------
+const ESCALATION_BANDS = Object.freeze([
+  { id: 'NORMAL', minPercent: 0, maxPercent: 40 },
+  { id: 'ELEVATED', minPercent: 40, maxPercent: 70 },
+  { id: 'HIGH', minPercent: 70, maxPercent: 90 },
+  { id: 'EXTREME', minPercent: 90, maxPercent: 100 }
+]);
+const ESCALATION_BAND_IDS = Object.freeze(ESCALATION_BANDS.map((b) => b.id));
+
 // Translate cycle progress to a volatility multiplier.
 //
 // Progress policy:
@@ -101,8 +121,26 @@ function getApocalypseVolatility(progress, config) {
   return minFactor + (maxFactor - minFactor) * Math.pow(t, exponent);
 }
 
+// Map a progress percentage to its escalation band id. Malformed progress
+// resolves to NORMAL, exactly like the amplitude curve's safe default.
+function getEscalationBand(progress) {
+  let p = 0;
+  if (typeof progress === 'number' && Number.isFinite(progress)) {
+    p = Math.min(100, Math.max(0, progress));
+  }
+  for (const band of ESCALATION_BANDS) {
+    if (p >= band.minPercent && (p < band.maxPercent || (band.maxPercent === 100 && p <= 100))) {
+      return band.id;
+    }
+  }
+  return 'EXTREME';
+}
+
 module.exports = {
   getApocalypseVolatility,
+  getEscalationBand,
+  ESCALATION_BANDS,
+  ESCALATION_BAND_IDS,
   DEFAULT_APOCALYPSE_MIN_FACTOR,
   DEFAULT_APOCALYPSE_MAX_FACTOR,
   DEFAULT_APOCALYPSE_CURVE_EXPONENT,

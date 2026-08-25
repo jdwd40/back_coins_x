@@ -185,8 +185,9 @@ describe('Core 4: wealth and monotonic peak', () => {
     const participant = await joinRound({ userId: 1, now: new Date() });
     await buyRoundTrade({ userId: 1, apocalypseId: cycle.apocalypse_id, coinId: 1, quantity: 10, now: new Date() });
 
+    // V2-1: the writer needs no in-memory initialisation — prices come from
+    // the shared deterministic domain.
     marketSimulator.stop();
-    await marketSimulator.initializeCoinVolatility();
     await marketSimulator.updateAllPrices();
 
     const p = await participantRow(participant.participantId);
