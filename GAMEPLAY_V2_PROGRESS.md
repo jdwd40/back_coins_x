@@ -313,3 +313,73 @@ Key metrics:
 ### V2-3 next action
 
 Before V2-4, read this plan, both progress files and both repository states again. Then launch a fresh K3 implementation task to adapt the existing Conservative, Momentum, Dip Buyer and Reckless bots to V2 public signals, Power, position limits and the shared buy/sell service. UI work remains prohibited until V2-4 passes.
+
+## V2-4 — COMPLETE
+
+Checkpoint timestamp: `2026-08-25T07:30:59+01:00`
+
+- Status: **COMPLETE**
+- Backend implementation SHA: `bdaf1d0787abc94456ca1338a93e0d2bfd08c799`
+- Frontend SHA: `2f78fa85151e717a9a5bb02aeade1fd1e7bdf7bf` (unchanged; UI remains blocked until this checkpoint is pushed and V2-5 begins)
+- Branch: `gameplay-v2-20260824`
+- `.hermes/desktop-attachments/` remains untracked and was not staged.
+- No production service, production data, migration, deployment or protected branch was touched.
+
+### V2-4 delivered
+
+- Existing Core 5 roster preserved: Conservative, Momentum, Dip Buyer, Reckless.
+- Exact public bot-state allowlists enforced by `assertPublicBotState` for live and simulated decisions; extra or missing keys fail closed.
+- Live bot state now uses the same public phase, momentum, archetype, recent movement and collapse-risk domains as human-facing signals, plus only the bot’s own Cash, holdings/P&L, Power and open-position count.
+- Hidden seed, future phase/peak, collapse schedule/rank/timestamp and other future information never enters the decision shape.
+- Conservative: DIP/early-RISE, STABLE/SHAKY entries, early BOOM-stall banking and high reserve.
+- Momentum: confirmed RISE+UP entries, FALL/DOWN-underwater/BOOM-stall exits.
+- Dip Buyer: public DIP/early-RISE entries, larger tuned stake, BOOM ride, FALL loss cut and controlled overstay.
+- Reckless: DEGEN/RUG preference, DANGER/CRITICAL tolerance, aggressive Power use and higher drawdown/collapse exposure.
+- Buy decisions are Power- and position-limit-aware; shared live trade services remain authoritative.
+- Power/position rejections are recorded as non-fatal bot skips; sells remain free at zero Power.
+- Added deterministic `simulation/botStudy.js`, engine instrumentation, `--mode bots` and `npm run simulate:bots`.
+- Updated existing bot fixtures and retirement fixture to provide the legitimate V2 public-state fields; no production behavior was weakened for tests.
+
+### V2-4 independent bot gate
+
+```text
+node simulation/run.js --mode bots --sequences 24 --rounds-per-sequence 16 --json
+```
+
+- 24 sequences × 16 consecutive 30-minute rounds
+- 384 rounds per player, persistent Power, 15-second observation cadence
+- Economy enabled at selected V2 scale 0.25
+- Power max 100, regeneration +1/30s, buy cost `1 + floor(total / £125)`, max 3 positions
+- Gate: **PASS**, all 9 criteria
+
+Key metrics:
+
+- Conservative median ROI **+2.21%**, profitable rounds 69.01%, 57.03 trades/round
+- Momentum median ROI **+0.45%**, profitable rounds 53.13%, 57.75 trades/round
+- Dip Buyer median ROI **+13.93%**, profitable rounds 78.65%, 6.35 trades/round
+- Reckless median ROI **-6.84%**, profitable rounds 39.58%, 20.26 trades/round
+- DIP_BOOM benchmark median ROI **+18.55%**
+- Dip Buyer vs DIP_BOOM paired win rate **34.11%**, median ROI gap **-4.62 points**; gate threshold passed
+- Conservative risky-entry share **0%**; Reckless **48.99%**; Dip Buyer DIP-entry share **97.5%**; Momentum RISE-entry share **100%**
+- Zero cash/basis/position invariant violations; max open positions never exceeded 3
+- Median starting Power: Conservative 100, Momentum 100, Dip Buyer 31, Reckless 29; no majority-starved bot rounds
+- Zero-Power sells: **73 attempted / 73 executed**
+- Maximum bot round-win share **25.52%**; no dominant personality
+- Reckless mean collapse loss **£1,161.86/round** vs Conservative **£281.91/round**; mean drawdown 30.59% vs 3.91%
+- Hidden-information checks: **185,856 decision inputs, 0 violations**
+
+### V2-4 verification evidence
+
+- Independent focused run: **20 suites / 237 tests passed**.
+- New V2-4 suite: **20 tests passed**.
+- Independent bot study: **PASS**, all 9 criteria.
+- Independent V2-2 regression: **PASS**, 82.60% DIP_BOOM/RANDOM, zero accounting/position violations.
+- Independent V2-3 regression: **PASS**, all 11 criteria.
+- Independent full backend run: **74 suites / 710 tests passed**, one known suite-order deadlock failure in `game-cycle-worker.test.js` during the next test’s database reseed. The worker suite passes isolated: **1 suite / 5 tests passed**. The failure is the documented pre-existing settlement/worker deadlock family and is outside V2-4 files.
+- K3’s sequential full run recorded the same 74/75 and 710/711 baseline result after correcting an initial intentional DB-interference run.
+- `git diff --check`: **PASS**; `node --check` on all changed/new JS: **PASS**.
+- No migration was needed.
+
+### V2-4 next action
+
+Before V2-5, read this plan, both progress files and both repository states again. Push only `gameplay-v2-20260824` as backup, then launch a fresh K3 frontend implementation task. UI was correctly blocked until V2-4 and is now authorised to begin.
