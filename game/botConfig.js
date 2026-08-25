@@ -14,6 +14,19 @@
 // apocalypse_bots.strategy.
 const BOT_STRATEGIES = Object.freeze(['conservative', 'momentum', 'dip_buyer', 'reckless']);
 
+// V2-4: the public-signal vocabularies the personalities are allowed to
+// key on. These mirror the shared market/risk domains exactly (coarse
+// DIP/RISE/BOOM/FALL phases and STABLE/SHAKY/DANGER/CRITICAL risk levels);
+// they are validated here so a malformed profile fails at module load.
+// DEAD is never an entry/exit level — dead coins are handled structurally
+// (never buyable, sellable at £0) before any personality rule runs.
+const BOT_MARKET_PHASES = Object.freeze(['DIP', 'RISE', 'BOOM', 'FALL']);
+const BOT_RISK_LEVELS = Object.freeze(['STABLE', 'SHAKY', 'DANGER', 'CRITICAL']);
+// The public archetype vocabulary, imported from the single authoritative
+// market domain rather than duplicated here.
+const { MARKET_ARCHETYPES } = require('./marketDomain');
+const BOT_ARCHETYPE_IDS = Object.freeze(Object.keys(MARKET_ARCHETYPES));
+
 // The fixed game roster: exactly 4 bots, stable keys/usernames/emails.
 // Usernames/emails are deliberately namespaced so they can never collide
 // with a real human registration flow that does not use the bot namespace.
@@ -292,11 +305,20 @@ const MAX_BOT_MAX_COIN_EXPOSURE_FRACTION = 1;
 //   lossSellFraction        — fraction of the position sold on loss-cutting
 //   lateCashTargetFraction  — late-phase cash target, as a fraction of wealth
 //   lateSellFraction        — fraction of the worst position sold per late tick
+// V2-4 public-signal fields (coarse phase/momentum/archetype/collapse-risk
+// are the ONLY market inputs — never schedule, seed or future data):
+//   preferredEntryPhases    — coarse phases the personality will open into
+//   maxEntryRisk            — highest public risk level it will BUY into
+//   exitAtRisk              — held coin at this risk level or worse is sold
+//   preferredArchetypes     — archetypes the personality seeks out
 // Plus personality-specific entries documented inline.
 const BOT_PERSONALITY_PROFILES = Object.freeze({
   // Conservative Carl: preserve capital. Small stakes, a high cash reserve,
   // quick modest profit-taking, fast full loss-cutting, and the strongest
-  // late-game cash target of the roster.
+  // late-game cash target of the roster. V2-4: enters only DIP/early-RISE
+  // coins reading STABLE/SHAKY, walks away from anything DANGEROUS, and
+  // banks a BOOM the moment its momentum stops confirming — lower activity
+  // and lower drawdown than the rest of the roster by design.
   conservative: Object.freeze({
     stakeFraction: 0.05,
     activityGate: 0.5, // only acts when the seeded random lands below this
@@ -307,11 +329,16 @@ const BOT_PERSONALITY_PROFILES = Object.freeze({
     lossCutThreshold: -0.05,
     lossSellFraction: 1,
     lateCashTargetFraction: 0.7,
-    lateSellFraction: 1
+    lateSellFraction: 1,
+    preferredEntryPhases: ['DIP', 'RISE'],
+    maxEntryRisk: 'SHAKY',
+    exitAtRisk: 'DANGER',
+    boomExitOnWeakMomentum: true
   }),
-  // Momentum Mike: trades the short-term trend. Buys reachable positive
-  // short-window momentum, halves a position whose momentum reverses, takes
-  // profit on solid full-window gains.
+  // Momentum Mike: trades the short-term trend. V2-4: enters an ESTABLISHED
+  // RISE whose public momentum still reads UP (it may enter later than the
+  // Dip Buyer), and exits the moment the trend stops confirming — public
+  // momentum DOWN, the coin rolling into FALL, or a solid banked gain.
   momentum: Object.freeze({
     stakeFraction: 0.1,
     momentumWindow: 4, // recent history points the trend is measured over
@@ -322,25 +349,45 @@ const BOT_PERSONALITY_PROFILES = Object.freeze({
     profitSellFraction: 0.5,
     reversalSellFraction: 0.5, // sell fraction when a holding's trend reverses
     lateCashTargetFraction: 0.5,
-    lateSellFraction: 0.5
+    lateSellFraction: 0.5,
+    preferredEntryPhases: ['RISE'],
+    maxEntryRisk: 'DANGER',
+    exitAtRisk: 'CRITICAL',
+    exitOnDownMomentum: true,
+    exitOnPhases: ['FALL'],
+    boomExitOnWeakMomentum: true
   }),
   // Dip Buyer Dana: buys meaningful dips, sells meaningful recoveries, cuts
   // a dip that keeps collapsing instead of averaging down forever, and is
   // exposure-capped so repeated dip buys cannot consume nearly all cash.
+  // V2-4: entries are driven by the public coarse phase — a DIP (or a RISE
+  // that has barely left the trough, the same public rule the DIP_BOOM
+  // human benchmark uses) — riding toward the BOOM before selling. It
+  // tolerates DANGER entries like a skilled dip buyer, holds longer than
+  // Conservative and may occasionally overstay, but never buys CRITICAL.
   dip_buyer: Object.freeze({
-    stakeFraction: 0.15,
+    stakeFraction: 0.3,
     dipEntryThreshold: -0.1,
-    recoveryExitThreshold: 0.1,
-    maxInvestedFraction: 0.6,
-    minCashReserveFraction: 0.15,
+    recoveryExitThreshold: 0.25,
+    maxInvestedFraction: 0.75,
+    minCashReserveFraction: 0.1,
     lossCutThreshold: -0.25,
     lossSellFraction: 1,
     lateCashTargetFraction: 0.5,
-    lateSellFraction: 0.5
+    lateSellFraction: 0.5,
+    preferredEntryPhases: ['DIP'],
+    riseEntryMaxChangePct: 2, // a RISE barely off the trough still counts as a dip entry
+    fallExitThreshold: -0.08, // a FALL-phase position this far underwater: the boom did not come — cut
+    maxEntryRisk: 'DANGER'
   }),
   // Reckless Ray: still the aggressor — the largest stakes and the highest
   // invested cap — but locks big wins, panic-cuts only deep losses, and the
   // invested cap + cash reserve mean he can no longer buy down toward £0.
+  // V2-4: hunts the high-swing/high-upside archetypes (DEGEN/RUG first) and
+  // willingly buys DANGER/CRITICAL readings the calmer personalities refuse
+  // — sometimes winning large, sometimes riding a collapse. The universal
+  // late/extreme safeguards still force liquidation, and sells never need
+  // Power.
   reckless: Object.freeze({
     stakeFraction: 0.4,
     maxInvestedFraction: 0.8,
@@ -350,7 +397,9 @@ const BOT_PERSONALITY_PROFILES = Object.freeze({
     lossCutThreshold: -0.5,
     lossSellFraction: 1,
     lateCashTargetFraction: 0.3,
-    lateSellFraction: 0.5
+    lateSellFraction: 0.5,
+    preferredArchetypes: ['DEGEN', 'RUG'],
+    maxEntryRisk: 'CRITICAL'
   })
 });
 
@@ -363,6 +412,15 @@ function validateBotPersonalityProfiles(profiles = BOT_PERSONALITY_PROFILES) {
   const isFraction = (v) => typeof v === 'number' && Number.isFinite(v) && v > 0 && v <= 1;
   const isFiniteNumber = (v) => typeof v === 'number' && Number.isFinite(v);
   const isPositiveInteger = (v) => Number.isInteger(v) && v > 0;
+  // V2-4 public-signal field checkers.
+  const isPhaseList = (v) => Array.isArray(v) && v.length > 0
+    && v.every((phase) => BOT_MARKET_PHASES.includes(phase))
+    && new Set(v).size === v.length;
+  const isRiskLevel = (v) => BOT_RISK_LEVELS.includes(v);
+  const isArchetypeList = (v) => Array.isArray(v) && v.length > 0
+    && v.every((id) => BOT_ARCHETYPE_IDS.includes(id))
+    && new Set(v).size === v.length;
+  const isBoolean = (v) => typeof v === 'boolean';
   const REQUIREMENTS = [
     ['stakeFraction', BOT_STRATEGIES, isFraction],
     ['maxInvestedFraction', BOT_STRATEGIES, isFraction],
@@ -378,7 +436,17 @@ function validateBotPersonalityProfiles(profiles = BOT_PERSONALITY_PROFILES) {
     ['momentumEntryThreshold', ['momentum'], (v) => isFiniteNumber(v) && v > 0],
     ['reversalSellFraction', ['momentum'], isFraction],
     ['dipEntryThreshold', ['dip_buyer'], (v) => isFiniteNumber(v) && v < 0],
-    ['recoveryExitThreshold', ['dip_buyer'], (v) => isFiniteNumber(v) && v > 0]
+    ['recoveryExitThreshold', ['dip_buyer'], (v) => isFiniteNumber(v) && v > 0],
+    // V2-4 public-signal rules.
+    ['preferredEntryPhases', ['conservative', 'momentum', 'dip_buyer'], isPhaseList],
+    ['maxEntryRisk', BOT_STRATEGIES, isRiskLevel],
+    ['exitAtRisk', ['conservative', 'momentum'], isRiskLevel],
+    ['boomExitOnWeakMomentum', ['conservative', 'momentum'], isBoolean],
+    ['exitOnDownMomentum', ['momentum'], isBoolean],
+    ['exitOnPhases', ['momentum'], isPhaseList],
+    ['riseEntryMaxChangePct', ['dip_buyer'], (v) => isFiniteNumber(v) && v >= 0],
+    ['fallExitThreshold', ['dip_buyer'], (v) => isFiniteNumber(v) && v < 0],
+    ['preferredArchetypes', ['reckless'], isArchetypeList]
   ];
   for (const strategy of BOT_STRATEGIES) {
     const profile = profiles[strategy];
@@ -449,6 +517,9 @@ validateBotPersonalityProfiles();
 
 module.exports = {
   BOT_STRATEGIES,
+  BOT_MARKET_PHASES,
+  BOT_RISK_LEVELS,
+  BOT_ARCHETYPE_IDS,
   BOT_ROSTER,
   validateBotRoster,
   BOT_MID_PHASE_PERCENT,

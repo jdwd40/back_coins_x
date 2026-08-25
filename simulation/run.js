@@ -29,6 +29,12 @@ const {
   V2_ECONOMY_SCALE,
   ALL_PLAYER_IDS: ESCALATION_PLAYER_IDS
 } = require('./escalationStudy');
+const {
+  runBotStudy,
+  buildBotReport,
+  BOT_STUDY_BASE_SEED,
+  ALL_PLAYER_IDS: BOT_PLAYER_IDS
+} = require('./botStudy');
 
 function parseArgs(argv) {
   const args = {};
@@ -184,9 +190,94 @@ function printEscalationSummary(report) {
   console.log(`GATE VERDICT: ${gate.pass === null ? 'SKIPPED (partial roster)' : gate.pass ? 'PASS' : 'FAIL'}`);
 }
 
+function printBotSummary(report) {
+  const { config, gate, players, paired, roundWins, hiddenInfoEvidence } = report;
+  console.log('=== Crypto Chaos V2-4 canonical bot study ===');
+  console.log(`sequences: ${config.sequences} x ${config.roundsPerSequence} consecutive rounds | baseSeed: ${config.baseSeed} | observation: ${config.observationMs}ms | starting cash: ${formatMoney(config.startingCash)} | economy scale: ${config.economyScale}`);
+  const pc = config.powerConfig;
+  console.log(`power: max ${pc.maxPower}, +1 per ${pc.regenMsPerPoint / 1000}s, buy cost 1 + floor(total/${pc.buyCostDivisor}), max open positions ${pc.maxOpenPositions}`);
+  console.log('');
+  const header = ['player', 'medianROI', 'meanROI', 'profit%', 'trades/r', 'buys/r', 'sells/r', 'win%', 'startPow', 'blkPow', 'blkPos', 'collLoss/r'];
+  console.log(header.map((h) => h.padStart(11)).join(''));
+  for (const [id, p] of Object.entries(players)) {
+    console.log([
+      id.padEnd(11),
+      `${p.medianRoi}%`.padStart(11),
+      `${p.meanRoi}%`.padStart(11),
+      `${p.profitableRoundPct}%`.padStart(11),
+      String(p.tradesPerRound).padStart(11),
+      String(p.buysPerRound).padStart(11),
+      String(p.sellsPerRound).padStart(11),
+      `${roundWins.winPct[id]}%`.padStart(11),
+      String(p.powerAtRoundStart.mean).padStart(11),
+      String(p.blockedByPower).padStart(11),
+      String(p.blockedByPosition).padStart(11),
+      formatMoney(p.collapseLossPerRound.mean).padStart(11)
+    ].join(''));
+  }
+  console.log('');
+  console.log('--- entry phase / risk distribution (executed buys) ---');
+  for (const [id, p] of Object.entries(players)) {
+    console.log(`${id}: phases ${JSON.stringify(p.entryPhases.sharesPct)} | risks ${JSON.stringify(p.entryRisks.sharesPct)}`);
+  }
+  console.log('');
+  if (paired.BOT_DIP_BUYER && paired.BOT_DIP_BUYER.DIP_BOOM) {
+    console.log(`BOT_DIP_BUYER vs DIP_BOOM paired win rate: ${paired.BOT_DIP_BUYER.DIP_BOOM.winRatePct}% (median diff ${formatMoney(paired.BOT_DIP_BUYER.DIP_BOOM.medianDiff)})`);
+  }
+  console.log(`hidden-info evidence: ${hiddenInfoEvidence.decisionInputsChecked} decision inputs verified, ${hiddenInfoEvidence.hiddenFieldViolations} violations`);
+  console.log('');
+  console.log('=== V2-4 gate ===');
+  for (const [name, criterion] of Object.entries(gate)) {
+    if (name === 'pass') continue;
+    console.log(`${criterion.pass === null ? 'SKIP' : criterion.pass ? 'PASS' : 'FAIL'}  ${name}: ${JSON.stringify(criterion)}`);
+  }
+  console.log('');
+  console.log(`GATE VERDICT: ${gate.pass === null ? 'SKIPPED (partial roster)' : gate.pass ? 'PASS' : 'FAIL'}`);
+}
+
 function main() {
   const args = parseArgs(process.argv);
   const mode = args.mode || 'tune';
+
+  if (mode === 'bots') {
+    const sequences = Number(args.sequences || 24);
+    const roundsPerSequence = Number(args['rounds-per-sequence'] || args.rounds || 16);
+    const baseSeed = args['base-seed'] || BOT_STUDY_BASE_SEED;
+    const economy = args.economy !== 'off';
+    const economyScale = args['economy-scale'] !== undefined ? Number(args['economy-scale']) : V2_ECONOMY_SCALE;
+    const observationMs = Number(args['observation-ms'] || 15000);
+    const playerIds = args.players ? String(args.players).split(',') : BOT_PLAYER_IDS;
+
+    const startedAt = Date.now();
+    const study = runBotStudy({
+      sequences,
+      roundsPerSequence,
+      baseSeed,
+      observationMs,
+      economy,
+      economyScale,
+      playerIds,
+      onProgress: (done, total) => {
+        if (!args.json) process.stdout.write(`\rprogress: ${done}/${total} sequence-rounds`);
+      }
+    });
+    if (!args.json) process.stdout.write('\n');
+    const report = buildBotReport(study);
+    report.runtimeMs = Date.now() - startedAt;
+    report.mode = mode;
+
+    const outPath = args.out || path.join(__dirname, 'output', `${mode}-latest.json`);
+    fs.mkdirSync(path.dirname(outPath), { recursive: true });
+    fs.writeFileSync(outPath, JSON.stringify(report, null, 2));
+
+    if (args.json) {
+      console.log(JSON.stringify(report));
+    } else {
+      printBotSummary(report);
+      console.log(`\nreport written to ${outPath} (${report.runtimeMs}ms)`);
+    }
+    process.exit(report.gate.pass ? 0 : 1);
+  }
 
   if (mode === 'v2-3') {
     const sequences = Number(args.sequences || 30);

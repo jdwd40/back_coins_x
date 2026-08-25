@@ -16,6 +16,7 @@
     "simulate": "node simulation/run.js",
     "simulate:power": "node simulation/run.js --mode power",
     "simulate:v2-3": "node simulation/run.js --mode v2-3",
+    "simulate:bots": "node simulation/run.js --mode bots",
     "clear-price-history": "node clear-price-history.js"
   },
   "keywords": [],

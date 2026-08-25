@@ -16,9 +16,25 @@
 //
 // Public-state-only decisions: the decision layer accepts ONLY the
 // deliberately shaped market state built here — live coin prices, recent
-// price history, EXECUTED collapse status, the bot's own cash/holdings, and
+// public price history, EXECUTED collapse status, the SAME coarse V2 public
+// signals human clients receive (phase, momentum, archetype, recent public
+// movement, collapse-risk level), the bot's own cash/holdings economics,
+// its own effective Power view and open-position count/limit, and
 // apocalypsePercent. Scheduled-but-unexecuted (future) collapse data is
-// never read for decisions and never present in the shaped state.
+// never read for decisions and never present in the shaped state; the cycle
+// seed is used ONLY to evaluate the shared public-signal domains and to key
+// the deterministic random stream — it never enters the shaped state. V2-4
+// enforces this with an exact-key allowlist (assertPublicBotState) that runs
+// on every live AND simulated decision input.
+//
+// V2-4 resource legality: bots buy/sell only through the shared Core 4
+// domain ops, so every bot buy pays the SAME Power cost and obeys the SAME
+// 3-position limit as a human (game/powerDomain inside the locked live
+// path). The decision layer is aware of its own public Power balance and
+// position slots (unaffordable/illegal buys become explained HOLDs), and
+// any residual authoritative rejection from the shared service is recorded
+// as a non-fatal skip ('power-blocked' / 'position-limit'), never bypassed
+// and never converted into a direct state mutation. Sells never need Power.
 //
 // Tick identity: runBotTick claims (cycle_id, tick_id) in
 // apocalypse_bot_ticks with INSERT ... ON CONFLICT DO NOTHING, so a given
@@ -51,13 +67,52 @@ const {
   DEFAULT_BOT_MAX_COIN_EXPOSURE_FRACTION,
   BOT_PERSONALITY_PROFILES
 } = require('./botConfig');
-const { GAME_MIN_TRADE_VALUE } = require('./gameConstants');
+const { GAME_MIN_TRADE_VALUE, resolveGameMaxOpenPositions } = require('./gameConstants');
 const gameRoundService = require('./gameRoundService');
 const { reconcileCycle, deriveProgress } = require('./gameCycleService');
+const marketDomain = require('./marketDomain');
+const collapseRiskDomain = require('./collapseRiskDomain');
+const powerDomain = require('./powerDomain');
+const { getApocalypseVolatility } = require('./apocalypseVolatility');
 
 // How many recent price points each coin carries in the shaped public state.
 // A fixed game-design constant — deliberately not configurable.
 const BOT_HISTORY_WINDOW = 20;
+
+// ---------------------------------------------------------------------------
+// V2-4: the shaped PUBLIC bot state contract.
+//
+// These allowlists are the redaction contract between the state builders
+// (live: buildPublicMarketState below; simulation: the bot observation
+// adapter in simulation/botStudy.js) and the pure decision layer. The
+// decision layer receives EXACTLY this shape and nothing else: no seed, no
+// collapse schedule/rank/timestamp, no future phase/peak/timing, no anchor,
+// no cycle index. assertPublicBotState enforces the contract on every
+// decision input, live and simulated alike — an extra OR missing key is a
+// hard error, so hidden information can never silently reach a decision.
+// ---------------------------------------------------------------------------
+const BOT_MARKET_STATE_KEYS = Object.freeze([
+  'coins', 'cash', 'holdings', 'apocalypsePercent', 'power', 'openPositions'
+]);
+const BOT_COIN_KEYS = Object.freeze([
+  'coinId', 'symbol', 'currentPrice', 'collapsed', 'history',
+  'phase', 'momentum', 'archetype', 'collapseRisk', 'recentChangePct'
+]);
+const BOT_HOLDING_KEYS = Object.freeze([
+  'coinId', 'symbol', 'quantity', 'costBasis', 'averageEntryPrice',
+  'currentValue', 'unrealizedPnlPct'
+]);
+const BOT_POWER_KEYS = Object.freeze(['current', 'max', 'regenMsPerPoint']);
+const BOT_OPEN_POSITION_KEYS = Object.freeze(['open', 'max']);
+
+// Legal vocabularies for the V2 public-signal fields (dead coins carry the
+// DEAD markers instead of a live phase/level).
+const BOT_COIN_PHASES = Object.freeze(['DIP', 'RISE', 'BOOM', 'FALL', 'DEAD']);
+const BOT_COIN_MOMENTA = Object.freeze(['UP', 'DOWN', 'FLAT']);
+const BOT_COIN_RISKS = Object.freeze([
+  ...collapseRiskDomain.COLLAPSE_RISK_LEVELS,
+  collapseRiskDomain.DEAD_RISK_MARKER
+]);
 
 // Domain error for bot tick validation (mirrors GameRoundError's contract:
 // message first, HTTP-ish status second for any future controller use).
@@ -170,14 +225,32 @@ async function ensureBotsProvisioned({ queryable = db } = {}) {
 
 // ---------------------------------------------------------------------------
 // Deliberately shaped PUBLIC market state — the ONLY input the decision
-// layer may use. Contains: live coin prices, the recent public price history
-// window, EXECUTED collapse status for this cycle (a coin that is already
-// publicly dead at £0), the bot's own cash/holdings, and apocalypsePercent.
-// Future/scheduled collapse data is never selected here.
+// layer may use. Contains: live coin prices, the recent public price
+// history window, EXECUTED collapse status for this cycle (a coin that is
+// already publicly dead at £0), the SAME coarse V2 public signals a human
+// client receives from the market-signals endpoint (phase, momentum,
+// archetype, recent public movement, collapse-risk level), the bot's own
+// cash/holdings economics, its own effective Power view and its own open
+// live position count/limit, plus apocalypsePercent. Future/scheduled
+// collapse data is never selected here; the cycle seed is used ONLY to
+// evaluate the shared public-signal domains (exactly like
+// marketSignalsService) and is never present in the returned shape — the
+// exact key allowlists above are the contract.
 // ---------------------------------------------------------------------------
 async function buildPublicMarketState({ cycle, participant, now = new Date(), queryable = db } = {}) {
+  const nowDate = now instanceof Date ? now : new Date(now);
+  const nowMs = nowDate.getTime();
+  const { apocalypsePercent } = deriveProgress({
+    startTime: cycle.start_time,
+    endTime: cycle.end_time,
+    durationMs: cycle.duration_ms,
+    now: nowDate
+  });
+  const amplitude = getApocalypseVolatility(apocalypsePercent);
+  const roundStartMs = new Date(cycle.start_time).getTime();
+
   const { rows: coinRows } = await queryable.query(
-    `SELECT c.coin_id, c.symbol, c.current_price,
+    `SELECT c.coin_id, c.symbol, c.current_price, c.cycle_baseline_price,
             EXISTS (
               SELECT 1 FROM coin_collapse_schedule s
               WHERE s.cycle_id = $1 AND s.coin_id = c.coin_id AND s.executed_at IS NOT NULL
@@ -200,21 +273,62 @@ async function buildPublicMarketState({ cycle, participant, now = new Date(), qu
        ORDER BY created_at ASC`,
       [row.coin_id, BOT_HISTORY_WINDOW]
     );
-    coins.push({
+    const history = historyRows.map((h) => parseFloat(h.price));
+    const base = {
       coinId: row.coin_id,
       symbol: row.symbol,
       currentPrice: parseFloat(row.current_price),
       collapsed: row.collapsed === true,
-      history: historyRows.map((h) => parseFloat(h.price))
+      history
+    };
+    if (base.collapsed) {
+      // Dead coins expose only their death and archetype identity — the
+      // same minimal dead marker the public signals endpoint publishes.
+      coins.push({
+        ...base,
+        phase: 'DEAD',
+        momentum: 'FLAT',
+        archetype: marketDomain.resolveArchetypeId(row.coin_id),
+        collapseRisk: collapseRiskDomain.DEAD_RISK_MARKER,
+        recentChangePct: null
+      });
+      continue;
+    }
+    // The SAME shared public-signal domains the human-facing endpoint uses.
+    // The seed never leaves this function; only the coarse signal survives.
+    const signal = marketDomain.getPublicCoinSignal({
+      seed: cycle.seed,
+      coinId: row.coin_id,
+      baselinePrice: parseFloat(row.cycle_baseline_price),
+      roundStartMs,
+      nowMs,
+      amplitude
+    });
+    coins.push({
+      ...base,
+      phase: signal.phase,
+      momentum: signal.momentum,
+      archetype: signal.archetype,
+      collapseRisk: collapseRiskDomain.getCollapseRisk({
+        seed: cycle.seed,
+        coinId: row.coin_id,
+        apocalypsePercent,
+        phase: signal.phase,
+        momentum: signal.momentum,
+        recentChangePct: signal.recentChangePct,
+        nowMs
+      }),
+      recentChangePct: signal.recentChangePct
     });
   }
 
-  const { apocalypsePercent } = deriveProgress({
-    startTime: cycle.start_time,
-    endTime: cycle.end_time,
-    durationMs: cycle.duration_ms,
-    now
-  });
+  // The bot's own open LIVE position count under the shared V2-2 rule: a
+  // holding with quantity > 0 whose coin has not collapsed this cycle. The
+  // limit itself is public game configuration.
+  const collapsedIds = new Set(coins.filter((c) => c.collapsed).map((c) => c.coinId));
+  const openLive = participant.holdings.filter(
+    (h) => h.quantity > 0 && !collapsedIds.has(h.coinId)
+  ).length;
 
   return {
     coins,
@@ -222,9 +336,22 @@ async function buildPublicMarketState({ cycle, participant, now = new Date(), qu
     holdings: participant.holdings.map((h) => ({
       coinId: h.coinId,
       symbol: h.symbol,
-      quantity: h.quantity
+      quantity: h.quantity,
+      costBasis: h.costBasis,
+      averageEntryPrice: h.averageEntryPrice,
+      currentValue: h.currentValue,
+      unrealizedPnlPct: h.unrealizedPnlPct
     })),
-    apocalypsePercent
+    apocalypsePercent,
+    power: {
+      current: participant.power.current,
+      max: participant.power.max,
+      regenMsPerPoint: participant.power.regenMsPerPoint
+    },
+    openPositions: {
+      open: openLive,
+      max: resolveGameMaxOpenPositions()
+    }
   };
 }
 
@@ -239,21 +366,88 @@ async function buildPublicMarketState({ cycle, participant, now = new Date(), qu
 // Cash over open positions (issue #20). Returns
 // { type, coinId?, quantity?, reason? } — reason explains HOLDs.
 // ---------------------------------------------------------------------------
-function validateMarketState(marketState) {
+// Exact-key-set check: returns the list of violations (missing or extra
+// keys), empty when the object carries precisely the allowed keys.
+function keyViolations(obj, allowedKeys) {
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return ['not-an-object'];
+  const violations = [];
+  const keys = Object.keys(obj);
+  for (const key of allowedKeys) {
+    if (!Object.prototype.hasOwnProperty.call(obj, key)) violations.push(`missing:${key}`);
+  }
+  for (const key of keys) {
+    if (!allowedKeys.includes(key)) violations.push(`forbidden:${key}`);
+  }
+  return violations;
+}
+
+// The redaction contract, enforced on EVERY decision input (live ticks and
+// every simulated decision alike): the shaped state must carry EXACTLY the
+// public allowlist — any extra key (a seed, a schedule row, a collapse rank,
+// a future timestamp, an anchor) or any missing public field is a hard
+// error, so hidden information can never silently reach a personality.
+function assertPublicBotState(marketState) {
   if (!marketState || typeof marketState !== 'object') {
     throw new BotServiceError('bot decision requires a shaped market state object', 400);
   }
-  if (!Array.isArray(marketState.coins)) {
-    throw new BotServiceError('bot decision market state requires a coins array', 400);
+  const top = keyViolations(marketState, BOT_MARKET_STATE_KEYS);
+  if (top.length > 0) {
+    throw new BotServiceError(`bot decision market state violates the public-state contract: ${top.join(', ')}`, 400);
   }
   if (typeof marketState.cash !== 'number' || !Number.isFinite(marketState.cash)) {
     throw new BotServiceError('bot decision market state requires a finite cash number', 400);
   }
+  if (typeof marketState.apocalypsePercent !== 'number' || !Number.isFinite(marketState.apocalypsePercent)) {
+    throw new BotServiceError('bot decision market state requires a finite apocalypsePercent', 400);
+  }
+  if (!Array.isArray(marketState.coins)) {
+    throw new BotServiceError('bot decision market state requires a coins array', 400);
+  }
   if (!Array.isArray(marketState.holdings)) {
     throw new BotServiceError('bot decision market state requires a holdings array', 400);
   }
-  if (typeof marketState.apocalypsePercent !== 'number' || !Number.isFinite(marketState.apocalypsePercent)) {
-    throw new BotServiceError('bot decision market state requires a finite apocalypsePercent', 400);
+  for (const coin of marketState.coins) {
+    const violations = keyViolations(coin, BOT_COIN_KEYS);
+    if (violations.length > 0) {
+      throw new BotServiceError(`bot decision coin state violates the public-state contract: ${violations.join(', ')}`, 400);
+    }
+    if (!BOT_COIN_PHASES.includes(coin.phase)) {
+      throw new BotServiceError(`bot decision coin phase must be one of ${BOT_COIN_PHASES.join(', ')}; received ${JSON.stringify(coin.phase)}`, 400);
+    }
+    if (!BOT_COIN_MOMENTA.includes(coin.momentum)) {
+      throw new BotServiceError(`bot decision coin momentum must be one of ${BOT_COIN_MOMENTA.join(', ')}; received ${JSON.stringify(coin.momentum)}`, 400);
+    }
+    if (!BOT_COIN_RISKS.includes(coin.collapseRisk)) {
+      throw new BotServiceError(`bot decision coin collapseRisk must be one of ${BOT_COIN_RISKS.join(', ')}; received ${JSON.stringify(coin.collapseRisk)}`, 400);
+    }
+    // Death is reported consistently: a collapsed coin is exactly the DEAD
+    // marker everywhere, and vice versa.
+    const dead = coin.collapsed === true;
+    if (dead !== (coin.phase === 'DEAD') || dead !== (coin.collapseRisk === collapseRiskDomain.DEAD_RISK_MARKER)) {
+      throw new BotServiceError('bot decision coin dead state is inconsistent across collapsed/phase/collapseRisk', 400);
+    }
+  }
+  for (const holding of marketState.holdings) {
+    const violations = keyViolations(holding, BOT_HOLDING_KEYS);
+    if (violations.length > 0) {
+      throw new BotServiceError(`bot decision holding state violates the public-state contract: ${violations.join(', ')}`, 400);
+    }
+  }
+  const powerViolations = keyViolations(marketState.power, BOT_POWER_KEYS);
+  if (powerViolations.length > 0) {
+    throw new BotServiceError(`bot decision power state violates the public-state contract: ${powerViolations.join(', ')}`, 400);
+  }
+  if (typeof marketState.power.current !== 'number' || !Number.isFinite(marketState.power.current)
+    || typeof marketState.power.max !== 'number' || !Number.isFinite(marketState.power.max)) {
+    throw new BotServiceError('bot decision power state requires finite current/max', 400);
+  }
+  const positionViolations = keyViolations(marketState.openPositions, BOT_OPEN_POSITION_KEYS);
+  if (positionViolations.length > 0) {
+    throw new BotServiceError(`bot decision openPositions state violates the public-state contract: ${positionViolations.join(', ')}`, 400);
+  }
+  if (!Number.isInteger(marketState.openPositions.open) || marketState.openPositions.open < 0
+    || !Number.isInteger(marketState.openPositions.max) || marketState.openPositions.max < 0) {
+    throw new BotServiceError('bot decision openPositions state requires non-negative integer open/max', 400);
   }
 }
 
@@ -287,6 +481,35 @@ function shortMomentum(coin, window = 4) {
 function holdingChange(marketState, holding) {
   const coin = marketState.coins.find((c) => c.coinId === holding.coinId);
   return coin ? recentChange(coin) : 0;
+}
+
+// The holding's own unrealised P&L as a fraction — the V2-2 cost-basis
+// economics the bot legitimately knows about its OWN position. Falls back
+// to the public full-window history change only when the economics were
+// not shaped (null), keeping the decision total over the allowed shape.
+function holdingPnlFraction(marketState, holding) {
+  if (typeof holding.unrealizedPnlPct === 'number' && Number.isFinite(holding.unrealizedPnlPct)) {
+    return holding.unrealizedPnlPct / 100;
+  }
+  return holdingChange(marketState, holding);
+}
+
+// Ordinal of a public collapse-risk level; DEAD (or anything unexpected)
+// sorts below STABLE — dead coins are structurally excluded before any
+// risk comparison runs.
+function riskOrdinal(level) {
+  const ordinal = collapseRiskDomain.COLLAPSE_RISK_ORDINAL[level];
+  return ordinal === undefined ? -1 : ordinal;
+}
+
+// A coin's public recent movement as a fraction, preferring the shared
+// domain signal (recentChangePct) and falling back to the public history
+// window when the signal carries null (dead coins — excluded earlier).
+function coinMoveFraction(coin) {
+  if (typeof coin.recentChangePct === 'number' && Number.isFinite(coin.recentChangePct)) {
+    return coin.recentChangePct / 100;
+  }
+  return recentChange(coin);
 }
 
 // The universal liquidation-pressure phase, derived ONLY from public
@@ -380,10 +603,23 @@ function worstLiveHolding(marketState, snapshot) {
   return ranked.length > 0 ? ranked[0].entry : null;
 }
 
-// A personality BUY guarded by the central exposure safeguards: clamps the
-// desired stake and degrades to an explained HOLD when the rules leave
-// nothing to buy with.
-function guardedBuy({ coin, snapshot, profile, maxTradeSize, maxCoinExposureFraction, investedCapScale }) {
+// A personality BUY guarded by the central exposure safeguards AND the
+// shared V2-2 resource rules the bot can legally see: the position limit
+// (a NEW coin may not be opened at the cap; adding to a held coin is
+// always allowed) and the bot's own effective Power (a buy whose shared
+// domain cost exceeds the visible balance is a constrained HOLD, not a
+// doomed service call — the shared service remains the authoritative
+// enforcement point). Clamps the desired stake and degrades to an
+// explained HOLD when the rules leave nothing to buy with.
+function guardedBuy({ coin, snapshot, profile, maxTradeSize, maxCoinExposureFraction, investedCapScale, marketState }) {
+  // Position limit (the bot's own public count/limit): opening a NEW
+  // position at the cap is a constrained skip.
+  if (marketState && marketState.openPositions) {
+    const held = snapshot.holdings.some((e) => e.holding.coinId === coin.coinId);
+    if (!held && marketState.openPositions.open >= marketState.openPositions.max) {
+      return { type: 'HOLD', reason: 'position-limit' };
+    }
+  }
   const desired = spendFor(snapshot.cash, profile.stakeFraction, maxTradeSize);
   const spend = clampBuySpend({
     spend: desired,
@@ -396,24 +632,48 @@ function guardedBuy({ coin, snapshot, profile, maxTradeSize, maxCoinExposureFrac
   if (spend === null) return { type: 'HOLD', reason: 'exposure-limits' };
   const buy = boundedBuy(coin, spend);
   if (buy.type === 'HOLD') return { type: 'HOLD', reason: 'exposure-limits' };
+  // Power (the bot's own public balance): the SHARED live cost function
+  // estimates this order's price in Power; a balance that cannot cover it
+  // makes the buy a constrained skip. Selling is never affected — sells
+  // cost zero Power by rule.
+  if (marketState && marketState.power) {
+    const estimatedTotal = round2(buy.quantity * coin.currentPrice);
+    if (estimatedTotal > 0) {
+      const cost = powerDomain.buyPowerCost(estimatedTotal);
+      if (marketState.power.current < cost) {
+        return { type: 'HOLD', reason: 'power-constrained' };
+      }
+    }
+  }
   return buy;
 }
 
 // The canonical Core 5 personalities, extended for issue #20 with real exit
-// strategies under shared, central exposure safeguards. Each personality is
-// REQUIRED to be observably, deterministically distinct — and each now has
-// reachable SELL behaviour (profit-taking AND loss-cutting):
-//   conservative — small stakes, acts less often, preserves cash, takes
-//                  modest profits early, dumps meaningful decliners in full,
-//                  and holds the strongest late-game cash target.
-//   momentum     — buys reachable positive SHORT-window momentum, halves a
-//                  position whose trend reverses, takes profit on solid
-//                  full-window gains.
-//   dip_buyer    — buys a meaningfully dropped coin that is still alive,
-//                  sells into a meaningful recovery, and cuts a dip that
-//                  keeps collapsing instead of averaging down forever.
-//   reckless     — aggressive large stakes, but locks big wins, panic-cuts
-//                  deep losses, and is capped so it cannot buy down to ~£0.
+// strategies under shared, central exposure safeguards, and adapted for
+// V2-4 to trade the SAME coarse public signals a human client receives
+// (phase, momentum, archetype, collapse-risk, recent public movement) plus
+// the bot's own position economics, Power balance and position slots. Each
+// personality is REQUIRED to be observably, deterministically distinct —
+// and each has reachable SELL behaviour (profit-taking AND loss-cutting):
+//   conservative — favours DIP/early-RISE entries reading STABLE/SHAKY,
+//                  acts less often, buys small, banks a BOOM as soon as its
+//                  momentum stops confirming, walks away from DANGER coins,
+//                  dumps meaningful decliners in full, and holds the
+//                  strongest late-game cash target.
+//   momentum     — enters an ESTABLISHED RISE whose public momentum still
+//                  reads UP (later than the Dip Buyer), and exits the
+//                  moment the trend stops confirming: public momentum DOWN,
+//                  the coin rolling into FALL, or a solid banked gain.
+//   dip_buyer    — buys the public DIP phase (or a RISE barely off the
+//                  trough, the same public rule the DIP_BOOM benchmark
+//                  uses), rides toward the BOOM before selling, tolerates
+//                  DANGER entries, holds longer than Conservative, and cuts
+//                  a dip that keeps collapsing instead of averaging forever.
+//   reckless     — hunts the high-swing DEGEN/RUG archetypes with large
+//                  stakes, willingly buys DANGER/CRITICAL readings, locks
+//                  big wins and panic-cuts deep losses — sometimes winning
+//                  large, sometimes riding a collapse — while the central
+//                  caps and universal late/extreme safeguards still bind.
 function decideBotAction({
   strategy,
   marketState,
@@ -424,7 +684,9 @@ function decideBotAction({
   if (!BOT_STRATEGIES.includes(strategy)) {
     throw new BotServiceError(`unknown bot strategy ${JSON.stringify(strategy)}`, 400);
   }
-  validateMarketState(marketState);
+  // The public-state contract: EXACTLY the allowlisted shape, or a hard
+  // error. This is where hidden information is structurally kept out.
+  assertPublicBotState(marketState);
   if (typeof random !== 'function') {
     throw new BotServiceError('bot decision requires a random function', 400);
   }
@@ -433,6 +695,7 @@ function decideBotAction({
   const alive = marketState.coins.filter((c) => c.collapsed !== true && c.currentPrice > 0);
   const snapshot = portfolioSnapshot(marketState);
   const phase = liquidationPhase(marketState.apocalypsePercent);
+  const buyGuards = { snapshot, profile, maxTradeSize, maxCoinExposureFraction, marketState };
 
   // Universal endgame pressure. As public Apocalypse progress rises, every
   // personality progressively prefers Cash over open positions — without
@@ -459,115 +722,181 @@ function decideBotAction({
   // shrinking before the late phase forbids new entries entirely.
   const investedCapScale = phase === 'mid' ? BOT_MID_PHASE_INVESTED_SCALE : 1;
 
-  // Ranked live holdings with their public full-window change.
+  // Ranked live holdings enriched with the coin's public signals and the
+  // position's own P&L. Dead holdings (price £0) are excluded — a collapsed
+  // coin can never recover cash.
   const rankedHoldings = snapshot.holdings
     .filter((entry) => entry.price > 0)
-    .map((entry) => ({ entry, change: holdingChange(marketState, entry.holding) }));
+    .map((entry) => {
+      const coin = marketState.coins.find((c) => c.coinId === entry.holding.coinId);
+      return {
+        entry,
+        coin,
+        pnl: holdingPnlFraction(marketState, entry.holding),
+        move: coin ? coinMoveFraction(coin) : 0
+      };
+    });
+
+  // A held coin whose public risk reading has reached the personality's
+  // exit level is sold (worst P&L first). This is the intended V2-3
+  // decision mechanised per personality: Conservative bails at DANGER,
+  // Momentum at CRITICAL; Dip Buyer and Reckless have no risk-only exit.
+  function riskExit() {
+    if (!profile.exitAtRisk) return null;
+    const threshold = riskOrdinal(profile.exitAtRisk);
+    const danger = rankedHoldings
+      .filter((e) => e.coin && riskOrdinal(e.coin.collapseRisk) >= threshold)
+      .sort((a, b) => a.pnl - b.pnl || a.entry.holding.coinId - b.entry.holding.coinId);
+    if (danger.length === 0) return null;
+    return boundedSell(danger[0].entry.holding, profile.lossSellFraction || profile.profitSellFraction);
+  }
+
+  function profitTake(threshold, fraction) {
+    const gainers = rankedHoldings
+      .filter((e) => e.pnl >= threshold)
+      .sort((a, b) => b.pnl - a.pnl || a.entry.holding.coinId - b.entry.holding.coinId);
+    if (gainers.length === 0) return null;
+    return boundedSell(gainers[0].entry.holding, fraction);
+  }
+
+  function lossCut(threshold, fraction, { requireStress = false } = {}) {
+    const losers = rankedHoldings
+      .filter((e) => e.pnl <= threshold)
+      .filter((e) => !requireStress
+        || (e.coin && (e.coin.phase === 'FALL' || e.coin.momentum === 'DOWN')))
+      .sort((a, b) => a.pnl - b.pnl || a.entry.holding.coinId - b.entry.holding.coinId);
+    if (losers.length === 0) return null;
+    return boundedSell(losers[0].entry.holding, fraction);
+  }
+
+  // Entry candidates under the personality's public-signal rules: alive,
+  // coarse phase preferred, public risk no worse than the personality's
+  // tolerance. `extraFilter`/`sorter` carry the personality's taste.
+  function entryCandidates({ extraFilter = null, sorter = null } = {}) {
+    const maxRisk = riskOrdinal(profile.maxEntryRisk);
+    return alive
+      .filter((coin) => riskOrdinal(coin.collapseRisk) <= maxRisk)
+      .filter((coin) => !Array.isArray(profile.preferredEntryPhases)
+        || profile.preferredEntryPhases.includes(coin.phase)
+        || (extraFilter && extraFilter(coin)))
+      .sort(sorter || ((a, b) => a.coinId - b.coinId));
+  }
 
   switch (strategy) {
     case 'conservative': {
-      // Capital preservation first: dump the worst meaningful decliner in
-      // full, then take a modest profit on the best gainer.
-      const declining = rankedHoldings
-        .filter((e) => e.change <= profile.lossCutThreshold)
-        .sort((a, b) => a.change - b.change || a.entry.holding.coinId - b.entry.holding.coinId);
-      if (declining.length > 0) {
-        return boundedSell(declining[0].entry.holding, profile.lossSellFraction);
+      // Capital preservation first: bail out of any coin the public risk
+      // signal calls DANGEROUS, dump the worst meaningful decliner in full,
+      // bank a BOOM the instant its momentum stops confirming, then take a
+      // modest profit on the best remaining gainer.
+      const dangerExit = riskExit();
+      if (dangerExit) return dangerExit;
+      const cut = lossCut(profile.lossCutThreshold, profile.lossSellFraction);
+      if (cut) return cut;
+      if (profile.boomExitOnWeakMomentum) {
+        const stalling = rankedHoldings
+          .filter((e) => e.coin && e.coin.phase === 'BOOM' && e.coin.momentum !== 'UP')
+          .sort((a, b) => b.pnl - a.pnl || a.entry.holding.coinId - b.entry.holding.coinId);
+        if (stalling.length > 0) {
+          return boundedSell(stalling[0].entry.holding, profile.profitSellFraction);
+        }
       }
-      const gainers = rankedHoldings
-        .filter((e) => e.change >= profile.profitTakeThreshold)
-        .sort((a, b) => b.change - a.change || a.entry.holding.coinId - b.entry.holding.coinId);
-      if (gainers.length > 0) {
-        return boundedSell(gainers[0].entry.holding, profile.profitSellFraction);
-      }
-      // Preserve cash: act less often, and only with a SMALL stake on the
-      // most stable surviving coin.
+      const profit = profitTake(profile.profitTakeThreshold, profile.profitSellFraction);
+      if (profit) return profit;
+      // Preserve cash and Power: act less often, and only a SMALL stake on
+      // a DIP/early-RISE coin reading calm — never a dangerous one.
       if (alive.length === 0) return { type: 'HOLD' };
       if (random() >= profile.activityGate) return { type: 'HOLD' };
-      const stable = alive
-        .map((coin) => ({ coin, change: Math.abs(recentChange(coin)) }))
-        .sort((a, b) => a.change - b.change || a.coin.coinId - b.coin.coinId)[0].coin;
-      return guardedBuy({ coin: stable, snapshot, profile, maxTradeSize, maxCoinExposureFraction, investedCapScale });
+      const candidates = entryCandidates({
+        sorter: (a, b) => (a.phase === 'DIP' ? 0 : 1) - (b.phase === 'DIP' ? 0 : 1)
+          || Math.abs(coinMoveFraction(a)) - Math.abs(coinMoveFraction(b))
+          || a.coinId - b.coinId
+      });
+      if (candidates.length === 0) return { type: 'HOLD', reason: 'no-calm-entry' };
+      return guardedBuy({ coin: candidates[0], ...buyGuards, investedCapScale });
     }
     case 'momentum': {
-      // Trend reversal first: halve the holding whose SHORT-window momentum
-      // has turned negative (weakest trend first).
-      const reversed = rankedHoldings
-        .map((e) => {
-          const coin = marketState.coins.find((c) => c.coinId === e.entry.holding.coinId);
-          return { ...e, momentum: coin ? shortMomentum(coin, profile.momentumWindow) : 0 };
-        })
-        .filter((e) => e.momentum < 0)
-        .sort((a, b) => a.momentum - b.momentum || a.entry.holding.coinId - b.entry.holding.coinId);
-      if (reversed.length > 0) {
-        return boundedSell(reversed[0].entry.holding, profile.reversalSellFraction);
+      // Trend stops confirming -> reduce: the coin rolled into a FALL, the
+      // BOOM's momentum stalled, public momentum reads DOWN on a position
+      // that is not even ahead, or the risk signal has gone CRITICAL.
+      const weakening = rankedHoldings
+        .filter((e) => e.coin && (
+          profile.exitOnPhases.includes(e.coin.phase)
+          || (profile.boomExitOnWeakMomentum && e.coin.phase === 'BOOM' && e.coin.momentum !== 'UP')
+          || (profile.exitOnDownMomentum && e.coin.momentum === 'DOWN' && e.pnl <= 0)
+        ))
+        .sort((a, b) => a.move - b.move || a.entry.holding.coinId - b.entry.holding.coinId);
+      if (weakening.length > 0) {
+        return boundedSell(weakening[0].entry.holding, profile.reversalSellFraction);
       }
-      // Then take profit on a solid full-window gain rather than holding
-      // indefinitely.
-      const gainers = rankedHoldings
-        .filter((e) => e.change >= profile.profitTakeThreshold)
-        .sort((a, b) => b.change - a.change || a.entry.holding.coinId - b.entry.holding.coinId);
-      if (gainers.length > 0) {
-        return boundedSell(gainers[0].entry.holding, profile.profitSellFraction);
-      }
+      const dangerExit = riskExit();
+      if (dangerExit) return dangerExit;
+      // Then take profit on a solid gain rather than holding indefinitely.
+      const profit = profitTake(profile.profitTakeThreshold, profile.profitSellFraction);
+      if (profit) return profit;
       if (alive.length === 0) return { type: 'HOLD' };
-      // Chase the strongest recent riser — reachable by design (short
-      // window, low entry bar). Deterministic tie-break by coinId; the
-      // seeded random only chooses among the top risers.
-      const risers = alive
-        .map((coin) => ({ coin, momentum: shortMomentum(coin, profile.momentumWindow) }))
-        .filter((entry) => entry.momentum >= profile.momentumEntryThreshold)
-        .sort((a, b) => b.momentum - a.momentum || a.coin.coinId - b.coin.coinId);
+      // Enter an ESTABLISHED RISE with confirming public momentum — the
+      // public momentum reads UP AND the observed short-window history
+      // confirms a genuinely positive trend; the strongest recent public
+      // move first, seeded random only among the top candidates.
+      const risers = entryCandidates({
+        extraFilter: null, // preferredEntryPhases (RISE) is the whole rule
+        sorter: (a, b) => coinMoveFraction(b) - coinMoveFraction(a) || a.coinId - b.coinId
+      }).filter((coin) => coin.momentum === 'UP'
+        && shortMomentum(coin, profile.momentumWindow) >= profile.momentumEntryThreshold);
       if (risers.length === 0) return { type: 'HOLD' };
-      const pick = risers[Math.floor(random() * Math.min(2, risers.length))].coin;
-      return guardedBuy({ coin: pick, snapshot, profile, maxTradeSize, maxCoinExposureFraction, investedCapScale });
+      const pick = risers[Math.floor(random() * Math.min(2, risers.length))];
+      return guardedBuy({ coin: pick, ...buyGuards, investedCapScale });
     }
     case 'dip_buyer': {
-      // Sell into a meaningful recovery on a held position (best first).
-      const recovered = rankedHoldings
-        .filter((e) => e.change >= profile.recoveryExitThreshold)
-        .sort((a, b) => b.change - a.change || a.entry.holding.coinId - b.entry.holding.coinId);
-      if (recovered.length > 0) {
-        return boundedSell(recovered[0].entry.holding, 1);
+      // The DIP->BOOM ride completed (or the recovery is meaningful): sell.
+      const ridden = rankedHoldings
+        .filter((e) => (e.coin && e.coin.phase === 'BOOM') || e.pnl >= profile.recoveryExitThreshold)
+        .sort((a, b) => b.pnl - a.pnl || a.entry.holding.coinId - b.entry.holding.coinId);
+      if (ridden.length > 0) {
+        return boundedSell(ridden[0].entry.holding, 1);
       }
-      // Cut a dip that keeps collapsing instead of averaging down forever.
-      const collapsing = rankedHoldings
-        .filter((e) => e.change <= profile.lossCutThreshold)
-        .sort((a, b) => a.change - b.change || a.entry.holding.coinId - b.entry.holding.coinId);
-      if (collapsing.length > 0) {
-        return boundedSell(collapsing[0].entry.holding, profile.lossSellFraction);
+      // The boom did not come: a FALL-phase position meaningfully
+      // underwater is cut, and a deep collapse is cut whatever the phase —
+      // but a mere FALL wobble is ridden out (this is the personality that
+      // may occasionally overstay).
+      const falling = rankedHoldings
+        .filter((e) => e.pnl <= profile.lossCutThreshold
+          || (e.coin && e.coin.phase === 'FALL' && e.pnl <= profile.fallExitThreshold))
+        .sort((a, b) => a.pnl - b.pnl || a.entry.holding.coinId - b.entry.holding.coinId);
+      if (falling.length > 0) {
+        return boundedSell(falling[0].entry.holding, profile.lossSellFraction);
       }
       if (alive.length === 0) return { type: 'HOLD' };
-      // Buy the deepest MEANINGFUL drop among coins that are still alive.
-      // The central exposure caps stop repeated dip buys from consuming
-      // nearly all cash without an exit.
-      const dropped = alive
-        .map((coin) => ({ coin, change: recentChange(coin) }))
-        .filter((entry) => entry.change <= profile.dipEntryThreshold)
-        .sort((a, b) => a.change - b.change || a.coin.coinId - b.coin.coinId);
-      if (dropped.length === 0) return { type: 'HOLD' };
-      return guardedBuy({ coin: dropped[0].coin, snapshot, profile, maxTradeSize, maxCoinExposureFraction, investedCapScale });
+      // Buy the public DIP phase (deepest recent public drop first) or a
+      // RISE that has barely left the trough — the same legal public cues
+      // as the DIP_BOOM human benchmark. Held coins qualify for an add only
+      // when the dip has gone deeper than entry.
+      const heldIds = new Set(marketState.holdings.filter((h) => h.quantity > 0).map((h) => h.coinId));
+      const candidates = entryCandidates({
+        extraFilter: (coin) =>
+          coin.phase === 'RISE' && coin.momentum !== 'DOWN'
+            && typeof coin.recentChangePct === 'number'
+            && coin.recentChangePct <= profile.riseEntryMaxChangePct,
+        sorter: (a, b) => coinMoveFraction(a) - coinMoveFraction(b) || a.coinId - b.coinId
+      }).filter((coin) => !heldIds.has(coin.coinId) || recentChange(coin) <= profile.dipEntryThreshold);
+      if (candidates.length === 0) return { type: 'HOLD' };
+      return guardedBuy({ coin: candidates[0], ...buyGuards, investedCapScale });
     }
     case 'reckless': {
       // Lock a big speculative win (best gainer first), then panic-cut a
-      // deep loser. Otherwise: a large stake on a deterministically chosen
-      // eligible coin, bounded by the central caps so endless buying can no
-      // longer spend the bankroll down toward £0.
-      const winners = rankedHoldings
-        .filter((e) => e.change >= profile.profitTakeThreshold)
-        .sort((a, b) => b.change - a.change || a.entry.holding.coinId - b.entry.holding.coinId);
-      if (winners.length > 0) {
-        return boundedSell(winners[0].entry.holding, profile.profitSellFraction);
-      }
-      const deepLosers = rankedHoldings
-        .filter((e) => e.change <= profile.lossCutThreshold)
-        .sort((a, b) => a.change - b.change || a.entry.holding.coinId - b.entry.holding.coinId);
-      if (deepLosers.length > 0) {
-        return boundedSell(deepLosers[0].entry.holding, profile.lossSellFraction);
-      }
+      // deep loser. Otherwise: a large stake on the swing archetypes —
+      // DANGER/CRITICAL readings included — bounded by the central caps.
+      const profit = profitTake(profile.profitTakeThreshold, profile.profitSellFraction);
+      if (profit) return profit;
+      const cut = lossCut(profile.lossCutThreshold, profile.lossSellFraction);
+      if (cut) return cut;
       if (alive.length === 0) return { type: 'HOLD' };
-      const pick = alive[Math.floor(random() * alive.length)];
-      return guardedBuy({ coin: pick, snapshot, profile, maxTradeSize, maxCoinExposureFraction, investedCapScale });
+      const eligible = alive.filter((coin) => riskOrdinal(coin.collapseRisk) <= riskOrdinal(profile.maxEntryRisk));
+      if (eligible.length === 0) return { type: 'HOLD' };
+      const preferred = eligible.filter((coin) => profile.preferredArchetypes.includes(coin.archetype));
+      const pool = preferred.length > 0 ? preferred : eligible;
+      const pick = pool[Math.floor(random() * pool.length)];
+      return guardedBuy({ coin: pick, ...buyGuards, investedCapScale });
     }
     default:
       // Unreachable: strategy validated above.
@@ -618,6 +947,21 @@ function validateTickId(tickId) {
     throw new BotServiceError(`tickId must be a non-negative integer; received ${String(tickId)}`, 400);
   }
   return tickId;
+}
+
+// Classify a shared-service domain rejection. V2-2 resource rejections —
+// an unaffordable Power cost or the position limit — are EXPECTED bot
+// outcomes: the bot observed its own public Power/position state, the
+// locked service enforced authoritatively, and the bot simply skips. They
+// are recorded as non-fatal skips with a stable reason, never bypassed and
+// never converted into direct state mutations. Any other domain rejection
+// (stale cycle after a mid-tick rollover, insufficient funds/holdings)
+// stays a recorded 'rejected'. Returns null for non-resource rejections.
+function classifyBotDomainError(err) {
+  if (!err || typeof err.message !== 'string') return null;
+  if (err.message.startsWith('Insufficient Power')) return 'power-blocked';
+  if (err.message.startsWith('Position limit reached')) return 'position-limit';
+  return null;
 }
 
 async function runBotTick({ tickId: rawTickId, now = new Date() } = {}) {
@@ -759,10 +1103,17 @@ async function runBotTick({ tickId: rawTickId, now = new Date() } = {}) {
       }
     } catch (err) {
       if (err && err.name === 'GameRoundError') {
-        // A clean domain rejection (stale cycle after a mid-tick rollover,
-        // insufficient funds/holdings): recorded, never fatal.
-        action.result = 'rejected';
-        action.reason = err.message;
+        // A clean domain rejection: recorded, never fatal. V2-4: Power and
+        // position-limit rejections are expected resource skips with their
+        // own stable reasons; anything else keeps the generic 'rejected'.
+        const resourceReason = classifyBotDomainError(err);
+        if (resourceReason) {
+          action.result = 'skipped';
+          action.reason = resourceReason;
+        } else {
+          action.result = 'rejected';
+          action.reason = err.message;
+        }
       } else {
         throw err;
       }
@@ -787,10 +1138,16 @@ async function runBotTick({ tickId: rawTickId, now = new Date() } = {}) {
 
 module.exports = {
   BOT_HISTORY_WINDOW,
+  BOT_MARKET_STATE_KEYS,
+  BOT_COIN_KEYS,
+  BOT_HOLDING_KEYS,
+  BOT_POWER_KEYS,
+  BOT_OPEN_POSITION_KEYS,
   BotServiceError,
   createBotRandom,
   ensureBotsProvisioned,
   buildPublicMarketState,
+  assertPublicBotState,
   liquidationPhase,
   shortMomentum,
   portfolioSnapshot,
@@ -798,5 +1155,6 @@ module.exports = {
   decideBotAction,
   enforceTradeSizeCap,
   enforceMinTradeValue,
+  classifyBotDomainError,
   runBotTick
 };

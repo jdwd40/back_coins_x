@@ -39,17 +39,39 @@ function restoreEnv(saved) {
   }
 }
 
-// Deterministic market state fixture: coin 1 rising (+100% full window),
-// coin 2 falling (-50% full window). Both alive.
+// Deterministic market state fixture in the exact V2-4 public shape: coin 1
+// rising (+100% full window, RISE/UP), coin 2 falling (-50%, DIP). Both
+// alive. Holdings carry the (nullable) own-position economics keys.
+function v2Coin(overrides = {}) {
+  return {
+    coinId: 1, symbol: 'AAA', currentPrice: 20, collapsed: false, history: [10, 15, 20],
+    phase: 'RISE', momentum: 'UP', archetype: 'MOON', collapseRisk: 'SHAKY', recentChangePct: 100,
+    ...overrides
+  };
+}
+
+function v2Holding(overrides = {}) {
+  return {
+    coinId: 1, symbol: 'AAA', quantity: 4,
+    costBasis: null, averageEntryPrice: null, currentValue: null, unrealizedPnlPct: null,
+    ...overrides
+  };
+}
+
 function shapedState(overrides = {}) {
   return {
     apocalypsePercent: 20,
     cash: 1000,
     holdings: [],
     coins: [
-      { coinId: 1, symbol: 'AAA', currentPrice: 20, collapsed: false, history: [10, 15, 20] },
-      { coinId: 2, symbol: 'BBB', currentPrice: 10, collapsed: false, history: [20, 15, 10] }
+      v2Coin(),
+      v2Coin({
+        coinId: 2, symbol: 'BBB', currentPrice: 10, history: [20, 15, 10],
+        phase: 'DIP', momentum: 'DOWN', archetype: 'BULL', collapseRisk: 'STABLE', recentChangePct: -50
+      })
     ],
+    power: { current: 100, max: 100, regenMsPerPoint: 30000 },
+    openPositions: { open: 0, max: 3 },
     ...overrides
   };
 }
@@ -122,8 +144,11 @@ describe('issue #20: universal liquidation-pressure phases', () => {
     // A flat holding with no profit/loss trigger: the personality itself has
     // nothing to do. Only apocalypsePercent changes between the decisions.
     const base = shapedState({
-      coins: [{ coinId: 1, symbol: 'AAA', currentPrice: 10, collapsed: false, history: [10, 10] }],
-      holdings: [{ coinId: 1, symbol: 'AAA', quantity: 50 }],
+      coins: [v2Coin({
+        currentPrice: 10, history: [10, 10],
+        phase: 'FALL', momentum: 'FLAT', collapseRisk: 'STABLE', recentChangePct: 0
+      })],
+      holdings: [v2Holding({ quantity: 50 })],
       cash: 100
     });
     const early = decide('dip_buyer', { ...base, apocalypsePercent: 10 });
@@ -144,8 +169,8 @@ describe('issue #20: universal liquidation-pressure phases', () => {
       apocalypsePercent: 92,
       cash: 9000,
       holdings: [
-        { coinId: 1, symbol: 'AAA', quantity: 10 }, // +100%
-        { coinId: 2, symbol: 'BBB', quantity: 8 } // -50%
+        v2Holding({ coinId: 1, symbol: 'AAA', quantity: 10 }), // +100%
+        v2Holding({ coinId: 2, symbol: 'BBB', quantity: 8 }) // -50%
       ]
     });
     expect(decide('reckless', state)).toEqual({ type: 'SELL', coinId: 2, quantity: 8 });
@@ -154,8 +179,11 @@ describe('issue #20: universal liquidation-pressure phases', () => {
     const deadOnly = shapedState({
       apocalypsePercent: 95,
       cash: 9000,
-      coins: [{ coinId: 1, symbol: 'AAA', currentPrice: 0, collapsed: true, history: [10, 0] }],
-      holdings: [{ coinId: 1, symbol: 'AAA', quantity: 10 }]
+      coins: [v2Coin({
+        currentPrice: 0, collapsed: true, history: [10, 0],
+        phase: 'DEAD', momentum: 'FLAT', collapseRisk: 'DEAD', recentChangePct: null
+      })],
+      holdings: [v2Holding({ quantity: 10 })]
     });
     for (const strategy of botConfig.BOT_STRATEGIES) {
       const action = decide(strategy, deadOnly);
@@ -168,7 +196,7 @@ describe('issue #20: universal liquidation-pressure phases', () => {
     const state = shapedState({
       apocalypsePercent: 75,
       cash: 1000,
-      holdings: [{ coinId: 2, symbol: 'BBB', quantity: 200 }] // £2,000 -> cash fraction 1/3
+      holdings: [v2Holding({ coinId: 2, symbol: 'BBB', quantity: 200 })] // £2,000 -> cash fraction 1/3
     });
     // Conservative targets 70% cash: 33% is below target -> sell the worst
     // holding in full.
@@ -180,13 +208,19 @@ describe('issue #20: universal liquidation-pressure phases', () => {
 
   test('the mid phase still trades but with a scaled-down invested cap', () => {
     const coins = [
-      { coinId: 1, symbol: 'AAA', currentPrice: 10.5, collapsed: false, history: [10, 10.5] }, // +5% riser
-      { coinId: 2, symbol: 'BBB', currentPrice: 10, collapsed: false, history: [10, 10] } // flat holding
+      v2Coin({
+        currentPrice: 10.5, history: [10, 10.5],
+        phase: 'RISE', momentum: 'UP', collapseRisk: 'STABLE', recentChangePct: 5
+      }), // +5% riser
+      v2Coin({
+        coinId: 2, symbol: 'BBB', currentPrice: 10, history: [10, 10],
+        phase: 'DIP', momentum: 'FLAT', collapseRisk: 'STABLE', recentChangePct: 0
+      }) // flat holding
     ];
     const base = shapedState({
       coins,
       cash: 550,
-      holdings: [{ coinId: 2, symbol: 'BBB', quantity: 45 }] // £450 invested of £1,000 wealth
+      holdings: [v2Holding({ coinId: 2, symbol: 'BBB', quantity: 45 })] // £450 invested of £1,000 wealth
     });
     // Early: invested cap 60% of £1,000 = £600 -> £150 headroom -> BUY.
     expect(decide('momentum', { ...base, apocalypsePercent: 20 })).toMatchObject({ type: 'BUY', coinId: 1 });
@@ -198,47 +232,59 @@ describe('issue #20: universal liquidation-pressure phases', () => {
 
 describe('issue #20: every personality has reachable SELL behaviour', () => {
   test('conservative: takes a modest profit (half) and cuts a meaningful loss (full)', () => {
-    const gainer = shapedState({ holdings: [{ coinId: 1, symbol: 'AAA', quantity: 10 }] }); // +100%
+    const gainer = shapedState({ holdings: [v2Holding({ quantity: 10 })] }); // +100%
     expect(decide('conservative', gainer, () => 0.1)).toEqual({ type: 'SELL', coinId: 1, quantity: 5 });
-    const loser = shapedState({ holdings: [{ coinId: 2, symbol: 'BBB', quantity: 10 }] }); // -50%
+    const loser = shapedState({ holdings: [v2Holding({ coinId: 2, symbol: 'BBB', quantity: 10 })] }); // -50%
     expect(decide('conservative', loser, () => 0.1)).toEqual({ type: 'SELL', coinId: 2, quantity: 10 });
   });
 
   test('momentum: halves a reversed position, takes profit on a solid gain, and enters on reachable short momentum', () => {
-    const reversed = shapedState({ holdings: [{ coinId: 2, symbol: 'BBB', quantity: 6 }] }); // short trend < 0
+    const reversed = shapedState({ holdings: [v2Holding({ coinId: 2, symbol: 'BBB', quantity: 6 })] }); // DOWN + underwater
     expect(decide('momentum', reversed)).toEqual({ type: 'SELL', coinId: 2, quantity: 3 });
     const gainer = shapedState({
-      coins: [{ coinId: 1, symbol: 'AAA', currentPrice: 11.5, collapsed: false, history: [10, 11.5] }],
-      holdings: [{ coinId: 1, symbol: 'AAA', quantity: 8 }]
+      coins: [v2Coin({ currentPrice: 11.5, history: [10, 11.5], recentChangePct: 15 })],
+      holdings: [v2Holding({ quantity: 8 })]
     }); // +15% full window, still rising -> no reversal, take profit
     expect(decide('momentum', gainer)).toEqual({ type: 'SELL', coinId: 1, quantity: 4 });
-    // Reachable entry: a modest recent uptick qualifies (the old full-window
-    // rule almost never fired in a declining market).
+    // Reachable entry: a modest recent uptick qualifies (public RISE phase,
+    // momentum UP and a genuinely positive short-window history trend).
     const uptick = shapedState({
-      coins: [{ coinId: 1, symbol: 'AAA', currentPrice: 10.25, collapsed: false, history: [10.1, 10.0, 10.25] }]
+      coins: [v2Coin({
+        currentPrice: 10.25, history: [10.1, 10.0, 10.25],
+        phase: 'RISE', momentum: 'UP', collapseRisk: 'STABLE', recentChangePct: 2.5
+      })]
     });
     expect(decide('momentum', uptick)).toMatchObject({ type: 'BUY', coinId: 1 });
   });
 
   test('dip buyer: sells a meaningful recovery and cuts a dip that keeps collapsing instead of averaging forever', () => {
-    const recovered = shapedState({ holdings: [{ coinId: 1, symbol: 'AAA', quantity: 6 }] }); // +100%
+    const recovered = shapedState({ holdings: [v2Holding({ quantity: 6 })] }); // +100%
     expect(decide('dip_buyer', recovered)).toEqual({ type: 'SELL', coinId: 1, quantity: 6 });
     const collapsing = shapedState({
-      coins: [{ coinId: 2, symbol: 'BBB', currentPrice: 7, collapsed: false, history: [10, 8.5, 7] }],
-      holdings: [{ coinId: 2, symbol: 'BBB', quantity: 5 }]
+      coins: [v2Coin({
+        coinId: 2, symbol: 'BBB', currentPrice: 7, history: [10, 8.5, 7],
+        phase: 'FALL', momentum: 'DOWN', collapseRisk: 'DANGER', recentChangePct: -30
+      })],
+      holdings: [v2Holding({ coinId: 2, symbol: 'BBB', quantity: 5 })]
     }); // -30% full window: beyond the -25% cut
     expect(decide('dip_buyer', collapsing)).toEqual({ type: 'SELL', coinId: 2, quantity: 5 });
   });
 
   test('reckless: locks a big win (half) and panic-cuts a deep loser (full)', () => {
     const winner = shapedState({
-      coins: [{ coinId: 1, symbol: 'AAA', currentPrice: 13.5, collapsed: false, history: [10, 13.5] }],
-      holdings: [{ coinId: 1, symbol: 'AAA', quantity: 10 }]
+      coins: [v2Coin({
+        currentPrice: 13.5, history: [10, 13.5],
+        phase: 'BOOM', momentum: 'UP', recentChangePct: 35
+      })],
+      holdings: [v2Holding({ quantity: 10 })]
     }); // +35% >= +30%
     expect(decide('reckless', winner)).toEqual({ type: 'SELL', coinId: 1, quantity: 5 });
     const deepLoser = shapedState({
-      coins: [{ coinId: 2, symbol: 'BBB', currentPrice: 4.5, collapsed: false, history: [10, 4.5] }],
-      holdings: [{ coinId: 2, symbol: 'BBB', quantity: 20 }]
+      coins: [v2Coin({
+        coinId: 2, symbol: 'BBB', currentPrice: 4.5, history: [10, 4.5],
+        phase: 'FALL', momentum: 'DOWN', recentChangePct: -55
+      })],
+      holdings: [v2Holding({ coinId: 2, symbol: 'BBB', quantity: 20 })]
     }); // -55% <= -50%
     expect(decide('reckless', deepLoser)).toEqual({ type: 'SELL', coinId: 2, quantity: 20 });
   });
@@ -247,7 +293,7 @@ describe('issue #20: every personality has reachable SELL behaviour', () => {
     const fractional = shapedState({
       apocalypsePercent: 95,
       cash: 100,
-      holdings: [{ coinId: 2, symbol: 'BBB', quantity: 12.345678 }]
+      holdings: [v2Holding({ coinId: 2, symbol: 'BBB', quantity: 12.345678 })]
     });
     const action = decide('conservative', fractional, () => 0.1);
     expect(action).toEqual({ type: 'SELL', coinId: 2, quantity: 12.345678 });
@@ -262,7 +308,12 @@ describe('issue #20: central exposure safeguards hold under repeated BUYs', () =
     state.cash = Math.round((state.cash - cost) * 100) / 100;
     const holding = state.holdings.find((h) => h.coinId === decision.coinId);
     if (holding) holding.quantity += decision.quantity;
-    else state.holdings.push({ coinId: decision.coinId, symbol: coin.symbol, quantity: decision.quantity });
+    else state.holdings.push(v2Holding({ coinId: decision.coinId, symbol: coin.symbol, quantity: decision.quantity }));
+    // The position the bot just opened is now occupied.
+    state.openPositions = {
+      open: new Set(state.holdings.filter((h) => h.quantity > 0).map((h) => h.coinId)).size,
+      max: state.openPositions.max
+    };
     // Invariants, checked after EVERY buy.
     const snapshot = botService.portfolioSnapshot(state);
     const coinEntry = snapshot.holdings.find((e) => e.holding.coinId === decision.coinId);
@@ -278,7 +329,10 @@ describe('issue #20: central exposure safeguards hold under repeated BUYs', () =
       apocalypsePercent: 10,
       cash: 10000,
       holdings: [],
-      coins: [{ coinId: 1, symbol: 'AAA', currentPrice: 10, collapsed: false, history: [10, 10] }]
+      coins: [v2Coin({
+        currentPrice: 10, history: [10, 10],
+        phase: 'RISE', momentum: 'FLAT', collapseRisk: 'STABLE', recentChangePct: 0
+      })]
     });
     let buys = 0;
     let last;
@@ -305,7 +359,10 @@ describe('issue #20: central exposure safeguards hold under repeated BUYs', () =
       apocalypsePercent: 10,
       cash: 10000,
       holdings: [],
-      coins: [{ coinId: 1, symbol: 'AAA', currentPrice: 8.5, collapsed: false, history: [10, 8.5] }] // -15% dip
+      coins: [v2Coin({
+        currentPrice: 8.5, history: [10, 8.5],
+        phase: 'DIP', momentum: 'DOWN', collapseRisk: 'STABLE', recentChangePct: -15
+      })] // -15% dip
     });
     let buys = 0;
     let last;
@@ -329,10 +386,13 @@ describe('issue #20: central exposure safeguards hold under repeated BUYs', () =
       apocalypsePercent: 10,
       cash: 100,
       coins: [
-        { coinId: 1, symbol: 'AAA', currentPrice: 20, collapsed: false, history: [10, 15, 20] },
-        { coinId: 2, symbol: 'BBB', currentPrice: 10, collapsed: false, history: [10, 10] }
+        v2Coin(), // RISE/UP/SHAKY riser
+        v2Coin({
+          coinId: 2, symbol: 'BBB', currentPrice: 10, history: [10, 10],
+          phase: 'DIP', momentum: 'FLAT', collapseRisk: 'STABLE', recentChangePct: 0
+        })
       ],
-      holdings: [{ coinId: 2, symbol: 'BBB', quantity: 90 }] // £900 of £1,000 invested, flat
+      holdings: [v2Holding({ coinId: 2, symbol: 'BBB', quantity: 90 })] // £900 of £1,000 invested, flat
     });
     // Conservative reserve is 30% of £1,000 wealth = £300 > £100 cash.
     expect(decide('conservative', state, () => 0.1))

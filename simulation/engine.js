@@ -242,7 +242,7 @@ function runRound(context, strategy, {
   timeOffsetMs = 0,
   debits = null
 } = {}) {
-  const { env, ticks, gridByCoin } = context;
+  const { env, ticks, gridByCoin, signalGrid } = context;
   const debitSchedule = debits || env.debits;
   context.startingCash = startingCash;
   const portfolio = createPortfolio(startingCash);
@@ -285,6 +285,18 @@ function runRound(context, strategy, {
   for (const bandId of ESCALATION_BAND_IDS) bandTrades[bandId] = 0;
   const collapseLosses = [];
   const collapsedSeen = new Set();
+
+  // V2-4 instrumentation: entry phase/risk distribution from the PUBLIC
+  // signal grid (the exact fields a legal client saw at the entry tick),
+  // buy/sell split, the largest open live position count reached, and the
+  // zero-Power sell guarantee (every sell attempted at < 1 effective Power
+  // must still execute — selling never costs Power).
+  let executedSells = 0;
+  const buyPhaseCounts = {};
+  const buyRiskCounts = {};
+  let maxOpenPositionsSeen = 0;
+  let zeroPowerSellAttempts = 0;
+  let zeroPowerSellExecuted = 0;
 
   const liveCoinIdsAt = (t) => {
     const ids = [];
@@ -383,13 +395,26 @@ function runRound(context, strategy, {
             executedBuys += 1;
             bandTrades[getEscalationBand(env.apocalypsePercentAt(t))] += 1;
             cashDeployed = round2(cashDeployed + (cashBefore - portfolio.cash));
+            // V2-4: the entry's PUBLIC phase/risk at this tick.
+            const entrySignal = signalGrid[i].find((c) => c.coinId === action.coinId);
+            if (entrySignal) {
+              buyPhaseCounts[entrySignal.phase] = (buyPhaseCounts[entrySignal.phase] || 0) + 1;
+              buyRiskCounts[entrySignal.collapseRisk] = (buyRiskCounts[entrySignal.collapseRisk] || 0) + 1;
+            }
           }
         } else if (action.action === 'sell') {
           const holding = portfolio.holdings.get(action.coinId);
           const basisBefore = holding ? holding.costBasis : 0;
           const cashBefore = portfolio.cash;
+          // V2-4: selling is always available at zero Power — count every
+          // sell attempted while the account is effectively empty and
+          // verify it still executed.
+          const zeroPowerSell = powerAccount && reconcileAccountAt(t) < 1;
+          if (zeroPowerSell) zeroPowerSellAttempts += 1;
           if (executeSell(portfolio, action.coinId, action.fraction, price)) {
             trades += 1;
+            executedSells += 1;
+            if (zeroPowerSell) zeroPowerSellExecuted += 1;
             bandTrades[getEscalationBand(env.apocalypsePercentAt(t))] += 1;
             const after = portfolio.holdings.get(action.coinId);
             basisRemoved = round2(basisRemoved + (basisBefore - (after ? after.costBasis : 0)));
@@ -418,6 +443,8 @@ function runRound(context, strategy, {
     if (maxPositions !== Infinity && liveCoinIdsAt(t).length > maxPositions) {
       positionLimitViolations += 1;
     }
+    // V2-4: the largest open live position count reached this round.
+    maxOpenPositionsSeen = Math.max(maxOpenPositionsSeen, liveCoinIdsAt(t).length);
 
     // Equity for drawdown/time-in-market: cash + live holdings value.
     let holdingsValue = 0;
@@ -479,7 +506,14 @@ function runRound(context, strategy, {
     // V2-3 fields.
     bandTrades,
     collapseLosses,
-    debitsPaid
+    debitsPaid,
+    // V2-4 fields.
+    executedSells,
+    buyPhaseCounts,
+    buyRiskCounts,
+    maxOpenPositionsSeen,
+    zeroPowerSellAttempts,
+    zeroPowerSellExecuted
   };
 }
 
