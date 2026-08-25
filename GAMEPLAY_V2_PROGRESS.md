@@ -78,3 +78,89 @@ Commands and results:
 ## Next authorised phase
 
 Begin with V2-1 planning and the shared deterministic cyclical-market/simulation gate. Do not proceed to Power, bots, or major UI work until DIP-BOOM demonstrates a repeatable advantage over RANDOM on identical seeded paths.
+
+---
+
+## V2-1 — COMPLETE
+
+Checkpoint timestamp: `2026-08-25T01:59:25+01:00`
+
+- Status: **COMPLETE**
+- Backend stage SHA: `b71f0671b0beb2c712af298232f61befef8f67f1`
+- Frontend SHA: `3a2688b3111785f09321dd9f8cb8f32ff6d63357` (unchanged; no frontend implementation in V2-1)
+- Commit: `feat(game): implement V2-1 cyclical market and simulation`
+- Production branches/services/data: untouched.
+- Existing `.hermes/` attachment: preserved untracked and not staged.
+
+### V2-1 delivered
+
+- Shared deterministic `game/marketDomain.js` cyclical DIP → RISE → BOOM → FALL pricing domain.
+- Non-destructive gameplay roster mapping existing active coins to ZIP, MOON, BULL, HODL, DEGEN and RUG archetypes.
+- Seeded variable cycle duration, swing, phase shape, anchor/regime drift, continuous bounded noise and staggered coin timelines.
+- Live market writer integration using the same domain, authoritative cycle state/time and Core 2 amplitude; collapsed coins remain £0 and are excluded.
+- Public coarse market signals endpoint without seed, exact timing, future peak, anchor or collapse leakage.
+- Extracted shared seeded RNG module while preserving existing collapse-service exports.
+- Migration `017_v2_price_precision.sql`, widening only price/value numeric scale from 2dp to 4dp with shape checks, idempotence and preservation of historical values. Wired into seed and game-schema verification.
+- First-class DB-free accelerated simulator with identical seeded paths, injected clock, realistic 15-second observation cadence, live-style trade mechanics and all required strategies: RANDOM, DIP_BOOM, LATE_SELLER, HOLD_FOREVER, SPAM, PUBLIC_SIGNAL_EXPLOITER and PERFECT_INFORMATION.
+- Restored/adapted legacy Core 2 and Core 3 market regression suites after independent review identified their deletion as unjustified.
+
+### V2-1 verification evidence
+
+Focused V2-1 set:
+
+- 10 focused suites, 86 tests — **PASS**
+- Restored legacy Core 2/Core 3 suites — 20 tests — **PASS**
+- Full backend suite: `npm test -- --runInBand`
+  - 65 suites passed
+  - 587 tests passed
+  - no test failures
+  - existing Jest force-exit/open-handle warning remains
+- `git diff --check` — **PASS**
+- JavaScript syntax checks for changed/new domain and simulator files — **PASS**
+
+Independent final gate run:
+
+```text
+node simulation/run.js --mode gate --rounds 2000 --json
+```
+
+- 2,000 paired seeded apocalypse rounds
+- 7 strategies on identical paths
+- economy enabled
+- £10,000 starting cash
+- 15,000ms observation cadence
+- runtime: 864,311ms
+- gate verdict: **PASS**
+
+Final independent metrics:
+
+| Strategy | Median ROI | Mean ROI | Profitable rounds |
+|---|---:|---:|---:|
+| RANDOM | -53.76% | -8.67% | 5.45% |
+| DIP-BOOM | **271.37%** | 1,111.83% | 100% |
+| LATE SELLER | 22.38% | 978.34% | 70.65% |
+| HOLD FOREVER | -98.20% | -98.20% | 0% |
+| SPAM | -11.46% | -10.85% | 17.25% |
+| PUBLIC-SIGNAL EXPLOITER | 231.42% | 2,088.02% | 97.30% |
+| PERFECT INFORMATION | 454.25% | 10,928.56% | 100% |
+
+- DIP-BOOM vs RANDOM paired win rate: **99.55%**
+- DIP-BOOM median paired advantage: **+£32,120.14**
+- DIP-BOOM vs LATE SELLER paired win rate: **96.10%**
+- PUBLIC-SIGNAL EXPLOITER remains below PERFECT INFORMATION and within the defined anti-trivial-exploit bound.
+- All V2-1 gate criteria passed.
+
+The original preparation failure in `game-public-state-no-seed.test.js` did not reproduce in the final V2-1 suite; it is recorded as a previously observed baseline issue, not claimed as independently fixed by V2-1.
+
+### K3 state
+
+- V2-1 implementation used a fresh pinned Kimi K3 task.
+- A fresh K3 correction task restored the deleted regression suites.
+- Latest probe after implementation: quota available; no quota exhaustion occurred.
+- K3 quota status was not a blocker and was not classified as one.
+
+### V2-1 next action
+
+Before V2-2, read this authoritative plan, both progress files and both current repository states again. Then launch a fresh K3 implementation task for **V2-2 Power + position limit + cost basis/P&L**. Do not begin V2-3, V2-4 or UI work until the V2-2 multi-round simulation gate passes.
+
+## V2-2 — NOT STARTED
