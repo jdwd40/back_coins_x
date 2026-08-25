@@ -383,3 +383,43 @@ Key metrics:
 ### V2-4 next action
 
 Before V2-5, read this plan, both progress files and both repository states again. Push only `gameplay-v2-20260824` as backup, then launch a fresh K3 frontend implementation task. UI was correctly blocked until V2-4 and is now authorised to begin.
+
+## V2-5 — COMPLETE
+
+Checkpoint timestamp: `2026-08-25T08:29:38+01:00`
+
+- Status: **COMPLETE**
+- Backend SHA: `7ffab04c24f0b30f8bfb1b10d2d87db91991314a` (unchanged during UI work)
+- Frontend implementation SHA: `018cc0f1fb677256166c2443b982b65502c45f15`
+- Branch: `gameplay-v2-20260824`
+- No backend, production service, production data, migration or deployment changes.
+
+### V2-5 delivered
+
+- Mobile-first game surface with compact `GameTopBar`, server-anchored `ApocalypseHeader`, `PlayerStatusStrip`, `LeaderboardPressure` and `GameMarketGrid`.
+- Single shared `GameContext` poll now consumes the real `/api/game/market-signals` endpoint and adopts signals only for the live apocalypse.
+- Real participant Power block and holding economics are typed and validated: current/max, regeneration, next point, average entry, cost basis and unrealized P&L.
+- Six-plus active signal cards are scannable on mobile; owned positions lead; collapsed coins are separated and show £0/DEAD/no BUY.
+- Cards expose current price, explicit movement, DIP/RISE/BOOM/FALL phase, momentum, archetype, typical cycle/swing, collapse risk, quick notional buys and Power preview.
+- Quick buys use £250/£500/£1K/£2.5K notional ladder, convert down to legal quantity precision and keep server confirmation/error authoritative.
+- Owned cards make average entry, current price/value, P&L £/%, risk and complete-position SELL action prominent; sell remains free at zero Power.
+- Leaderboard rank, human highlight and bot/personality markers are visible near the gameplay surface.
+- Existing profile, results, leaderboard, classic market and chart areas remain available as secondary surfaces.
+- Responsive CSS is one-column at phone widths, adds columns only at wider breakpoints, protects 360–412px overflow and respects reduced motion.
+
+### V2-5 readability and verification evidence
+
+The UI contract explicitly covers all 13 answers: Cash, Power, regen rate, countdown, DIP/Rise/BOOM discovery, owned positions, P&L, buy action, Power cost preview, sell action, danger/risk and leaderboard rank.
+
+- `npm run test:unit`: **130/130 passed**.
+- `npm run test:ui`: **Crypto Chaos UI contract passed**.
+- `npm run lint`: **0 errors**, six existing warnings (Profile/SellForm/AuthContext/GameContext/ToastContext/unused test directive).
+- `npx tsc --noEmit`: **passed**.
+- `npm run build`: **passed**; only existing Browserslist/chunk-size warnings.
+- `git diff --check`: **passed**.
+- Generated `dist` and `tsconfig.tsbuildinfo` remained ignored/uncommitted.
+- K3 required two process attempts and was killed by `-9` during its lint/build phase after unit/UI work; Luna independently completed those remaining gates successfully. No code correction was needed after the independent gates.
+
+### V2-5 next action
+
+Before V2-6, read the complete plan, both progress files and both repository states again. Push only `gameplay-v2-20260824` as backup, then run final backend/frontend verification, final large simulation batches against the final gameplay code, regression checks and the complete morning report. Do not merge or deploy.
