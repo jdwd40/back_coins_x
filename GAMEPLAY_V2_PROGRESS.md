@@ -246,3 +246,70 @@ node simulation/run.js --mode power --sequences 40 --rounds-per-sequence 24 --js
 ### V2-2 next action
 
 Before V2-3, read this plan, both progress files and both repository states again. Then launch a fresh K3 implementation task for **V2-3 apocalypse escalation, collapse-risk signals and passive-economy tuning**. UI work remains prohibited until V2-1 through V2-4 gates pass.
+
+## V2-3 — COMPLETE
+
+Checkpoint timestamp: `2026-08-25T05:43:07+01:00`
+
+- Status: **COMPLETE**
+- Backend implementation SHA: `d583d56b2371b04ae7dd5c5dfc3e124b01c5e347`
+- Frontend SHA: `cc578d52ce075d5237868c76e58921288ecaa3ee` (unchanged; UI still prohibited)
+- Branch: `gameplay-v2-20260824`
+- Production branches/services/data: untouched.
+- `.hermes/` attachment remains untracked and was not staged.
+
+### V2-3 delivered
+
+- Centralized escalation bands: NORMAL 0–40%, ELEVATED 40–70%, HIGH 70–90%, EXTREME 90–100%.
+- Existing shared Core 2 volatility curve preserved: 1.0 → 3.0, exponent 2; no duplicate live/simulator pricing path.
+- New pure `game/collapseRiskDomain.js` shared by live public market signals and simulator observations.
+- Coarse risk vocabulary: STABLE, SHAKY, DANGER, CRITICAL; dead coins expose DEAD.
+- Risk uses only public progress, archetype, current public market stress and independent deterministic noise; it never reads the collapse schedule, rank, timestamp or seed publicly.
+- Explicit `GAME_ECONOMY_SCALE` configuration in [0,1], default 1 preserving Core 7 behavior, with selected V2 simulation scale 0.25. Existing atomic debit, durable claim and idempotency paths remain intact.
+- V2-3 simulation study with economy A/B, per-band movement/opportunity/risk metrics, collapse losses, overstay strategy, risk-aware strategy and late entrant.
+- `npm run simulate:v2-3` CLI mode.
+
+### V2-3 final simulation gate
+
+```text
+node simulation/run.js --mode v2-3 --sequences 30 --rounds-per-sequence 24 --json
+```
+
+- 30 sequences × 24 consecutive rounds
+- 720 paired rounds per player per economy variant
+- 15-second observation cadence, £10,000 starting cash
+- Power: max 100, +1 per 30 seconds, buy cost `1 + floor(total / £125)`, 3 open positions
+- Legacy economy scale 1 versus selected V2 scale 0.25 on identical market paths
+- Gate verdict: **PASS**, all 11 criteria
+
+Key metrics:
+
+- Median tick movement NORMAL → EXTREME: **2.09% → 2.95% → 4.14% → 5.15%**
+- Median equal 3-minute swing NORMAL → EXTREME: **18.99% → 28.39% → 40.65% → 51.60%** (2.72× late/early)
+- HIGH band: 6.5 mean live coins and 86.66% of ticks with a legal entry opportunity
+- Risk ordinal NORMAL → HIGH → EXTREME: **0.611 → 1.756 → 2.503**
+- Risk next-collapse classifier: **22.71%** accuracy versus **22.86%** chance baseline over 5,760 samples; no schedule leak
+- DIP_BOOM median ROI: **17.11%**; RANDOM: **-5.69%**
+- DIP_BOOM paired win rate: **83.06% vs RANDOM**, **73.06% vs LATE_SELLER**, **80.83% vs OVERSTAYER**
+- LATE_ENTRANT median ROI: **24.66%**, paired win rate vs RANDOM **84.58%**
+- HOLD_FOREVER median ROI: **-57.87%**, 0% profitable rounds
+- OVERSTAYER median ROI: **-5.88%**, mean collapse loss **£2,352.38/round**
+- Selected V2 economy median debits: **£80.37/round**; DIP_BOOM erased-gain rounds **0.18%**
+- Zero cash, basis and position invariant violations
+- Power blocked buys: **725,774**; position-limit blocked buys: **149,679**
+- Extreme-band near-floor live ticks: **0.26%**, inherited from V2-1 positive-price floor and reported separately rather than hidden
+
+### V2-3 verification evidence
+
+- Independent focused V2-3/V2-2/V2-1 run: **15 suites / 199 tests passed**.
+- Independent V2-3 simulation gate: **PASS** at 30×24.
+- Independent V2-2 Power regression gate: **PASS** with unchanged 82.60% DIP_BOOM/RANDOM result.
+- K3 full backend run: **74 suites / 691 tests passed**.
+- Independent full backend rerun: 73 suites / 690 tests passed; one failure was the known `game-public-state-no-seed.test.js` timeout/deadlock family. The same test also failed in isolation with a deadlock in the existing settlement/collapse path; no V2-3 files are involved. It is recorded as the pre-existing baseline flake, not a V2-3 regression.
+- `git diff --check`: **PASS**; `node --check` on all changed/new JS: **PASS**.
+- No migration was needed; no production configuration was changed.
+- Economy-scale test required a K3 correction to pin fresh cycle seeds and prevent persisted schedule contamination; service code was unchanged by the correction.
+
+### V2-3 next action
+
+Before V2-4, read this plan, both progress files and both repository states again. Then launch a fresh K3 implementation task to adapt the existing Conservative, Momentum, Dip Buyer and Reckless bots to V2 public signals, Power, position limits and the shared buy/sell service. UI work remains prohibited until V2-4 passes.
