@@ -163,4 +163,86 @@ The original preparation failure in `game-public-state-no-seed.test.js` did not 
 
 Before V2-2, read this authoritative plan, both progress files and both current repository states again. Then launch a fresh K3 implementation task for **V2-2 Power + position limit + cost basis/P&L**. Do not begin V2-3, V2-4 or UI work until the V2-2 multi-round simulation gate passes.
 
-## V2-2 — NOT STARTED
+## V2-2 — COMPLETE
+
+Checkpoint timestamp: `2026-08-25T03:01:00+01:00`
+
+- Status: **COMPLETE**
+- Backend implementation SHA: `84699449d71ecab305d331f17d95689eadbe942d`
+- Frontend SHA: `266d67878ab90124527d5e632b971d73a6f96c2a` (unchanged; no UI work permitted yet)
+- Branch: `gameplay-v2-20260824`
+- Production branches/services/data: untouched.
+- `.hermes/` attachment remains untracked and was not staged.
+
+### V2-2 delivered
+
+- Shared pure `game/powerDomain.js` used by both live locked trading and the headless simulator.
+- Persistent lazy Power with timestamp reconciliation across restart, inactivity and apocalypse rollover.
+- BUY-only Power cost; SELL always costs zero and remains available at zero Power.
+- Anti-fragmentation cost formula: `1 + floor(buyTotal / 125)`.
+- Maximum 3 distinct open live positions; collapsed and zero-quantity holdings do not consume slots.
+- Atomic cash + Power deduction + buy persistence inside the existing advisory-lock transaction; failed buys consume nothing.
+- Weighted cost basis, average entry price, current value, unrealised P&L £ and %, including correct partial-sell basis removal and collapsed holdings.
+- Non-destructive migration `018_v2_power_and_cost_basis.sql`, deterministic ledger-replay cost-basis backfill, schema verification and seed wiring.
+- Multi-process race coverage for concurrent Power spending, cash safety and position limits.
+- Persistent multi-round Power study with RANDOM, DIP_BOOM, SPAM, PUBLIC_SIGNAL_EXPLOITER, CONSERVATIVE_POWER, AGGRESSIVE_POWER, SPLITTER, LATE_ENTRANT and RETURNING.
+- `npm run simulate:power` CLI mode.
+
+### V2-2 tuning and final gate
+
+Final parameters:
+
+- Maximum Power: `100`
+- Regeneration: `+1 per 30 seconds` (tuned from the initial 120-second concept)
+- Buy cost divisor: `£125`
+- Buy order charge: `1 Power`
+- Position limit: `3`
+- Simulation cadence: `15 seconds`
+- Round duration: `30 minutes`
+- Starting round cash: `£10,000`
+- Economy: enabled for the gate
+
+The initial ceiling-only formula was rejected during tuning because aligned fragmentation could cost the same and perform better under scarcity. The per-order charge was selected and verified: in the identical-trades twin test, whole deployment used 18 Power versus 20 Power fragmented.
+
+Independent final run:
+
+```text
+node simulation/run.js --mode power --sequences 40 --rounds-per-sequence 24 --json
+```
+
+- 40 sequences × 24 consecutive rounds
+- 960 paired rounds per player (8,640 played records including the returning-player absences)
+- Gate verdict: **PASS**
+- DIP_BOOM vs RANDOM paired win rate: **82.60%**
+- DIP_BOOM median ROI: **14.31%**
+- RANDOM median ROI: **-7.81%**
+- DIP_BOOM median paired advantage: **£2,253.78**
+- SPAM median ROI: **-4.07%**, with 194,944 Power-blocked buys and 543 position-limit blocks
+- PUBLIC_SIGNAL_EXPLOITER median ROI: **5.15%**
+- CONSERVATIVE_POWER median ROI: **5.99%**
+- AGGRESSIVE_POWER median ROI: **-35.54%**
+- SPLITTER Power per £: `0.00834` versus DIP_BOOM `0.00820` (+1.7%)
+- LATE_ENTRANT median ROI: **22.06%**, paired win rate against RANDOM **85.52%**
+- RETURNING mean round-start Power: **39.95**
+- DIP_BOOM starved-tick percentage: **1.87%**
+- Zero cost-basis/accounting violations across the study
+- Zero position-limit violations; the limit was exercised by SPAM and RANDOM
+- Zero majority-starved rounds in the final study
+
+### V2-2 verification evidence
+
+- Focused V2-2 suites: **5 suites / 67 tests passed**
+  - Power domain: 24 tests
+  - live Power/trade/position/cost-basis: 22 tests
+  - genuine multi-process races: 6 tests
+  - simulator/persistent-account tests: 10 tests
+  - migration 018: 5 tests
+- Full backend suite: `npm test -- --runInBand` — **70 suites / 654 tests passed**
+- `git diff --check`: **PASS**
+- JavaScript syntax checks for changed/new files: **PASS**
+- The only correction required was a duplicated-coin test fixture; a fresh K3 correction fixed the fixture without changing service code, and the focused suite was independently rerun green.
+- Jest force-exit/open-handle warning remains a known test-runner warning; no V2-2 test failures remain.
+
+### V2-2 next action
+
+Before V2-3, read this plan, both progress files and both repository states again. Then launch a fresh K3 implementation task for **V2-3 apocalypse escalation, collapse-risk signals and passive-economy tuning**. UI work remains prohibited until V2-1 through V2-4 gates pass.
