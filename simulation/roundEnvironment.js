@@ -12,14 +12,21 @@
 // experiences the EXACT same market path, collapses and economy debits.
 
 const marketDomain = require('../game/marketDomain');
+const collapseRiskDomain = require('../game/collapseRiskDomain');
 const { getApocalypseVolatility } = require('../game/apocalypseVolatility');
 const { buildSchedule } = require('../game/collapseScheduleService');
 const { buildEventSchedule } = require('../game/economyService');
+const { scaleEconomyAmount } = require('../game/economyConfig');
 const {
   GAME_FEE_TICK_INTERVAL_MS,
   GAME_FEE_AMOUNT,
   GAME_TAX_TICK_INTERVAL_MS,
-  GAME_TAX_AMOUNT
+  GAME_TAX_AMOUNT,
+  GAME_EVENT_COUNT,
+  GAME_EVENT_MIN_FRACTION,
+  GAME_EVENT_MAX_FRACTION,
+  GAME_EVENT_MIN_AMOUNT,
+  GAME_EVENT_MAX_AMOUNT
 } = require('../game/gameConstants');
 
 // The canonical active catalogue (mirrors db/test_data/coins.json and
@@ -40,12 +47,21 @@ const CANONICAL_COINS = [
 
 const DEFAULT_ROUND_DURATION_MS = 30 * 60 * 1000;
 
-function createRoundEnvironment({ seed, coins = CANONICAL_COINS, durationMs = DEFAULT_ROUND_DURATION_MS, economy = true } = {}) {
+// economyScale: the V2-3 explicit passive-economy multiplier (default 1 =
+// the legacy Core 7 amounts). Every debit is scaled through the SAME
+// scaleEconomyAmount the live service uses; debits scaled below a penny
+// simply do not exist. The event schedule is built with an explicit
+// config assembled from the game-design constants — the simulator never
+// reads process.env, so runs stay hermetic.
+function createRoundEnvironment({ seed, coins = CANONICAL_COINS, durationMs = DEFAULT_ROUND_DURATION_MS, economy = true, economyScale = 1 } = {}) {
   if (typeof seed !== 'string' || seed.length === 0) {
     throw new Error('round environment seed must be a non-empty string');
   }
   if (!Number.isInteger(durationMs) || durationMs <= 0) {
     throw new Error(`round environment durationMs must be a positive integer; received ${durationMs}`);
+  }
+  if (typeof economyScale !== 'number' || !Number.isFinite(economyScale) || economyScale < 0 || economyScale > 1) {
+    throw new Error(`round environment economyScale must be a finite number in [0, 1]; received ${String(economyScale)}`);
   }
 
   // Core 3: the exact deterministic collapse schedule the live game would
@@ -62,17 +78,35 @@ function createRoundEnvironment({ seed, coins = CANONICAL_COINS, durationMs = DE
 
   // Issue #18 passive economy: the same deterministic event schedule plus
   // the fixed fee/tax cadences (first tick lands one interval after start;
-  // a tick exactly at round end never fires).
+  // a tick exactly at round end never fires), all scaled by economyScale.
   const economyEvents = economy
-    ? buildEventSchedule({ seed, startTime: new Date(0), endTime: new Date(durationMs) })
+    ? buildEventSchedule({
+      seed,
+      startTime: new Date(0),
+      endTime: new Date(durationMs),
+      config: {
+        eventCount: GAME_EVENT_COUNT,
+        eventMinFraction: GAME_EVENT_MIN_FRACTION,
+        eventMaxFraction: GAME_EVENT_MAX_FRACTION,
+        eventMinAmount: GAME_EVENT_MIN_AMOUNT,
+        eventMaxAmount: GAME_EVENT_MAX_AMOUNT,
+        scale: economyScale
+      }
+    })
     : [];
   const debits = [];
   if (economy) {
-    for (let t = GAME_FEE_TICK_INTERVAL_MS; t < durationMs; t += GAME_FEE_TICK_INTERVAL_MS) {
-      debits.push({ atMs: t, amount: GAME_FEE_AMOUNT, type: 'FEE' });
+    const feeAmount = scaleEconomyAmount(GAME_FEE_AMOUNT, economyScale);
+    const taxAmount = scaleEconomyAmount(GAME_TAX_AMOUNT, economyScale);
+    if (feeAmount > 0) {
+      for (let t = GAME_FEE_TICK_INTERVAL_MS; t < durationMs; t += GAME_FEE_TICK_INTERVAL_MS) {
+        debits.push({ atMs: t, amount: feeAmount, type: 'FEE' });
+      }
     }
-    for (let t = GAME_TAX_TICK_INTERVAL_MS; t < durationMs; t += GAME_TAX_TICK_INTERVAL_MS) {
-      debits.push({ atMs: t, amount: GAME_TAX_AMOUNT, type: 'TAX' });
+    if (taxAmount > 0) {
+      for (let t = GAME_TAX_TICK_INTERVAL_MS; t < durationMs; t += GAME_TAX_TICK_INTERVAL_MS) {
+        debits.push({ atMs: t, amount: taxAmount, type: 'TAX' });
+      }
     }
     for (const ev of economyEvents) {
       debits.push({ atMs: ev.scheduled_at.getTime(), amount: ev.amount, type: 'EVENT' });
@@ -112,7 +146,9 @@ function createRoundEnvironment({ seed, coins = CANONICAL_COINS, durationMs = DE
   // The public signal a legal client could observe: the shared coarse
   // domain signal for a live coin, or a minimal dead marker. Dead coins
   // expose only their death and archetype identity — no phase/momentum
-  // pretence.
+  // pretence. V2-3: live coins also carry the shared coarse collapse-risk
+  // level — the exact field the live market-signals endpoint publishes,
+  // computed by the same domain module from the same inputs.
   function publicSignal(coinId, nowMs) {
     if (isDead(coinId, nowMs)) {
       return {
@@ -124,17 +160,28 @@ function createRoundEnvironment({ seed, coins = CANONICAL_COINS, durationMs = DE
         momentum: 'FLAT',
         typicalCycleMinutes: null,
         typicalSwingPct: null,
+        collapseRisk: collapseRiskDomain.DEAD_RISK_MARKER,
         dead: true
       };
     }
+    const signal = marketDomain.getPublicCoinSignal({
+      seed,
+      coinId,
+      baselinePrice: baselineByCoin.get(coinId),
+      roundStartMs: 0,
+      nowMs,
+      amplitude: amplitudeAt(nowMs)
+    });
     return {
-      ...marketDomain.getPublicCoinSignal({
+      ...signal,
+      collapseRisk: collapseRiskDomain.getCollapseRisk({
         seed,
         coinId,
-        baselinePrice: baselineByCoin.get(coinId),
-        roundStartMs: 0,
-        nowMs,
-        amplitude: amplitudeAt(nowMs)
+        apocalypsePercent: apocalypsePercentAt(nowMs),
+        phase: signal.phase,
+        momentum: signal.momentum,
+        recentChangePct: signal.recentChangePct,
+        nowMs
       }),
       dead: false
     };

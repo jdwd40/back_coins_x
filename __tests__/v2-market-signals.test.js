@@ -76,15 +76,17 @@ describe('V2-1 public signals: GET /api/game/market-signals', () => {
     expect(Array.isArray(data.coins)).toBe(true);
     expect(data.coins).toHaveLength(10); // canonical active catalogue
 
-    const allowedKeys = ['coinId', 'name', 'symbol', 'archetype', 'currentPrice', 'recentChangePct', 'phase', 'momentum', 'typicalCycleMinutes', 'typicalSwingPct', 'dead'];
+    const allowedKeys = ['coinId', 'name', 'symbol', 'archetype', 'currentPrice', 'recentChangePct', 'phase', 'momentum', 'typicalCycleMinutes', 'typicalSwingPct', 'collapseRisk', 'dead'];
     for (const coin of data.coins) {
       expect(Object.keys(coin).sort()).toEqual(allowedKeys.slice().sort());
       if (coin.dead) {
         expect(coin.currentPrice).toBe(0);
         expect(coin.phase).toBe('DEAD');
+        expect(coin.collapseRisk).toBe('DEAD');
       } else {
         expect(coin.currentPrice).toBeGreaterThan(0);
         expect(['DIP', 'RISE', 'BOOM', 'FALL']).toContain(coin.phase);
+        expect(['STABLE', 'SHAKY', 'DANGER', 'CRITICAL']).toContain(coin.collapseRisk);
       }
     }
 

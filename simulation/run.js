@@ -22,6 +22,13 @@ const fs = require('fs');
 const path = require('path');
 const { runBatch, buildReport, DEFAULT_BASE_SEED, ALL_STRATEGY_IDS } = require('./batch');
 const { runPowerStudy, buildPowerReport, POWER_STUDY_BASE_SEED, ALL_PLAYER_IDS } = require('./powerStudy');
+const {
+  runEscalationStudy,
+  buildEscalationReport,
+  ESCALATION_STUDY_BASE_SEED,
+  V2_ECONOMY_SCALE,
+  ALL_PLAYER_IDS: ESCALATION_PLAYER_IDS
+} = require('./escalationStudy');
 
 function parseArgs(argv) {
   const args = {};
@@ -120,9 +127,104 @@ function printPowerSummary(report) {
   console.log(`GATE VERDICT: ${gate.pass === null ? 'SKIPPED (partial roster)' : gate.pass ? 'PASS' : 'FAIL'}`);
 }
 
+function printEscalationSummary(report) {
+  const { config, gate, market, players, paired } = report;
+  console.log('=== Crypto Chaos V2-3 escalation / risk / economy study ===');
+  console.log(`sequences: ${config.sequences} x ${config.roundsPerSequence} consecutive rounds | baseSeed: ${config.baseSeed} | observation: ${config.observationMs}ms | starting cash: ${formatMoney(config.startingCash)}`);
+  console.log(`economy variants: legacy Core 7 (scale 1) vs selected V2 (scale ${config.v2EconomyScale}) on identical market paths`);
+  const pc = config.powerConfig;
+  console.log(`power: max ${pc.maxPower}, +1 per ${pc.regenMsPerPoint / 1000}s, buy cost 1 + floor(total/${pc.buyCostDivisor}), max open positions ${pc.maxOpenPositions}`);
+  console.log('');
+  console.log('--- escalation bands (market-wide; medians, equal 3-minute swing windows) ---');
+  const bandHeader = ['band', 'medMove%', 'medSwing%', 'floorTick%', 'oppTick%', 'liveCoins', 'riskOrd'];
+  console.log(bandHeader.map((h) => h.padStart(12)).join(''));
+  for (const [bandId, b] of Object.entries(market.bands)) {
+    console.log([
+      bandId.padEnd(12),
+      String(b.medianTickMovePct).padStart(12),
+      String(b.medianSwingPct).padStart(12),
+      String(b.floorTickPct).padStart(12),
+      String(b.opportunityTickPct).padStart(12),
+      String(b.meanLiveCoins).padStart(12),
+      String(b.meanRiskOrdinal).padStart(12)
+    ].join(''));
+  }
+  console.log(`risk classifier: accuracy ${market.classifier.accuracyPct}% vs chance ${market.classifier.chanceAccuracyPct}% over ${market.classifier.samples} samples`);
+  console.log('');
+  for (const variant of ['v2', 'legacy']) {
+    console.log(`--- players (${variant === 'v2' ? `selected V2 economy, scale ${config.v2EconomyScale}` : 'legacy Core 7 economy, scale 1'}) ---`);
+    const header = ['player', 'medianROI', 'meanROI', 'profit%', 'trades/r', 'debits/r', 'erased%', 'collLoss/r', 'blkPow', 'blkPos'];
+    console.log(header.map((h) => h.padStart(11)).join(''));
+    for (const [id, p] of Object.entries(players[variant])) {
+      console.log([
+        id.padEnd(11),
+        `${p.medianRoi}%`.padStart(11),
+        `${p.meanRoi}%`.padStart(11),
+        `${p.profitableRoundPct}%`.padStart(11),
+        String(p.meanTradesPerRound).padStart(11),
+        formatMoney(p.medianDebitsPerRound).padStart(11),
+        `${p.erasedGainRoundPct}%`.padStart(11),
+        formatMoney(p.meanCollapseLossPerRound).padStart(11),
+        String(p.blockedByPower).padStart(11),
+        String(p.blockedByPosition).padStart(11)
+      ].join(''));
+    }
+    console.log('');
+  }
+  console.log(`DIP_BOOM vs RANDOM paired win rate (v2): ${paired.v2.DIP_BOOM.RANDOM.winRatePct}% (median diff ${formatMoney(paired.v2.DIP_BOOM.RANDOM.medianDiff)})`);
+  console.log(`DIP_BOOM vs OVERSTAYER paired win rate (v2): ${paired.v2.DIP_BOOM.OVERSTAYER.winRatePct}%`);
+  console.log(`LATE_ENTRANT vs RANDOM paired win rate (v2): ${paired.v2.LATE_ENTRANT.RANDOM.winRatePct}% (median ROI ${players.v2.LATE_ENTRANT.medianRoi}%)`);
+  console.log('');
+  console.log('=== V2-3 gate ===');
+  for (const [name, criterion] of Object.entries(gate)) {
+    if (name === 'pass') continue;
+    console.log(`${criterion.pass === null ? 'SKIP' : criterion.pass ? 'PASS' : 'FAIL'}  ${name}: ${JSON.stringify(criterion)}`);
+  }
+  console.log('');
+  console.log(`GATE VERDICT: ${gate.pass === null ? 'SKIPPED (partial roster)' : gate.pass ? 'PASS' : 'FAIL'}`);
+}
+
 function main() {
   const args = parseArgs(process.argv);
   const mode = args.mode || 'tune';
+
+  if (mode === 'v2-3') {
+    const sequences = Number(args.sequences || 30);
+    const roundsPerSequence = Number(args['rounds-per-sequence'] || args.rounds || 24);
+    const baseSeed = args['base-seed'] || ESCALATION_STUDY_BASE_SEED;
+    const observationMs = Number(args['observation-ms'] || 15000);
+    const v2EconomyScale = args['economy-scale'] !== undefined ? Number(args['economy-scale']) : V2_ECONOMY_SCALE;
+    const playerIds = args.players ? String(args.players).split(',') : ESCALATION_PLAYER_IDS;
+
+    const startedAt = Date.now();
+    const study = runEscalationStudy({
+      sequences,
+      roundsPerSequence,
+      baseSeed,
+      observationMs,
+      v2EconomyScale,
+      playerIds,
+      onProgress: (done, total) => {
+        if (!args.json) process.stdout.write(`\rprogress: ${done}/${total} sequence-rounds`);
+      }
+    });
+    if (!args.json) process.stdout.write('\n');
+    const report = buildEscalationReport(study);
+    report.runtimeMs = Date.now() - startedAt;
+    report.mode = mode;
+
+    const outPath = args.out || path.join(__dirname, 'output', `${mode}-latest.json`);
+    fs.mkdirSync(path.dirname(outPath), { recursive: true });
+    fs.writeFileSync(outPath, JSON.stringify(report, null, 2));
+
+    if (args.json) {
+      console.log(JSON.stringify(report));
+    } else {
+      printEscalationSummary(report);
+      console.log(`\nreport written to ${outPath} (${report.runtimeMs}ms)`);
+    }
+    process.exit(report.gate.pass ? 0 : 1);
+  }
 
   if (mode === 'power') {
     const sequences = Number(args.sequences || 40);

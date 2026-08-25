@@ -16,6 +16,7 @@
 
 const { createSeededRandom } = require('../game/seededRandom');
 const { GAME_STARTING_CASH } = require('../game/gameConstants');
+const { getEscalationBand, ESCALATION_BAND_IDS } = require('../game/apocalypseVolatility');
 const powerDomain = require('../game/powerDomain');
 
 const DEFAULT_OBSERVATION_MS = 15 * 1000;
@@ -226,15 +227,23 @@ function quoteBuy(portfolio, spend, price) {
 //     (round r occupies [r*duration, (r+1)*duration) on the study clock), so
 //     lazy regeneration keeps working across rollover — exactly like the
 //     live game, where wall-clock time simply continues.
+//   debits: V2-3 economy A/B — an explicit passive-debit schedule replacing
+//     env.debits for this run. The market path, collapse schedule, signals
+//     and every other input still come from the shared context, so paired
+//     economy variants experience identical prices and collapses; ONLY the
+//     deduction stream differs (exactly what an economy configuration
+//     changes live). Omitting it reproduces env.debits behaviour.
 function runRound(context, strategy, {
   startingCash = GAME_STARTING_CASH,
   powerAccount = null,
   maxPositions = Infinity,
   joinAtMs = 0,
   powerConfig: powerConfigOverrides = null,
-  timeOffsetMs = 0
+  timeOffsetMs = 0,
+  debits = null
 } = {}) {
   const { env, ticks, gridByCoin } = context;
+  const debitSchedule = debits || env.debits;
   context.startingCash = startingCash;
   const portfolio = createPortfolio(startingCash);
   const powerConfig = powerDomain.resolvePowerConfig(powerConfigOverrides || {});
@@ -268,6 +277,15 @@ function runRound(context, strategy, {
   let basisRemoved = 0;   // cost basis removed by sells
   let positionLimitViolations = 0;
 
+  // V2-3 instrumentation: per-escalation-band trade counts and the value
+  // destroyed by collapses while a coin was held (marked at the first tick
+  // the coin is observed dead, valued at the last live tick price — the
+  // exact wealth the player lost by overstaying the collapse).
+  const bandTrades = {};
+  for (const bandId of ESCALATION_BAND_IDS) bandTrades[bandId] = 0;
+  const collapseLosses = [];
+  const collapsedSeen = new Set();
+
   const liveCoinIdsAt = (t) => {
     const ids = [];
     for (const [coinId, holding] of portfolio.holdings) {
@@ -293,8 +311,8 @@ function runRound(context, strategy, {
 
     // Passive economy: every debit due since the last tick, in schedule
     // order, clamped at available cash (exactly like applyRoundDebit).
-    while (debitIndex < env.debits.length && env.debits[debitIndex].atMs <= t) {
-      const debit = env.debits[debitIndex];
+    while (debitIndex < debitSchedule.length && debitSchedule[debitIndex].atMs <= t) {
+      const debit = debitSchedule[debitIndex];
       const applied = Math.min(debit.amount, portfolio.cash);
       portfolio.cash = round2(Math.max(0, portfolio.cash - applied));
       debitsPaid = round2(debitsPaid + applied);
@@ -363,6 +381,7 @@ function runRound(context, strategy, {
           if (executeBuy(portfolio, action.coinId, action.spend, price)) {
             trades += 1;
             executedBuys += 1;
+            bandTrades[getEscalationBand(env.apocalypsePercentAt(t))] += 1;
             cashDeployed = round2(cashDeployed + (cashBefore - portfolio.cash));
           }
         } else if (action.action === 'sell') {
@@ -371,11 +390,27 @@ function runRound(context, strategy, {
           const cashBefore = portfolio.cash;
           if (executeSell(portfolio, action.coinId, action.fraction, price)) {
             trades += 1;
+            bandTrades[getEscalationBand(env.apocalypsePercentAt(t))] += 1;
             const after = portfolio.holdings.get(action.coinId);
             basisRemoved = round2(basisRemoved + (basisBefore - (after ? after.costBasis : 0)));
             cashRecovered = round2(cashRecovered + (portfolio.cash - cashBefore));
           }
         }
+      }
+    }
+
+    // V2-3: a held coin observed dead for the first time destroys its last
+    // live value — the concrete cost of overstaying a collapse.
+    for (const [coinId, holding] of portfolio.holdings) {
+      if (holding.quantity > 0 && env.isDead(coinId, t) && !collapsedSeen.has(coinId)) {
+        collapsedSeen.add(coinId);
+        const lastLivePrice = i > 0 ? gridByCoin.get(coinId)[i - 1] : 0;
+        collapseLosses.push({
+          t,
+          apocalypsePercent: round2(env.apocalypsePercentAt(t)),
+          coinId,
+          valueLost: round2(holding.quantity * lastLivePrice)
+        });
       }
     }
 
@@ -440,7 +475,11 @@ function runRound(context, strategy, {
     cashDeployed,
     cashDrift,
     basisDrift,
-    positionLimitViolations
+    positionLimitViolations,
+    // V2-3 fields.
+    bandTrades,
+    collapseLosses,
+    debitsPaid
   };
 }
 

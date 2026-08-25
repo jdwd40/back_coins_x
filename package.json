@@ -15,6 +15,7 @@
     "verify:game-schema": "node db/verify-game-schema.js",
     "simulate": "node simulation/run.js",
     "simulate:power": "node simulation/run.js --mode power",
+    "simulate:v2-3": "node simulation/run.js --mode v2-3",
     "clear-price-history": "node clear-price-history.js"
   },
   "keywords": [],

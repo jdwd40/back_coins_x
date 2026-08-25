@@ -9,6 +9,7 @@
 
 const db = require('../db/connection');
 const marketDomain = require('./marketDomain');
+const collapseRiskDomain = require('./collapseRiskDomain');
 const { getApocalypseVolatility } = require('./apocalypseVolatility');
 const collapseScheduleService = require('./collapseScheduleService');
 
@@ -51,19 +52,34 @@ async function getPublicMarketSignals({ now = new Date() } = {}) {
         momentum: 'FLAT',
         typicalCycleMinutes: null,
         typicalSwingPct: null,
+        collapseRisk: collapseRiskDomain.DEAD_RISK_MARKER,
         dead: true
       };
     }
+    const publicSignal = marketDomain.getPublicCoinSignal({
+      seed: cycle.seed,
+      coinId: coin.coin_id,
+      baselinePrice: parseFloat(coin.cycle_baseline_price),
+      roundStartMs,
+      nowMs,
+      amplitude
+    });
     return {
       name: coin.name,
       symbol: coin.symbol,
-      ...marketDomain.getPublicCoinSignal({
+      ...publicSignal,
+      // V2-3: coarse, imperfect collapse-risk level. Computed ONLY from
+      // public state (progress, public phase/momentum/movement, public
+      // archetype) plus schedule-independent seeded noise — never from the
+      // hidden collapse schedule, which is not even read here.
+      collapseRisk: collapseRiskDomain.getCollapseRisk({
         seed: cycle.seed,
         coinId: coin.coin_id,
-        baselinePrice: parseFloat(coin.cycle_baseline_price),
-        roundStartMs,
-        nowMs,
-        amplitude
+        apocalypsePercent,
+        phase: publicSignal.phase,
+        momentum: publicSignal.momentum,
+        recentChangePct: publicSignal.recentChangePct,
+        nowMs
       }),
       dead: false
     };

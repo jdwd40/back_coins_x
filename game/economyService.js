@@ -50,7 +50,7 @@
 const db = require('../db/connection');
 const { createSeededRandom } = require('./collapseScheduleService');
 const gameRoundService = require('./gameRoundService');
-const { EVENT_DESCRIPTIONS, resolveEconomyConfig } = require('./economyConfig');
+const { EVENT_DESCRIPTIONS, resolveEconomyConfig, scaleEconomyAmount } = require('./economyConfig');
 
 // Must match gameCycleService's GAME_CYCLE_ADVISORY_LOCK_KEY. Re-declared
 // (not imported) to keep this module free of any top-level dependency on
@@ -84,12 +84,20 @@ function buildEventSchedule({ seed, startTime, endTime, config = resolveEconomyC
   if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) {
     throw new Error(`event schedule requires endTime after startTime; received ${startTime} .. ${endTime}`);
   }
+  // V2-3: config.scale (default 1 = legacy Core 7 amounts) weakens the
+  // event amounts. The seeded stream is consumed identically at every
+  // scale, so timing/descriptions never shift with the scale and the
+  // default output is byte-identical to the pre-V2-3 schedule. Events
+  // scaled below one penny are dropped entirely.
+  const scale = config.scale === undefined ? 1 : config.scale;
   const random = createSeededRandom(`${seed}:core7-economy`);
   const rows = [];
   for (let i = 0; i < config.eventCount; i++) {
     const fraction = config.eventMinFraction + random() * (config.eventMaxFraction - config.eventMinFraction);
-    const amount = round2(config.eventMinAmount + random() * (config.eventMaxAmount - config.eventMinAmount));
+    const drawnAmount = round2(config.eventMinAmount + random() * (config.eventMaxAmount - config.eventMinAmount));
     const description = EVENT_DESCRIPTIONS[Math.floor(random() * EVENT_DESCRIPTIONS.length)];
+    const amount = scaleEconomyAmount(drawnAmount, scale);
+    if (!(amount > 0)) continue;
     rows.push({
       event_key: `EV-${i + 1}`,
       scheduled_at: new Date(Math.round(startMs + fraction * (endMs - startMs))),
@@ -281,34 +289,44 @@ async function runEconomyPass({ now = new Date(), config = resolveEconomyConfig(
 
     // Recurring fees, then recurring taxes: claim the due ticks durably,
     // then debit each claimed tick through the shared path in tick order.
-    const feeTicks = await claimDueTicks(
-      client, cycle.cycle_id, 'FEE',
-      latestDueTick({ startMs, endMs, nowMs, intervalMs: config.feeTickIntervalMs })
-    );
-    for (const tick of feeTicks) {
-      summary.participantsCharged += await applyRoundDebit(client, {
-        cycleId: cycle.cycle_id,
-        type: 'FEE',
-        amount: config.feeAmount,
-        description: `Recurring round fee (tick ${tick})`,
-        eventKey: `FEE-T${tick}`
-      });
-      summary.feeTicks.push(tick);
+    // V2-3: the explicit config scale weakens the charged amounts; a kind
+    // scaled below one penny is not claimed or charged at all (the durable
+    // tick rows are simply never created, so a later scale restore can
+    // still claim them — no debit is ever lost silently mid-config).
+    const feeAmount = scaleEconomyAmount(config.feeAmount, config.scale === undefined ? 1 : config.scale);
+    if (feeAmount > 0) {
+      const feeTicks = await claimDueTicks(
+        client, cycle.cycle_id, 'FEE',
+        latestDueTick({ startMs, endMs, nowMs, intervalMs: config.feeTickIntervalMs })
+      );
+      for (const tick of feeTicks) {
+        summary.participantsCharged += await applyRoundDebit(client, {
+          cycleId: cycle.cycle_id,
+          type: 'FEE',
+          amount: feeAmount,
+          description: `Recurring round fee (tick ${tick})`,
+          eventKey: `FEE-T${tick}`
+        });
+        summary.feeTicks.push(tick);
+      }
     }
 
-    const taxTicks = await claimDueTicks(
-      client, cycle.cycle_id, 'TAX',
-      latestDueTick({ startMs, endMs, nowMs, intervalMs: config.taxTickIntervalMs })
-    );
-    for (const tick of taxTicks) {
-      summary.participantsCharged += await applyRoundDebit(client, {
-        cycleId: cycle.cycle_id,
-        type: 'TAX',
-        amount: config.taxAmount,
-        description: `Recurring wealth tax (tick ${tick})`,
-        eventKey: `TAX-T${tick}`
-      });
-      summary.taxTicks.push(tick);
+    const taxAmount = scaleEconomyAmount(config.taxAmount, config.scale === undefined ? 1 : config.scale);
+    if (taxAmount > 0) {
+      const taxTicks = await claimDueTicks(
+        client, cycle.cycle_id, 'TAX',
+        latestDueTick({ startMs, endMs, nowMs, intervalMs: config.taxTickIntervalMs })
+      );
+      for (const tick of taxTicks) {
+        summary.participantsCharged += await applyRoundDebit(client, {
+          cycleId: cycle.cycle_id,
+          type: 'TAX',
+          amount: taxAmount,
+          description: `Recurring wealth tax (tick ${tick})`,
+          eventKey: `TAX-T${tick}`
+        });
+        summary.taxTicks.push(tick);
+      }
     }
 
     // Due persisted events, in schedule order. Execution stamps the durable

@@ -295,7 +295,7 @@ const STRATEGIES = {
     description: 'Adversarial trade-splitting attacker: identical DIP_BOOM decisions, but every buy chopped into fragments to dodge Power.',
     usesFuture: false,
     usesOwnRandom: false,
-    decide(observation) {
+    decide(observation, ctx) {
       const base = STRATEGIES.DIP_BOOM.decide(observation);
       const fragmented = [];
       for (const action of base) {
@@ -315,6 +315,68 @@ const STRATEGIES = {
         }
       }
       return fragmented.filter((a) => a.action !== 'buy' || a.spend >= 1);
+    }
+  },
+
+  // -----------------------------------------------------------------------
+  // V2-3 escalation-era strategies. Same legal public observation only
+  // (which now includes the coarse collapse-risk level).
+  // -----------------------------------------------------------------------
+
+  OVERSTAYER: {
+    id: 'OVERSTAYER',
+    description: 'Enters dips like DIP_BOOM but refuses to bank gains: rides every boom back down and only bails deep into a fall — the dangerous late/overstay player.',
+    usesFuture: false,
+    usesOwnRandom: false,
+    decide(observation) {
+      const actions = [];
+      for (const holding of observation.portfolio.holdings) {
+        const signal = findSignal(observation, holding.coinId);
+        if (signal.dead) continue;
+        // Sells ONLY when the fall is already deep (or the loss is severe):
+        // booms come and go while this player waits for "a bit more".
+        if (signal.phase === 'FALL' && signal.recentChangePct !== null && signal.recentChangePct <= -8) {
+          actions.push(sellAllAction(holding));
+        } else if (holding.unrealizedPct <= -25) {
+          actions.push(sellAllAction(holding));
+        }
+      }
+      return actions.concat(dipEntries(observation, { maxPositions: 3, spendFraction: 0.3, maxBuys: 2 }));
+    }
+  },
+
+  RISK_AWARE: {
+    id: 'RISK_AWARE',
+    description: 'DIP_BOOM discipline plus legal use of the public collapse-risk level: never enters DANGER/CRITICAL coins late, banks any holding that turns CRITICAL.',
+    usesFuture: false,
+    usesOwnRandom: false,
+    decide(observation) {
+      const late = observation.apocalypsePercent >= 70;
+      const actions = [];
+      for (const holding of observation.portfolio.holdings) {
+        const signal = findSignal(observation, holding.coinId);
+        if (signal.dead) continue;
+        // The intended V2-3 decision, mechanised: late in the round a
+        // CRITICAL reading means cash out now rather than risk another rise.
+        if (signal.collapseRisk === 'CRITICAL' || (late && signal.collapseRisk === 'DANGER')) {
+          actions.push(sellAllAction(holding));
+        } else if (signal.phase === 'BOOM') {
+          actions.push(sellAllAction(holding));
+        } else if (signal.phase === 'FALL' && holding.unrealizedPct <= -8) {
+          actions.push(sellAllAction(holding));
+        }
+      }
+      if (late) {
+        // Late entries only into calm coins: filter the shared dip-entry
+        // selection by the public risk level.
+        const entries = dipEntries(observation, { maxPositions: 3, spendFraction: 0.3, maxBuys: 2 })
+          .filter((a) => {
+            const signal = findSignal(observation, a.coinId);
+            return signal && (signal.collapseRisk === 'STABLE' || signal.collapseRisk === 'SHAKY');
+          });
+        return actions.concat(entries);
+      }
+      return actions.concat(dipEntries(observation, { maxPositions: 3, spendFraction: 0.3, maxBuys: 2 }));
     }
   }
 };
