@@ -1,39 +1,10 @@
 const db = require('../db/connection');
 
-exports.insertTransaction = async (user_id, coin_id, type, amount, price_at_transaction) => {
-  // Validate inputs
-  if (!user_id || !coin_id || !type || !amount || !price_at_transaction) {
-    throw new Error('Missing required fields for transaction');
-  }
-
-  // Ensure type is either 'buy' or 'sell'
-  const normalizedType = type.toUpperCase();
-  if (!['BUY', 'SELL'].includes(normalizedType)) {
-    throw new Error('Invalid transaction type');
-  }
-
-  try {
-    const result = await db.query(
-      `INSERT INTO transactions 
-       (user_id, coin_id, type, quantity, price, total_amount)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       RETURNING 
-         transaction_id,
-         user_id,
-         coin_id,
-         type,
-         quantity,
-         price,
-         total_amount,
-         created_at`,
-      [user_id, coin_id, normalizedType, amount, price_at_transaction, amount * price_at_transaction]
-    );
-    
-    return result.rows[0];
-  } catch (error) {
-    throw new Error(`Failed to record transaction: ${error.message}`);
-  }
-};
+// V2 legacy cleanup (#22): exports.insertTransaction is removed with the root
+// POST /api/transactions path it served — it inserted a caller-priced ledger
+// row with no funds/portfolio mutation. All remaining ledger writes go
+// through the single-client atomic processBuyTransaction /
+// processSellTransaction below.
 
 exports.selectUserTransactions = async (user_id) => {
   try {
@@ -128,9 +99,7 @@ exports.selectUserPortfolio = async (user_id) => {
 };
 
 // Milestone 1: portfolio writes inside a buy/sell MUST run on the operation's
-// own transaction client. This internal variant takes the client explicitly;
-// the exported updatePortfolio below preserves the legacy pool-based API for
-// any other caller.
+// own transaction client. This internal helper takes the client explicitly.
 const updatePortfolioOnClient = async (client, user_id, coin_id, type, amount) => {
   // Check if portfolio entry exists
   const portfolioResult = await client.query(
@@ -155,14 +124,6 @@ const updatePortfolioOnClient = async (client, user_id, coin_id, type, amount) =
        WHERE user_id = $2 AND coin_id = $3`,
       [quantityChange, user_id, coin_id]
     );
-  }
-};
-
-exports.updatePortfolio = async (user_id, coin_id, type, amount, price_at_transaction) => {
-  try {
-    await updatePortfolioOnClient(db, user_id, coin_id, type, amount);
-  } catch (error) {
-    throw error;
   }
 };
 

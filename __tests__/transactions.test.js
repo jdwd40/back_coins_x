@@ -4,6 +4,14 @@ const db = require('../db/connection');
 const seed = require('../db/seed');
 const jwt = require('jsonwebtoken');
 
+// V2 legacy cleanup (#22): the root POST /api/transactions mutation is
+// removed. It trusted caller-supplied price_at_transaction and inserted a
+// ledger row with no authoritative funds/portfolio mutation, so an
+// authenticated caller could create phantom financial state. These suites
+// assert the route is unavailable and seed the useful read/portfolio
+// endpoints through explicit isolated SQL fixtures (the only legitimate
+// write paths that remain are the atomic /buy and /sell endpoints).
+
 describe('Transactions API', () => {
   let testUserToken;
   let testUser2Token;
@@ -23,127 +31,51 @@ describe('Transactions API', () => {
     );
   });
 
-  describe('POST /api/transactions', () => {
-    test('201: creates a new buy transaction', () => {
-      const newTransaction = {
-        user_id: 1,
-        coin_id: 1,
-        type: 'BUY',
-        amount: 0.5,
-        price_at_transaction: 50000.00
-      };
+  describe('POST /api/transactions (legacy root mutation removed)', () => {
+    const legacyBuyPayload = {
+      user_id: 1,
+      coin_id: 1,
+      type: 'BUY',
+      amount: 0.5,
+      price_at_transaction: 50000.00
+    };
 
-      return request(app)
+    test('404: an authenticated caller cannot create a transaction through the removed root mutation', async () => {
+      const before = await db.query('SELECT count(*)::int AS n FROM transactions');
+
+      await request(app)
         .post('/api/transactions')
         .set('Authorization', `Bearer ${testUserToken}`)
-        .send(newTransaction)
-        .expect(201)
-        .then(({ body }) => {
-          expect(body.transaction).toMatchObject({
-            transaction_id: expect.any(Number),
-            user_id: 1,
-            coin_id: 1,
-            type: 'BUY',
-            quantity: '0.50',
-            price: '50000.0000', // 4dp post-migration-017
-            total_amount: '25000.00',
-            created_at: expect.any(String)
-          });
-        });
+        .send(legacyBuyPayload)
+        .expect(404);
+
+      const after = await db.query('SELECT count(*)::int AS n FROM transactions');
+      expect(after.rows[0].n).toBe(before.rows[0].n);
     });
 
-    test('201: creates a new sell transaction', () => {
-      // First create a buy transaction
-      const buyTransaction = {
-        user_id: 1,
-        coin_id: 1,
-        type: 'BUY',
-        amount: 1.0,
-        price_at_transaction: 50000.00
-      };
+    test('404: a caller-priced SELL attempt against the removed route also fails and writes nothing', async () => {
+      const before = await db.query('SELECT count(*)::int AS n FROM transactions');
 
-      return request(app)
+      await request(app)
         .post('/api/transactions')
         .set('Authorization', `Bearer ${testUserToken}`)
-        .send(buyTransaction)
-        .then(() => {
-          // Then create a sell transaction
-          const sellTransaction = {
-            user_id: 1,
-            coin_id: 1,
-            type: 'SELL',
-            amount: 0.5,
-            price_at_transaction: 55000.00
-          };
+        .send({
+          user_id: 1,
+          coin_id: 1,
+          type: 'SELL',
+          amount: 0.5,
+          price_at_transaction: 55000.00
+        })
+        .expect(404);
 
-          return request(app)
-            .post('/api/transactions')
-            .set('Authorization', `Bearer ${testUserToken}`)
-            .send(sellTransaction)
-            .expect(201)
-            .then(({ body }) => {
-              expect(body.transaction).toMatchObject({
-                transaction_id: expect.any(Number),
-                user_id: 1,
-                coin_id: 1,
-                type: 'SELL',
-                quantity: '0.50',
-                price: '55000.0000', // 4dp post-migration-017
-                total_amount: '27500.00',
-                created_at: expect.any(String)
-              });
-            });
-        });
+      const after = await db.query('SELECT count(*)::int AS n FROM transactions');
+      expect(after.rows[0].n).toBe(before.rows[0].n);
     });
 
-    test('400: returns error when trying to sell more than owned', () => {
-      const sellTransaction = {
-        user_id: 1,
-        coin_id: 1,
-        type: 'SELL',
-        amount: 1.0,
-        price_at_transaction: 50000.00
-      };
-
+    test('401: anonymous callers are still rejected at the router boundary', () => {
       return request(app)
         .post('/api/transactions')
-        .set('Authorization', `Bearer ${testUserToken}`)
-        .send(sellTransaction)
-        .expect(400)
-        .then(({ body }) => {
-          expect(body.msg).toBe('Insufficient balance for this transaction');
-        });
-    });
-
-    test('400: returns error when required fields are missing', () => {
-      const invalidTransaction = {
-        user_id: 1,
-        coin_id: 1
-        // missing type, amount, and price
-      };
-
-      return request(app)
-        .post('/api/transactions')
-        .set('Authorization', `Bearer ${testUserToken}`)
-        .send(invalidTransaction)
-        .expect(400)
-        .then(({ body }) => {
-          expect(body.msg).toBe('Missing required fields');
-        });
-    });
-
-    test('401: returns unauthorized when no token provided', () => {
-      const transaction = {
-        user_id: 1,
-        coin_id: 1,
-        type: 'BUY',
-        amount: 0.5,
-        price_at_transaction: 50000.00
-      };
-
-      return request(app)
-        .post('/api/transactions')
-        .send(transaction)
+        .send(legacyBuyPayload)
         .expect(401)
         .then(({ body }) => {
           expect(body.msg).toBe('Authentication required');
@@ -153,19 +85,13 @@ describe('Transactions API', () => {
 
   describe('GET /api/transactions/user/:user_id', () => {
     test('200: returns all transactions for a user', async () => {
-      // First create some transactions
-      const transaction1 = {
-        user_id: 1,
-        coin_id: 1,
-        type: 'BUY',
-        amount: 1.0,
-        price_at_transaction: 50000.00
-      };
-
-      await request(app)
-        .post('/api/transactions')
-        .set('Authorization', `Bearer ${testUserToken}`)
-        .send(transaction1);
+      // Seed via an explicit isolated fixture row (the legacy public root
+      // mutation that used to seed this test no longer exists).
+      await db.query(
+        `INSERT INTO transactions (user_id, coin_id, type, quantity, price, total_amount)
+         VALUES ($1, $2, 'BUY', $3, $4, $5)`,
+        [1, 1, 1.0, 50000, 50000]
+      );
 
       return request(app)
         .get('/api/transactions/user/1')
@@ -202,19 +128,12 @@ describe('Transactions API', () => {
 
   describe('GET /api/transactions/portfolio/:user_id', () => {
     test('200: returns user portfolio', async () => {
-      // First create some transactions
-      const transaction1 = {
-        user_id: 1,
-        coin_id: 1,
-        type: 'BUY',
-        amount: 1.0,
-        price_at_transaction: 50000.00
-      };
-
-      await request(app)
-        .post('/api/transactions')
-        .set('Authorization', `Bearer ${testUserToken}`)
-        .send(transaction1);
+      // Explicit isolated fixture row, as above.
+      await db.query(
+        `INSERT INTO transactions (user_id, coin_id, type, quantity, price, total_amount)
+         VALUES ($1, $2, 'BUY', $3, $4, $5)`,
+        [1, 1, 1.0, 50000, 50000]
+      );
 
       return request(app)
         .get('/api/transactions/portfolio/1')

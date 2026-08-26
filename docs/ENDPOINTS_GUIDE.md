@@ -334,51 +334,6 @@ curl -X GET \
 
 ---
 
-### 5. Create Transaction (Legacy)
-
-Create a transaction manually (not recommended - use `/buy` or `/sell` endpoints instead).
-
-**Endpoint:** `POST /api/transactions`
-
-**Authentication:** Required ✅
-
-**Request Body:**
-```json
-{
-  "user_id": 1,
-  "coin_id": 1,
-  "type": "BUY",
-  "amount": 2.5,
-  "price_at_transaction": 50000.00
-}
-```
-
-**Parameters:**
-- `user_id` (integer, required)
-- `coin_id` (integer, required)
-- `type` (string, required) - Either "BUY" or "SELL"
-- `amount` (number, required) - Must be > 0
-- `price_at_transaction` (number, required) - Must be > 0
-
-**Success Response (201 Created):**
-```json
-{
-  "transaction": {
-    "transaction_id": 123,
-    "user_id": 1,
-    "coin_id": 1,
-    "type": "BUY",
-    "quantity": 2.5,
-    "price_at_transaction": 50000.00,
-    "created_at": "2025-11-04T10:30:00.000Z"
-  }
-}
-```
-
-**Note:** This endpoint does not automatically update the user's funds or portfolio. Use `/buy` or `/sell` endpoints for complete transaction processing.
-
----
-
 ## Market Endpoints
 
 ### 1. Get Market Status
@@ -441,55 +396,7 @@ curl -X GET http://localhost:9090/api/market/stats
 
 ---
 
-### 3. Get Market History
-
-Get historical market data with optional time range filtering.
-
-**Endpoint:** `GET /api/market/history?timeRange=30M`
-
-**Authentication:** Not required ❌
-
-**Query Parameters:**
-- `timeRange` (string, optional) - Time range filter
-  - Options: `10M`, `30M`, `1H`, `2H`, `12H`, `24H`, `ALL`
-  - Default: Returns all data if not specified
-
-**Success Response (200 OK):**
-```json
-{
-  "history": [
-    {
-      "total_value": 2450000000.00,
-      "market_trend": "bullish",
-      "created_at": "2025-11-04T11:30:00.000Z",
-      "timestamp": 1730725800000
-    },
-    {
-      "total_value": 2480000000.00,
-      "market_trend": "bullish",
-      "created_at": "2025-11-04T11:45:00.000Z",
-      "timestamp": 1730726700000
-    }
-  ],
-  "count": 2
-}
-```
-
-**Example Request (cURL):**
-```bash
-curl -X GET 'http://localhost:9090/api/market/history?timeRange=1H'
-```
-
-**Example Request (JavaScript):**
-```javascript
-const timeRange = '30M'; // Last 30 minutes
-const response = await fetch(`http://localhost:9090/api/market/history?timeRange=${timeRange}`);
-const history = await response.json();
-```
-
----
-
-### 4. Get Market Price History
+### 3. Get Market Price History
 
 Get detailed price history for market visualization.
 
@@ -531,60 +438,6 @@ curl -X GET 'http://localhost:9090/api/market/price-history?timeRange=1H'
 
 ---
 
-### 5. Start Market Simulation
-
-Start the market price simulation.
-
-**Endpoint:** `POST /api/market/start`
-
-**Authentication:** Not required ❌
-
-**Success Response (200 OK):**
-```json
-{
-  "msg": "Market simulation started",
-  "status": {
-    "isRunning": true,
-    "updateInterval": 5000,
-    "lastUpdate": "2025-11-04T12:00:00.000Z"
-  }
-}
-```
-
-**Example Request (cURL):**
-```bash
-curl -X POST http://localhost:9090/api/market/start
-```
-
----
-
-### 6. Stop Market Simulation
-
-Stop the market price simulation.
-
-**Endpoint:** `POST /api/market/stop`
-
-**Authentication:** Not required ❌
-
-**Success Response (200 OK):**
-```json
-{
-  "msg": "Market simulation stopped",
-  "status": {
-    "isRunning": false,
-    "updateInterval": 5000,
-    "lastUpdate": "2025-11-04T12:00:00.000Z"
-  }
-}
-```
-
-**Example Request (cURL):**
-```bash
-curl -X POST http://localhost:9090/api/market/stop
-```
-
----
-
 ## Common Error Responses
 
 All endpoints may return the following error responses:
@@ -612,7 +465,7 @@ All endpoints may return the following error responses:
 
 1. **Always authenticate** - Include valid JWT tokens for protected endpoints
 2. **Handle errors gracefully** - Check response status codes and handle errors appropriately
-3. **Use the correct endpoints** - Prefer `/buy` and `/sell` over the legacy `/transactions` POST endpoint
+3. **Use the correct endpoints** - Use `/buy` and `/sell` for all trades; the legacy root `POST /api/transactions` endpoint has been removed
 4. **Validate input** - Ensure amounts are positive and user_id matches the authenticated user
 5. **Monitor market status** - Check `/api/market/status` to ensure the market is running before trading
 6. **Rate limiting** - Be mindful of request frequency to avoid overwhelming the server

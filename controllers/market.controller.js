@@ -23,20 +23,10 @@ exports.getMarketStats = async (req, res, next) => {
   }
 };
 
-exports.getMarketHistory = async (req, res, next) => {
-  try {
-    const { timeRange } = req.query;
-    const { getMarketHistory } = require('../models/coins.model');
-    const marketHistory = await getMarketHistory(timeRange);
-    res.status(200).json(marketHistory);
-  } catch (err) {
-    if (err.message.startsWith('Invalid time range')) {
-      res.status(400).json({ error: err.message });
-    } else {
-      next(err);
-    }
-  }
-};
+// V2 legacy cleanup (#22): exports.getMarketHistory is removed with its
+// route — it lazy-required a getMarketHistory model function that
+// coins.model.js does not export, so the endpoint was unreachable dead code
+// (every call 500'd) with no consumer.
 
 exports.getMarketPriceHistory = async (req, res, next) => {
   try {

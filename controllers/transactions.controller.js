@@ -1,74 +1,20 @@
 const { 
-  insertTransaction,
   selectUserTransactions,
   selectTransactionById,
   selectUserPortfolio,
-  updatePortfolio,
   processBuyTransaction,
   processSellTransaction
 } = require('../models/transactions.model');
-const { selectCoinById, selectCoinRawById } = require('../models/coins.model');
+const { selectCoinRawById } = require('../models/coins.model');
 const { getUserFunds } = require('../models/users.model');
 const { isCoinCollapsed } = require('../game/collapseScheduleService');
 
-exports.createTransaction = async (req, res, next) => {
-  try {
-    const { user_id, coin_id, type, amount, price_at_transaction } = req.body;
-    
-    if (!user_id || !coin_id || !type || !amount || !price_at_transaction) {
-      return res.status(400).json({ msg: 'Missing required fields' });
-    }
-
-    // Check if the authenticated user matches the user_id in the request
-    if (req.user.user_id !== user_id) {
-      return res.status(401).json({ msg: 'Unauthorized' });
-    }
-
-    if (!['BUY', 'SELL'].includes(type.toUpperCase())) {
-      return res.status(400).json({ msg: 'Invalid transaction type' });
-    }
-
-    // Validate amount
-    if (amount <= 0) {
-      return res.status(400).json({ msg: 'Amount must be greater than 0' });
-    }
-
-    // Validate price
-    if (price_at_transaction <= 0) {
-      return res.status(400).json({ msg: 'Price must be greater than 0' });
-    }
-
-    // Check if coin exists
-    const coin = await selectCoinById(coin_id);
-    if (!coin) {
-      return res.status(404).json({ msg: 'Coin not found' });
-    }
-
-    // For SELL transactions, check if user has sufficient balance
-    if (type.toUpperCase() === 'SELL') {
-      const userTransactions = await selectUserTransactions(user_id);
-      const coinTransactions = userTransactions.filter(t => t.coin_id === coin_id);
-      
-      let totalBalance = 0;
-      for (const t of coinTransactions) {
-        if (t.type === 'BUY') {
-          totalBalance += parseFloat(t.quantity);
-        } else if (t.type === 'SELL') {
-          totalBalance -= parseFloat(t.quantity);
-        }
-      }
-      
-      if (totalBalance < amount) {
-        return res.status(400).json({ msg: 'Insufficient balance for this transaction' });
-      }
-    }
-
-    const transaction = await insertTransaction(user_id, coin_id, type, amount, price_at_transaction);
-    res.status(201).json({ transaction });
-  } catch (err) {
-    next(err);
-  }
-};
+// V2 legacy cleanup (#22): exports.createTransaction (the root POST
+// /api/transactions handler) is removed with its route. It trusted
+// caller-supplied price_at_transaction and inserted a ledger row without any
+// authoritative funds/portfolio mutation — an integrity hole, not a
+// compatibility path. The current frontend never called it (only /buy,
+// /sell, /portfolio/:user_id and /user/:user_id are used).
 
 exports.getUserTransactions = async (req, res, next) => {
   try {
