@@ -1152,6 +1152,87 @@ async function verifyV2PricePrecision(q, problems) {
   }
 }
 
+// --- Apocalypse Monitor foundation: price_history provenance (migration 019)
+// Nullable cycle_id FK to apocalypse_cycles, nullable source provenance tag
+// (MARKET_TICK/COLLAPSE; NULL for legacy rows), and the monitor read index.
+// Legacy NULL rows are valid forever — the invariant checks only constrain
+// rows that carry a source tag.
+async function verifyPriceHistoryProvenance(q, problems) {
+  const reg = await q(`SELECT to_regclass('public.price_history') AS r`);
+  if (!reg.rows[0].r) {
+    problems.push('missing table (price_history provenance check): price_history');
+    return;
+  }
+
+  const cycleId = await q(
+    `SELECT data_type, is_nullable FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'price_history' AND column_name = 'cycle_id'`
+  );
+  if (cycleId.rows.length === 0) {
+    problems.push('missing column (price_history provenance check): price_history.cycle_id');
+  } else if (cycleId.rows[0].data_type !== 'integer' || cycleId.rows[0].is_nullable !== 'YES') {
+    problems.push(`column price_history.cycle_id: type ${cycleId.rows[0].data_type} nullable ${cycleId.rows[0].is_nullable}, expected integer NULL (migration 019)`);
+  }
+
+  const fk = await q(
+    `SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint
+      WHERE conrelid = 'public.price_history'::regclass AND contype = 'f'
+        AND conname = 'price_history_cycle_id_fkey'`
+  );
+  if (fk.rows.length === 0) {
+    problems.push('missing constraint (migration 019): price_history_cycle_id_fkey');
+  } else if (fk.rows[0].def !== 'FOREIGN KEY (cycle_id) REFERENCES apocalypse_cycles(cycle_id)') {
+    problems.push(`constraint price_history_cycle_id_fkey: ${fk.rows[0].def}, expected FOREIGN KEY (cycle_id) REFERENCES apocalypse_cycles(cycle_id)`);
+  }
+
+  const source = await q(
+    `SELECT data_type, is_nullable FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'price_history' AND column_name = 'source'`
+  );
+  if (source.rows.length === 0) {
+    problems.push('missing column (price_history provenance check): price_history.source');
+  } else if (source.rows[0].data_type !== 'character varying' || source.rows[0].is_nullable !== 'YES') {
+    problems.push(`column price_history.source: type ${source.rows[0].data_type} nullable ${source.rows[0].is_nullable}, expected varchar NULL (migration 019)`);
+  }
+
+  const check = await q(
+    `SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint
+      WHERE conrelid = 'public.price_history'::regclass AND contype = 'c'
+        AND conname = 'price_history_source_allowed'`
+  );
+  if (check.rows.length === 0) {
+    problems.push('missing constraint (migration 019): price_history_source_allowed');
+  } else if (!check.rows[0].def.includes('MARKET_TICK') || !check.rows[0].def.includes('COLLAPSE')) {
+    problems.push(`constraint price_history_source_allowed: ${check.rows[0].def}, expected CHECK admitting MARKET_TICK/COLLAPSE`);
+  }
+
+  const index = await q(
+    `SELECT indexdef FROM pg_indexes
+      WHERE schemaname = 'public' AND tablename = 'price_history'
+        AND indexname = 'idx_price_history_cycle_coin_created'`
+  );
+  if (index.rows.length === 0) {
+    problems.push('missing index (migration 019): idx_price_history_cycle_coin_created');
+  } else if (!index.rows[0].indexdef.includes('(cycle_id, coin_id, created_at)')) {
+    problems.push(`index idx_price_history_cycle_coin_created: ${index.rows[0].indexdef}, expected (cycle_id, coin_id, created_at)`);
+  }
+
+  // Live-data invariants (local-only, no joins): provenance-tagged rows must
+  // always carry the writer's cycle id, and a COLLAPSE row is always the £0
+  // transition. Legacy NULL rows are exempt from both.
+  const untagged = await q(
+    `SELECT count(*)::int AS n FROM price_history
+      WHERE source IS NOT NULL AND cycle_id IS NULL`
+  );
+  if (untagged.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${untagged.rows[0].n} price_history rows with a source tag but NULL cycle_id`);
+
+  const badCollapse = await q(
+    `SELECT count(*)::int AS n FROM price_history
+      WHERE source = 'COLLAPSE' AND price <> 0`
+  );
+  if (badCollapse.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${badCollapse.rows[0].n} COLLAPSE price_history rows with non-zero price`);
+}
+
 async function verifyGameSchema({ query } = {}) {
   const q = query || ((...args) => db.query(...args));
   const problems = [];
@@ -1165,6 +1246,7 @@ async function verifyGameSchema({ query } = {}) {
   await verifyEconomy(q, problems);
   await verifyResults(q, problems);
   await verifyV2PricePrecision(q, problems);
+  await verifyPriceHistoryProvenance(q, problems);
 
   return { ok: problems.length === 0, problems };
 }

@@ -199,9 +199,14 @@ async function executeDueCollapses(client, cycleId, now) {
       `UPDATE coins SET current_price = 0 WHERE coin_id = $1`,
       [row.coin_id]
     );
+    // Apocalypse Monitor foundation: stamp the actual £0 transition with the
+    // caller's authoritative cycle id and its COLLAPSE provenance. The
+    // schedule row remains the only collapse authority — never inferred from
+    // zero prices.
     await client.query(
-      `INSERT INTO price_history (coin_id, price, created_at) VALUES ($1, 0, $2)`,
-      [row.coin_id, nowDate.toISOString()]
+      `INSERT INTO price_history (coin_id, cycle_id, price, created_at, source)
+       VALUES ($1, $2, 0, $3, 'COLLAPSE')`,
+      [row.coin_id, cycleId, nowDate.toISOString()]
     );
     const { rowCount } = await client.query(
       `UPDATE coin_collapse_schedule SET executed_at = $1

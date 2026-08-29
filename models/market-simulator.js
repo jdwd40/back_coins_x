@@ -215,9 +215,13 @@ class MarketSimulator {
           'UPDATE coins SET current_price = $1 WHERE coin_id = $2',
           [newPrice, coin.coin_id]
         );
+        // Apocalypse Monitor foundation: stamp every normal tick with the
+        // already-reconciled authoritative cycle id (no extra lookup) and
+        // its MARKET_TICK provenance.
         await client.query(
-          'INSERT INTO price_history (coin_id, price, created_at) VALUES ($1, $2, CURRENT_TIMESTAMP)',
-          [coin.coin_id, newPrice]
+          `INSERT INTO price_history (coin_id, cycle_id, price, created_at, source)
+           VALUES ($1, $2, $3, CURRENT_TIMESTAMP, 'MARKET_TICK')`,
+          [coin.coin_id, cycle.cycle_id, newPrice]
         );
         totalMarketValue += newPrice;
 

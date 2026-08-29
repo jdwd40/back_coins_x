@@ -257,6 +257,16 @@ const seed = async (shouldEnd = false) => {
     );
     await db.query(powerCostBasisMigration);
 
+    console.log('📦 Applying price-history provenance migration (db/migrations/019_price_history_cycle_provenance.sql)...');
+    // Apocalypse Monitor foundation: nullable price_history.cycle_id FK +
+    // source provenance tag + (cycle_id, coin_id, created_at) index,
+    // sourced from the production migration only.
+    const priceHistoryProvenanceMigration = require('fs').readFileSync(
+      require('path').join(__dirname, 'migrations', '019_price_history_cycle_provenance.sql'),
+      'utf8'
+    );
+    await db.query(priceHistoryProvenanceMigration);
+
     console.log('📦 Inserting coins data...');
     // Insert coins data
     const coinsData = require(process.env.NODE_ENV === 'test' 

@@ -73,8 +73,10 @@ Tracks historical price data for cryptocurrencies.
 |--------|------|-------------|-------------|
 | history_id | integer | PRIMARY KEY | Unique identifier for price records |
 | coin_id | integer | FOREIGN KEY | Reference to coins table |
+| cycle_id | integer | FOREIGN KEY, NULL | Authoritative apocalypse cycle (migration 019); NULL on legacy rows, never backfilled |
 | price | numeric(18,2) | NOT NULL | Historical price |
 | created_at | timestamp | DEFAULT CURRENT_TIMESTAMP | When the price was recorded |
+| source | varchar(12) | NULL, CHECK | Provenance: `MARKET_TICK` or `COLLAPSE`; NULL on legacy rows (migration 019) |
 
 ## Indexes
 
@@ -102,6 +104,7 @@ Tracks historical price data for cryptocurrencies.
 - PRIMARY KEY on `history_id`
 - INDEX on `coin_id`
 - INDEX on `created_at`
+- INDEX on (`cycle_id`, `coin_id`, `created_at`) — per-cycle monitor reads (migration 019)
 
 ## Foreign Key Relationships
 
@@ -110,6 +113,7 @@ Tracks historical price data for cryptocurrencies.
 3. `transactions.user_id` → `users.user_id` (ON DELETE CASCADE)
 4. `transactions.coin_id` → `coins.coin_id` (ON DELETE CASCADE)
 5. `price_history.coin_id` → `coins.coin_id` (ON DELETE CASCADE)
+6. `price_history.cycle_id` → `apocalypse_cycles.cycle_id` (nullable; migration 019)
 
 ## Data Types
 
