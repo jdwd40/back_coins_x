@@ -3,7 +3,8 @@ const {
   getDiagnosticsParticipants,
   getDiagnosticsActivity,
   getDiagnosticsBots,
-  getDiagnosticsMonitor
+  getDiagnosticsMonitor,
+  getDiagnosticsMonitorCycles
 } = require('../controllers/gameDiagnostics.controller');
 const { authenticateDiagnostics } = require('../middleware/diagnostics.middleware');
 
@@ -31,5 +32,8 @@ gameDiagnosticsRouter.get('/bots', getDiagnosticsBots);
 // Apocalypse Monitor Phase 2: per-cycle raw price series with provenance
 // attribution (exact vs time-window-derived legacy rows).
 gameDiagnosticsRouter.get('/monitor', getDiagnosticsMonitor);
+// Apocalypse Monitor Phase 2.5: newest-first cycle discovery for the
+// monitor (public cycle fields + hasExactHistory; strict ?limit= 1-100).
+gameDiagnosticsRouter.get('/monitor/cycles', getDiagnosticsMonitorCycles);
 
 exports.gameDiagnosticsRouter = gameDiagnosticsRouter;

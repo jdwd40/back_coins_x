@@ -61,3 +61,17 @@ exports.getDiagnosticsMonitor = async (req, res, next) => {
     handleDiagnosticsError(err, res, next);
   }
 };
+
+// Apocalypse Monitor Phase 2.5: restricted read-only newest-first cycle
+// discovery (public cycle fields + hasExactHistory exact-provenance flag).
+// Optional ?limit= strict integer 1-100 (default 20; 400 invalid/excessive).
+exports.getDiagnosticsMonitorCycles = async (req, res, next) => {
+  try {
+    const data = await diagnosticsService.getCycleDiagnosticsMonitorCycles({
+      limit: req.query.limit
+    });
+    res.status(200).json({ status: 'success', data });
+  } catch (err) {
+    handleDiagnosticsError(err, res, next);
+  }
+};

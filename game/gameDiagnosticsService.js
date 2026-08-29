@@ -744,18 +744,96 @@ async function getCycleDiagnosticsMonitor(rawCycleId, { coinId } = {}) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Apocalypse Monitor Phase 2.5: recent cycle discovery.
+//
+// Newest-first list of persisted cycles (ACTIVE / SETTLING / COMPLETED) so an
+// operator can pick a cycleId for the monitor endpoint above. Each entry
+// exposes ONLY the public cycle fields plus hasExactHistory: true iff at
+// least one price_history row carries the cycle's EXACT provenance
+// (price_history.cycle_id = the cycle's internal id). Legacy rows
+// (cycle_id IS NULL, never backfilled) never count, even when they fall
+// inside the cycle's time window. The flag is computed with ONE correlated
+// EXISTS over the page — no N+1, and the future schedule, seeds, ranks and
+// bot data are never read.
+// ---------------------------------------------------------------------------
+const DEFAULT_MONITOR_CYCLES_LIMIT = 20;
+const MAX_MONITOR_CYCLES_LIMIT = 100;
+
+// ?limit= must be a strict integer in [1, MAX] (400 otherwise — invalid and
+// excessive values are rejected, never silently coerced or capped). Same
+// convention as the activity stream's resolveActivityLimit.
+function resolveMonitorCyclesLimit(raw) {
+  if (raw === undefined || raw === null || (typeof raw === 'string' && raw.trim() === '')) {
+    return DEFAULT_MONITOR_CYCLES_LIMIT;
+  }
+  const trimmed = typeof raw === 'string' ? raw.trim() : raw;
+  if (typeof trimmed === 'string' && !/^[+-]?\d+$/.test(trimmed)) {
+    throw new GameDiagnosticsError(
+      `Invalid limit. Please provide an integer between 1 and ${MAX_MONITOR_CYCLES_LIMIT}.`,
+      400
+    );
+  }
+  const value = Number(trimmed);
+  if (!Number.isInteger(value) || value < 1 || value > MAX_MONITOR_CYCLES_LIMIT) {
+    throw new GameDiagnosticsError(
+      `Invalid limit. Please provide an integer between 1 and ${MAX_MONITOR_CYCLES_LIMIT}.`,
+      400
+    );
+  }
+  return value;
+}
+
+async function getCycleDiagnosticsMonitorCycles({ limit } = {}) {
+  const cappedLimit = resolveMonitorCyclesLimit(limit);
+
+  return readOnly(async (client) => {
+    // Newest first: cycle_id is the insertion order, matching the "most
+    // recent cycle" convention in resolveCycle.
+    const { rows } = await client.query(
+      `SELECT c.apocalypse_id, c.status, c.start_time, c.end_time, c.settled_at,
+              EXISTS (
+                SELECT 1 FROM price_history ph
+                WHERE ph.cycle_id = c.cycle_id
+              ) AS has_exact_history
+       FROM apocalypse_cycles c
+       WHERE c.status IN ('ACTIVE', 'SETTLING', 'COMPLETED')
+       ORDER BY c.cycle_id DESC
+       LIMIT $1`,
+      [cappedLimit]
+    );
+
+    return {
+      limit: cappedLimit,
+      returned: rows.length,
+      cycles: rows.map((row) => ({
+        cycleId: row.apocalypse_id,
+        status: row.status,
+        startTime: new Date(row.start_time).toISOString(),
+        endTime: new Date(row.end_time).toISOString(),
+        settledAt: row.settled_at ? new Date(row.settled_at).toISOString() : null,
+        hasExactHistory: row.has_exact_history === true
+      }))
+    };
+  });
+}
+
 module.exports = {
   DEFAULT_ACTIVITY_LIMIT,
   MAX_ACTIVITY_LIMIT,
   MAX_ACTIVITY_OFFSET,
   MAX_MONITOR_POINTS_PER_COIN,
+  DEFAULT_MONITOR_CYCLES_LIMIT,
+  MAX_MONITOR_CYCLES_LIMIT,
   GameDiagnosticsError,
   resolveActivityLimit,
   resolveActivityOffset,
   resolveActivityOrder,
   resolveMonitorCoinId,
+  resolveMonitorCyclesLimit,
   getCycleDiagnosticsParticipants,
   getCycleDiagnosticsActivity,
   getCycleDiagnosticsBots,
-  getCycleDiagnosticsMonitor
+  getCycleDiagnosticsMonitor,
+  getCycleDiagnosticsMonitorCycles
 };

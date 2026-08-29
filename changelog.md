@@ -1,5 +1,20 @@
 # Changelog
 
+## Apocalypse Monitor Phase 2.5: monitor cycle discovery (2026-08-29)
+
+- **New endpoint** `GET /api/game/diagnostics/monitor/cycles` on the
+  restricted diagnostics router (same `GAME_DIAGNOSTICS_TOKEN` gate,
+  fail-closed 404, `BEGIN READ ONLY`, `Cache-Control: no-store`, GET only).
+- Newest-first list of persisted `ACTIVE`/`SETTLING`/`COMPLETED` cycles,
+  each exposing only `cycleId`/`status`/`startTime`/`endTime`/`settledAt`
+  plus `hasExactHistory` (true iff any `price_history` row carries the
+  cycle's exact `cycle_id` provenance; legacy-only rows never count —
+  single `EXISTS` query, no N+1). Strict `?limit=` integer 1–100, default
+  20; invalid/excessive values are 400. No seed/internal ids/schedule/rank/
+  bot data; zero writes, no reconciliation/settlement/rollover.
+- Docs: `API_DOCUMENTATION.md` monitor/cycles section. No gameplay, writer,
+  or schema changes.
+
 ## Apocalypse Monitor Phase 2: read-only monitor diagnostics API (2026-08-29)
 
 - **New endpoint** `GET /api/game/diagnostics/monitor` on the restricted

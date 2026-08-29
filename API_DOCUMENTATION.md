@@ -383,3 +383,34 @@ coins are omitted by default unless they genuinely have selected-cycle
 exact rows or legacy rows in the window (an explicit `coinId` always works).
 Points are chronological and capped at 1000 per coin (truncation is
 disclosed in `warnings`). `observedAt` is the database clock at read time.
+
+### GET /api/game/diagnostics/monitor/cycles
+
+Apocalypse Monitor Phase 2.5: newest-first discovery of persisted cycles
+(`ACTIVE` / `SETTLING` / `COMPLETED`) for picking a monitor `cycleId`. GET
+only. Query param: optional `limit` (strict integer 1–100, default 20;
+invalid or excessive values are a 400, never silently capped).
+
+```json
+{
+  "status": "success",
+  "data": {
+    "limit": 20,
+    "returned": 3,
+    "cycles": [
+      {
+        "cycleId": "APOC-0007", "status": "ACTIVE",
+        "startTime": "…", "endTime": "…", "settledAt": null,
+        "hasExactHistory": true
+      }
+    ]
+  }
+}
+```
+
+Each entry exposes only the public cycle fields plus `hasExactHistory`:
+true iff at least one `price_history` row carries the cycle's exact
+provenance (`price_history.cycle_id`); legacy-only (`cycle_id IS NULL`)
+rows never count. Computed with a single `EXISTS` query (no N+1). No seed,
+internal `cycle_id`, schedule, rank, or bot data is exposed; the read
+performs zero writes and never reconciles, settles, or rolls over anything.
