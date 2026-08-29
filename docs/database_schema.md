@@ -104,7 +104,7 @@ Tracks historical price data for cryptocurrencies.
 - PRIMARY KEY on `history_id`
 - INDEX on `coin_id`
 - INDEX on `created_at`
-- INDEX on (`cycle_id`, `coin_id`, `created_at`) — per-cycle monitor reads (migration 019)
+- INDEX on (`cycle_id`, `coin_id`, `created_at`) — per-cycle monitor reads (migration 019); consumed by the read-only operator endpoint `GET /api/game/diagnostics/monitor` (exact rows by `cycle_id`, legacy NULL rows by half-open `[start_time, end_time)` window only)
 
 ## Foreign Key Relationships
 

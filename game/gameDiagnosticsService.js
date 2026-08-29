@@ -21,6 +21,18 @@
 //     counts, plus a per-bot breakdown. No JSON parsing is left to the
 //     operator.
 //
+//   * getCycleDiagnosticsMonitor — Apocalypse Monitor Phase 2: the raw
+//     per-coin price_history series for one cycle. Rows carrying the
+//     selected cycle's id (migration 019 provenance) are EXACT — matched by
+//     price_history.cycle_id ONLY, never by timestamp. Legacy rows
+//     (cycle_id IS NULL, never backfilled) are attributed by the half-open
+//     window [start_time, end_time) and honestly marked derived; the
+//     dataset-level attribution is exact / time_window_derived / mixed and
+//     `exact` is false whenever any derived row is used. Executed collapses
+//     appear only as source='COLLAPSE' rows; the future schedule
+//     (coin_collapse_schedule) is never read, and future-dated rows are
+//     never exposed.
+//
 // Hard rules (matching the issue's acceptance criteria):
 //   * NO duplicate BUY/SELL storage is created — everything is read from
 //     the existing authoritative tables.
@@ -510,15 +522,240 @@ async function getCycleDiagnosticsBots(rawCycleId) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Apocalypse Monitor Phase 2: raw per-coin price_history series for one
+// cycle, with honest provenance attribution.
+//
+// Row selection (single bounded scan, no N+1):
+//   * EXACT rows: price_history.cycle_id = <selected cycle's internal id>.
+//     Never timestamp-matched — a row tagged to another cycle is never
+//     pulled into this one, wherever its created_at falls.
+//   * LEGACY rows: cycle_id IS NULL (pre-019 rows are never backfilled) AND
+//     created_at >= start_time AND created_at < end_time (half-open). These
+//     are attributed by time window and marked derived.
+//   * Future-dated rows (created_at > now()) are never exposed: executed
+//     history only.
+// Attribution describes the whole selected dataset per coin (not just the
+// returned sample): exact / time_window_derived / mixed. The dataset-level
+// `exact` boolean is false whenever any derived row is in the dataset.
+// ---------------------------------------------------------------------------
+
+// Per-coin cap on returned points. A normal 30-minute cycle writes ~60
+// ticks per coin (30s cadence), so this is ~16x headroom; the truncation
+// warning tells the operator when a longer cycle exceeded it.
+const MAX_MONITOR_POINTS_PER_COIN = 1000;
+
+// ?coinId= must be a positive integer (400 otherwise, 404 when the coin
+// does not exist). Never silently coerced.
+function resolveMonitorCoinId(raw) {
+  if (raw === undefined || raw === null || (typeof raw === 'string' && raw.trim() === '')) {
+    return null;
+  }
+  const trimmed = typeof raw === 'string' ? raw.trim() : raw;
+  if (typeof trimmed === 'string' && !/^\d+$/.test(trimmed)) {
+    throw new GameDiagnosticsError('Invalid coinId. Please provide a positive integer coin id.', 400);
+  }
+  const value = Number(trimmed);
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new GameDiagnosticsError('Invalid coinId. Please provide a positive integer coin id.', 400);
+  }
+  return value;
+}
+
+function attributionFor(exactCount, derivedCount) {
+  if (derivedCount === 0) return 'exact';
+  if (exactCount === 0) return 'time_window_derived';
+  return 'mixed';
+}
+
+async function getCycleDiagnosticsMonitor(rawCycleId, { coinId } = {}) {
+  const filterCoinId = resolveMonitorCoinId(coinId);
+
+  return readOnly(async (client) => {
+    const cycle = await resolveCycle(client, rawCycleId);
+    const startTime = new Date(cycle.start_time);
+    const endTime = new Date(cycle.end_time);
+
+    // Observation timestamp from the database clock inside this read-only
+    // transaction: now() is constant for the whole snapshot.
+    const { rows: nowRows } = await client.query('SELECT now() AS observed_at');
+    const observedAt = new Date(nowRows[0].observed_at);
+
+    // Coin selection. Default: every non-retired coin (the live catalogue),
+    // plus a retired coin only when it GENUINELY has selected-cycle history:
+    // exact rows tagged to this cycle, or legacy rows inside the window.
+    // With ?coinId= the operator asked for one coin explicitly: 404 when it
+    // does not exist, otherwise returned even if retired.
+    let coins;
+    if (filterCoinId !== null) {
+      const { rows } = await client.query(
+        `SELECT coin_id, name, symbol FROM coins WHERE coin_id = $1`,
+        [filterCoinId]
+      );
+      if (rows.length === 0) {
+        throw new GameDiagnosticsError(`Unknown coin ${filterCoinId}.`, 404);
+      }
+      coins = rows;
+    } else {
+      const { rows } = await client.query(
+        `SELECT c.coin_id, c.name, c.symbol
+         FROM coins c
+         WHERE c.retired = FALSE
+            OR EXISTS (
+                 SELECT 1 FROM price_history ph
+                 WHERE ph.coin_id = c.coin_id AND ph.cycle_id = $1
+                   AND ph.created_at <= now()
+               )
+            OR EXISTS (
+                 SELECT 1 FROM price_history ph
+                 WHERE ph.coin_id = c.coin_id AND ph.cycle_id IS NULL
+                   AND ph.created_at >= $2 AND ph.created_at < $3
+                   AND ph.created_at <= now()
+               )
+         ORDER BY c.coin_id ASC`,
+        [cycle.cycle_id, startTime.toISOString(), endTime.toISOString()]
+      );
+      coins = rows;
+    }
+
+    const coinIds = coins.map((coin) => coin.coin_id);
+
+    // Per-coin dataset totals over ALL matched rows (exact vs derived), so
+    // attribution describes the selected dataset even when the returned
+    // point sample is capped. One bounded GROUP BY scan — no N+1.
+    const totalsByCoin = new Map();
+    if (coinIds.length > 0) {
+      const { rows: totals } = await client.query(
+        `SELECT ph.coin_id,
+                count(*)::int AS total,
+                count(*) FILTER (WHERE ph.cycle_id = $1)::int AS exact_count
+         FROM price_history ph
+         WHERE ph.coin_id = ANY($4::int[])
+           AND ph.created_at <= now()
+           AND (
+             ph.cycle_id = $1
+             OR (ph.cycle_id IS NULL AND ph.created_at >= $2 AND ph.created_at < $3)
+           )
+         GROUP BY ph.coin_id`,
+        [cycle.cycle_id, startTime.toISOString(), endTime.toISOString(), coinIds]
+      );
+      for (const row of totals) {
+        totalsByCoin.set(row.coin_id, { total: row.total, exactCount: row.exact_count });
+      }
+    }
+
+    // The returned point sample: earliest rows first, capped per coin via a
+    // window function in ONE bounded query. `(ph.cycle_id = $1)` flags exact
+    // rows; rows tagged to other cycles are excluded by the WHERE clause.
+    const pointsByCoin = new Map();
+    if (coinIds.length > 0) {
+      const { rows: pointRows } = await client.query(
+        `SELECT coin_id, price, created_at, source, exact
+         FROM (
+           SELECT ph.coin_id, ph.price, ph.created_at, ph.source,
+                  (ph.cycle_id = $1) AS exact,
+                  ROW_NUMBER() OVER (
+                    PARTITION BY ph.coin_id
+                    ORDER BY ph.created_at ASC, ph.price_history_id ASC
+                  ) AS rn
+           FROM price_history ph
+           WHERE ph.coin_id = ANY($4::int[])
+             AND ph.created_at <= now()
+             AND (
+               ph.cycle_id = $1
+               OR (ph.cycle_id IS NULL AND ph.created_at >= $2 AND ph.created_at < $3)
+             )
+         ) sampled
+         WHERE rn <= $5
+         ORDER BY coin_id ASC, created_at ASC`,
+        [cycle.cycle_id, startTime.toISOString(), endTime.toISOString(), coinIds, MAX_MONITOR_POINTS_PER_COIN]
+      );
+      for (const row of pointRows) {
+        if (!pointsByCoin.has(row.coin_id)) {
+          pointsByCoin.set(row.coin_id, []);
+        }
+        pointsByCoin.get(row.coin_id).push({
+          time: new Date(row.created_at).toISOString(),
+          price: parseFloat(row.price),
+          // Legacy rows carry no provenance tag; null is the honest value.
+          source: row.source || null
+        });
+      }
+    }
+
+    const warnings = [];
+    let datasetExact = 0;
+    let datasetDerived = 0;
+
+    const coinsOut = coins.map((coin) => {
+      const totals = totalsByCoin.get(coin.coin_id) || { total: 0, exactCount: 0 };
+      const derivedCount = totals.total - totals.exactCount;
+      datasetExact += totals.exactCount;
+      datasetDerived += derivedCount;
+
+      const points = pointsByCoin.get(coin.coin_id) || [];
+      if (totals.total > points.length) {
+        warnings.push(
+          `Coin ${coin.coin_id} (${coin.symbol}) has ${totals.total} price rows in this cycle; ` +
+          `showing the earliest ${points.length} (cap ${MAX_MONITOR_POINTS_PER_COIN}).`
+        );
+      }
+
+      return {
+        coinId: coin.coin_id,
+        name: coin.name,
+        symbol: coin.symbol,
+        history: {
+          sampleCount: points.length,
+          firstObservedAt: points.length > 0 ? points[0].time : null,
+          lastObservedAt: points.length > 0 ? points[points.length - 1].time : null,
+          attribution: totals.total === 0 ? null : attributionFor(totals.exactCount, derivedCount),
+          points
+        }
+      };
+    });
+
+    if (datasetDerived > 0) {
+      warnings.push(
+        `${datasetDerived} price row(s) carry no cycle provenance (legacy rows); ` +
+        `attributed by time window [${startTime.toISOString()}, ${endTime.toISOString()}).`
+      );
+    }
+
+    const attribution = attributionFor(datasetExact, datasetDerived);
+
+    return {
+      cycle: {
+        cycleId: cycle.apocalypse_id,
+        status: cycle.status,
+        startTime: startTime.toISOString(),
+        endTime: endTime.toISOString(),
+        settlementStartedAt: cycle.settlement_started_at
+          ? new Date(cycle.settlement_started_at).toISOString()
+          : null,
+        settledAt: cycle.settled_at ? new Date(cycle.settled_at).toISOString() : null,
+        observedAt: observedAt.toISOString()
+      },
+      attribution,
+      exact: datasetDerived === 0,
+      coins: coinsOut,
+      warnings
+    };
+  });
+}
+
 module.exports = {
   DEFAULT_ACTIVITY_LIMIT,
   MAX_ACTIVITY_LIMIT,
   MAX_ACTIVITY_OFFSET,
+  MAX_MONITOR_POINTS_PER_COIN,
   GameDiagnosticsError,
   resolveActivityLimit,
   resolveActivityOffset,
   resolveActivityOrder,
+  resolveMonitorCoinId,
   getCycleDiagnosticsParticipants,
   getCycleDiagnosticsActivity,
-  getCycleDiagnosticsBots
+  getCycleDiagnosticsBots,
+  getCycleDiagnosticsMonitor
 };

@@ -47,3 +47,17 @@ exports.getDiagnosticsBots = async (req, res, next) => {
     handleDiagnosticsError(err, res, next);
   }
 };
+
+// Apocalypse Monitor Phase 2: restricted read-only raw price_history series
+// for one cycle, with exact (cycle_id) vs time-window-derived (legacy NULL
+// rows) attribution. Optional ?cycleId=APOC-NNNN and ?coinId=<positive int>.
+exports.getDiagnosticsMonitor = async (req, res, next) => {
+  try {
+    const data = await diagnosticsService.getCycleDiagnosticsMonitor(req.query.cycleId, {
+      coinId: req.query.coinId
+    });
+    res.status(200).json({ status: 'success', data });
+  } catch (err) {
+    handleDiagnosticsError(err, res, next);
+  }
+};

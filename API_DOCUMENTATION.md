@@ -221,9 +221,10 @@ Most endpoints require JWT authentication. Users must first register and then lo
 ## Crypto Chaos Operator Diagnostics (issue #21)
 
 Read-only diagnostics for one Apocalypse cycle (current or completed). All
-three routes are GET-only and run inside a PostgreSQL `BEGIN READ ONLY`
+four routes are GET-only and run inside a PostgreSQL `BEGIN READ ONLY`
 transaction — they cannot reconcile, settle, roll over or mutate any game
-state, and they never take the game advisory lock.
+state, and they never take the game advisory lock. Authenticated responses
+carry `Cache-Control: no-store` (live operator views are never cacheable).
 
 ### Access control
 
@@ -332,3 +333,53 @@ manual JSON parsing required):
 deliberate HOLD decisions separately. `rejected.total` counts domain
 rejections recorded in the tick ledger, with `rejected.byReason` breaking
 down their (already player-facing) GameRoundError messages.
+
+### GET /api/game/diagnostics/monitor
+
+Apocalypse Monitor Phase 2: the raw per-coin `price_history` series for one
+cycle, with honest provenance attribution. Query params: optional `cycleId`
+(same selection rules as above) and optional `coinId` (positive integer;
+400 invalid, 404 unknown coin).
+
+```json
+{
+  "status": "success",
+  "data": {
+    "cycle": {
+      "cycleId": "APOC-0007", "status": "ACTIVE",
+      "startTime": "…", "endTime": "…",
+      "settlementStartedAt": null, "settledAt": null,
+      "observedAt": "…"
+    },
+    "attribution": "exact",
+    "exact": true,
+    "coins": [
+      {
+        "coinId": 1, "name": "FutureCoin", "symbol": "FTR",
+        "history": {
+          "sampleCount": 60,
+          "firstObservedAt": "…", "lastObservedAt": "…",
+          "attribution": "exact",
+          "points": [{ "time": "…", "price": 10.5, "source": "MARKET_TICK" }]
+        }
+      }
+    ],
+    "warnings": []
+  }
+}
+```
+
+Attribution: rows carrying the selected cycle's provenance (migration 019)
+are matched by `price_history.cycle_id` only — never by timestamp. Legacy
+rows (`cycle_id IS NULL`, never backfilled) fall back to the half-open
+window `created_at >= startTime AND < endTime` and are marked derived.
+`data.attribution` is `exact` / `time_window_derived` / `mixed` over the
+whole selected dataset (mirrored per coin in `history.attribution`), and
+`exact` is false whenever any derived row is used; legacy points carry
+`source: null` and a warning discloses the derived count. Executed
+collapses appear only as `source: "COLLAPSE"` rows; the unexecuted collapse
+schedule is never read, and future-dated rows are never exposed. Retired
+coins are omitted by default unless they genuinely have selected-cycle
+exact rows or legacy rows in the window (an explicit `coinId` always works).
+Points are chronological and capped at 1000 per coin (truncation is
+disclosed in `warnings`). `observedAt` is the database clock at read time.
