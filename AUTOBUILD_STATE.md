@@ -6,8 +6,8 @@
 - **Current ticket:** SIM-03
 - **Status:** READY FOR WAVE 1 — Wave 0 implementation and review complete
 - **Current branch:** Backend `v2-legacy-cleanup-20260825`; frontend `gameplay-overhaul-20260830`
-- **Latest successful commit:** Backend `47b77699d8a46aa10a2ff36428d8df1f89a6be6c`; frontend `67b59a6a6eec138eaa874b4e567543bc2858aae3`
-- **Last pushed commit:** Backend remote branch `e4d869d40b1b3dfa75bf05bb4921df90b1a5188b`; frontend remote `f06b5a903b5a4fa6b7ea04385ce37f4059e829ef`
+- **Latest successful commit:** Backend `69553cf41a0ebd3698dff3b499c611c14c0ed3cd`; frontend `67b59a6a6eec138eaa874b4e567543bc2858aae3`
+- **Last pushed commit:** Backend `69553cf41a0ebd3698dff3b499c611c14c0ed3cd` on `v2-legacy-cleanup-20260825`; frontend remote `f06b5a903b5a4fa6b7ea04385ce37f4059e829ef`
 - **Last deployed commit:** Not checked
 - **Database migration status:** Not checked
 - **Review status:** Fresh strict review passed after correction; no significant unresolved findings
