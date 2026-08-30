@@ -31,6 +31,17 @@ const economyService = require('./economyService');
 // never reroll them.
 const coinEventEngine = require('./coinEventEngine');
 const marketPhaseEngine = require('./marketPhaseEngine');
+// Wave 2 (SIM-06/07): every cycle start (and every recovery of a
+// pre-existing live ACTIVE cycle) creates/advances the cycle's durable
+// market state — the deterministic market index, the monotonic persisted
+// peak, drawdown, recent momentum, the hidden lifecycle state, and the
+// per-cycle generated plateau target. Load order is safe: the engine never
+// requires this module at any level, exactly like the Wave 1 engines
+// above. It runs inside the same Core 1 advisory-locked transaction,
+// observes the persisted row, never rerolls the target, and never writes
+// coin prices. The live lifecycle state feeds new market-phase draws only;
+// persisted phase rows stay authoritative.
+const marketStateEngine = require('./marketStateEngine');
 
 // Default global apocalypse cycle length: 30 minutes.
 const DEFAULT_GAME_CYCLE_DURATION_MS = 30 * 60 * 1000;
@@ -185,7 +196,13 @@ async function ensureActiveCycle({ now, durationMs, generateSeed }) {
       // (rolling coverage: cycle creation cost does not scale with the
       // cycle length).
       await coinEventEngine.ensureCoinEventCoverage(client, active, new Date(nowMs));
-      await marketPhaseEngine.ensureMarketPhaseCoverage(client, active, new Date(nowMs));
+      // Wave 2: open the cycle's durable market state atomically with the
+      // cycle start — the starting index from the canonical surviving coin
+      // state (prices were just restored to baseline above), the plateau
+      // target drawn once from the persisted seed. New phase draws record
+      // the (opening GROWTH) lifecycle state.
+      const openingState = await marketStateEngine.ensureMarketState(client, active, new Date(nowMs));
+      await marketPhaseEngine.ensureMarketPhaseCoverage(client, active, new Date(nowMs), { lifecycleState: openingState.lifecycle_state });
     } else {
       // Recovery path: a pre-existing active cycle gets its schedule created
       // if (and only if) it is missing. No baseline reset mid-cycle.
@@ -203,13 +220,24 @@ async function ensureActiveCycle({ now, durationMs, generateSeed }) {
       // market-phase chain to cover `now` — deterministic continuation,
       // observing persisted rows, never rerolling, never overlapping.
       await coinEventEngine.ensureCoinEventCoverage(client, active, new Date(nowMs));
-      await marketPhaseEngine.ensureMarketPhaseCoverage(client, active, new Date(nowMs));
-      // While the cycle is live, reconcile its persisted due collapse rows.
-      // An expired cycle's collapses run at exactly cycle end during
-      // settlement, not here.
+      // While the cycle is live, reconcile its persisted due collapse rows,
+      // then advance the durable market state AFTER them so the market
+      // index reflects just-executed collapses (Wave 2). An expired
+      // cycle's collapses run at exactly cycle end during settlement, not
+      // here; an expired cycle's market state is no longer evaluated, but
+      // its persisted lifecycle state still informs any trailing draws.
+      let lifecycleState = 'GROWTH';
       if (new Date(active.end_time).getTime() > nowMs) {
         await collapseSchedule.executeDueCollapses(client, active.cycle_id, new Date(nowMs));
+        const marketState = await marketStateEngine.ensureMarketState(client, active, new Date(nowMs));
+        lifecycleState = marketState.lifecycle_state;
+      } else {
+        const persistedState = await marketStateEngine.getCycleMarketState(client, active.cycle_id);
+        if (persistedState) lifecycleState = persistedState.lifecycle_state;
       }
+      // Wave 2: the phase chain extends with the CURRENT hidden lifecycle
+      // state (SIM-07); persisted phase rows stay authoritative history.
+      await marketPhaseEngine.ensureMarketPhaseCoverage(client, active, new Date(nowMs), { lifecycleState });
     }
 
     await client.query('COMMIT');

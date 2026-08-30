@@ -256,10 +256,17 @@ describe('SIM-05: market phase persistence and recovery', () => {
     const afterSecond = await getCycleMarketPhases(db, cycle.cycle_id);
     expect(afterSecond.length).toBeGreaterThanOrEqual(afterFirst.length);
     expect(afterSecond.slice(0, afterFirst.length)).toEqual(afterFirst);
-    const pure = buildPhaseChain({
-      seed: SEED, startTime: new Date(startMs), endTime: new Date(endMs), lifecycleState: 'GROWTH'
-    });
-    expect(canonical(afterSecond)).toEqual(canonicalPure(pure));
+    // Wave 2 (SIM-07): new draws record the CURRENT hidden lifecycle state
+    // (the opening rows are GROWTH; a late reconcile may have advanced).
+    // Every persisted row must equal the deterministic draw for ITS OWN
+    // recorded lifecycle input, and the chain stays contiguous.
+    expect(afterSecond[0].lifecycle_state).toBe('GROWTH');
+    for (const row of afterSecond) {
+      const drawn = drawPhaseAt({ seed: SEED, phaseSeq: Number(row.phase_seq), lifecycleState: row.lifecycle_state });
+      expect(row.phase).toBe(drawn.phase);
+      expect(parseFloat(row.modifier)).toBe(drawn.modifier);
+      expect(new Date(row.ends_at).getTime() - new Date(row.starts_at).getTime()).toBe(drawn.durationMs);
+    }
     const currentLate = await getCurrentMarketPhase(db, cycle.cycle_id, new Date('2026-08-20T10:29:00.000Z'));
     expect(currentLate).not.toBeNull();
     // One primary phase at every sampled instant of the live cycle.

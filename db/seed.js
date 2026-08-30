@@ -35,6 +35,7 @@ const seed = async (shouldEnd = false) => {
       DROP TABLE IF EXISTS "apocalypse_economy_ticks" CASCADE;
       DROP TABLE IF EXISTS "apocalypse_coin_events" CASCADE;
       DROP TABLE IF EXISTS "apocalypse_market_phases" CASCADE;
+      DROP TABLE IF EXISTS "apocalypse_market_state" CASCADE;
       DROP TABLE IF EXISTS "apocalypse_transactions" CASCADE;
       DROP TABLE IF EXISTS "apocalypse_holdings" CASCADE;
       DROP TABLE IF EXISTS "apocalypse_participants" CASCADE;
@@ -277,6 +278,16 @@ const seed = async (shouldEnd = false) => {
       'utf8'
     );
     await db.query(coinEventsPhasesMigration);
+
+    console.log('📦 Applying market-state migration (db/migrations/021_create_market_state.sql)...');
+    // Wave 2 (SIM-06/07) durable per-cycle market state (index, monotonic
+    // peak, drawdown, momentum, hidden lifecycle state, generated plateau
+    // target) DDL, sourced from the production migration only.
+    const marketStateMigration = require('fs').readFileSync(
+      require('path').join(__dirname, 'migrations', '021_create_market_state.sql'),
+      'utf8'
+    );
+    await db.query(marketStateMigration);
 
     console.log('📦 Inserting coins data...');
     // Insert coins data

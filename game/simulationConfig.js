@@ -23,7 +23,8 @@
 // Wave 0 scope note: added unwired; adding this module alone changed no
 // existing behaviour. Wave 1 (SIM-03/04/05) wires the coinEvents and
 // marketPhases sections into game/coinEventEngine.js and
-// game/marketPhaseEngine.js; the lifecycle/crashRally/tradingPressure/
+// game/marketPhaseEngine.js; Wave 2 (SIM-06/07) wires the lifecycle section
+// into game/marketStateEngine.js; the crashRally/tradingPressure/
 // dynamicCollapse sections remain unwired until their own waves.
 //
 // All fractions (modifiers, probabilities, magnitudes) are plain numbers:
@@ -149,6 +150,16 @@ const DEFAULT_SIMULATION_CONFIG = {
     // Plateau oscillation band around the target (spec §11: fluctuation
     // around the top, not a flat line). Fraction in (0, 1).
     plateauTolerance: 0.10,
+    // Late-cycle safety guards (fractions of elapsed cycle time, strictly
+    // ascending, each in (0, 1)). Transitions are primarily driven by
+    // actual market behaviour — plateau by reaching the generated peak
+    // region, decline by confirmed weakening, collapse by severe drawdown —
+    // so a guard may only FORCE a transition the market failed to produce,
+    // never delay one (build plan Stage 5: "Time may be used as a
+    // safety/guard condition, but should not be the only trigger").
+    plateauEntryProgressGuard: 0.55,
+    declineEntryProgressGuard: 0.70,
+    collapseEntryProgressGuard: 0.95,
     // Macro pressure during Decline (spec §12 example: market support
     // +0.3% no longer offsets the coin drain). Signed; must be below the
     // growth support.
@@ -413,6 +424,7 @@ function validateMarketPhases(name, marketPhases) {
 function validateLifecycle(name, lifecycle) {
   requireExactKeys(name, lifecycle, [
     'growthSupportModifier', 'plateauTargetMultiplier', 'plateauTolerance',
+    'plateauEntryProgressGuard', 'declineEntryProgressGuard', 'collapseEntryProgressGuard',
     'declinePressureModifier', 'drawdownThresholds', 'collapsePressureModifier'
   ]);
 
@@ -429,6 +441,25 @@ function validateLifecycle(name, lifecycle) {
   requireFiniteNumber(`${name}.plateauTolerance`, lifecycle.plateauTolerance);
   if (lifecycle.plateauTolerance <= 0 || lifecycle.plateauTolerance >= 1) {
     failConfig(`${name}.plateauTolerance must be a fraction in (0, 1); received ${lifecycle.plateauTolerance}`);
+  }
+
+  // Late-cycle safety guards: fractions of elapsed cycle time in (0, 1),
+  // strictly ascending in lifecycle order. A guard out of order could force
+  // collapse before decline, breaking the legal transition order.
+  const guards = [
+    ['plateauEntryProgressGuard', lifecycle.plateauEntryProgressGuard],
+    ['declineEntryProgressGuard', lifecycle.declineEntryProgressGuard],
+    ['collapseEntryProgressGuard', lifecycle.collapseEntryProgressGuard]
+  ];
+  for (const [key, value] of guards) {
+    requireFiniteNumber(`${name}.${key}`, value);
+    if (value <= 0 || value >= 1) {
+      failConfig(`${name}.${key} must be a fraction in (0, 1); received ${value}`);
+    }
+  }
+  if (!(lifecycle.plateauEntryProgressGuard < lifecycle.declineEntryProgressGuard
+      && lifecycle.declineEntryProgressGuard < lifecycle.collapseEntryProgressGuard)) {
+    failConfig(`${name} progress guards must be strictly ascending (plateau < decline < collapse); received ${lifecycle.plateauEntryProgressGuard}, ${lifecycle.declineEntryProgressGuard}, ${lifecycle.collapseEntryProgressGuard}`);
   }
 
   requireFiniteNumber(`${name}.declinePressureModifier`, lifecycle.declinePressureModifier);

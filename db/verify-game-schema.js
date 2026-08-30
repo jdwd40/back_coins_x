@@ -48,6 +48,11 @@
 //     CHECK constraints, lookup index, and live-data invariants: positive
 //     windows, phase/modifier sign consistency, no overlapping primary
 //     phases within a cycle).
+//   * Wave 2 (SIM-06/07): apocalypse_market_state (columns, PK, FK, UNIQUE
+//     one-row-per-cycle identity, CHECK constraints — lifecycle vocabulary,
+//     non-negative index values, monotonic peak, drawdown in [0, 1],
+//     momentum >= -1, plateau target at/above the starting index — and
+//     live-data invariants for the same rules).
 //
 // Exits non-zero with an explicit problem list on any mismatch.
 //
@@ -1386,6 +1391,79 @@ async function verifyCoinEventsAndMarketPhases(q, problems) {
   }
 }
 
+// --- Wave 2 (SIM-06/07): durable per-cycle market state -------------------
+// apocalypse_market_state: exactly one row per cycle carrying the
+// deterministic market index, the monotonic peak and its timestamp, the
+// drawdown, the recent momentum, the hidden lifecycle state and the
+// per-cycle generated plateau target. Internal-only in Wave 2.
+
+const EXPECTED_MARKET_STATE_COLUMNS = [
+  ['state_id', 'integer', 'NO'],
+  ['cycle_id', 'integer', 'NO'],
+  ['starting_index', 'numeric', 'NO'],
+  ['current_index', 'numeric', 'NO'],
+  ['peak_index', 'numeric', 'NO'],
+  ['peak_at', 'timestamp with time zone', 'NO'],
+  ['drawdown', 'numeric', 'NO'],
+  ['momentum', 'numeric', 'NO'],
+  ['lifecycle_state', 'character varying', 'NO'],
+  ['plateau_target', 'numeric', 'NO'],
+  ['last_evaluated_at', 'timestamp with time zone', 'NO'],
+  ['created_at', 'timestamp with time zone', 'NO'],
+  ['updated_at', 'timestamp with time zone', 'NO']
+];
+
+async function verifyMarketState(q, problems) {
+  await verifyCore4Table(q, problems, 'apocalypse_market_state', 'state_id', EXPECTED_MARKET_STATE_COLUMNS, {
+    uniques: ['^UNIQUE \\(cycle_id\\)'],
+    fks: [{ target: 'apocalypse_cycles', pattern: '^FOREIGN KEY \\(cycle_id\\)' }],
+    checks: [
+      { label: "lifecycle_state IN ('GROWTH', 'PLATEAU', 'DECLINE', 'COLLAPSE')", pattern: 'GROWTH.*PLATEAU.*DECLINE.*COLLAPSE' },
+      { label: 'non-negative index values', pattern: 'starting_index >= \\(??0' },
+      { label: 'peak monotonicity (peak >= starting, peak >= current)', pattern: 'peak_index >= starting_index' },
+      { label: 'peak covers the current index', pattern: 'peak_index >= current_index' },
+      { label: 'drawdown in [0, 1]', pattern: 'drawdown >= \\(??0' },
+      { label: 'momentum bounded below at -1', pattern: "momentum >= .*'-1'" },
+      { label: 'plateau target never below the starting index', pattern: 'plateau_target >= starting_index' }
+    ],
+    nowDefaults: ['created_at', 'updated_at']
+  });
+
+  // Live-data invariants (only when the table exists AND carries the
+  // columns the invariants read — an incompatible stub table must produce
+  // shape problems above, not a crash here).
+  const reg = await q(`SELECT to_regclass('public.apocalypse_market_state') AS r`);
+  if (!reg.rows[0].r) return;
+  const cols = await q(
+    `SELECT count(*)::int AS n FROM information_schema.columns
+     WHERE table_schema = 'public' AND table_name = 'apocalypse_market_state'
+       AND column_name = ANY('{starting_index,current_index,peak_index,drawdown,momentum,lifecycle_state,plateau_target}')`
+  );
+  if (cols.rows[0].n !== 7) return;
+
+  // Every row is well-formed: non-negative finite-stored values, drawdown in
+  // [0, 1], momentum >= -1, monotonic peak, target at/above the start.
+  const badRows = await q(
+    `SELECT count(*)::int AS n FROM apocalypse_market_state
+     WHERE starting_index < 0 OR current_index < 0 OR peak_index < 0 OR plateau_target < 0
+        OR drawdown < 0 OR drawdown > 1
+        OR momentum < -1
+        OR peak_index < starting_index OR peak_index < current_index
+        OR plateau_target < starting_index`
+  );
+  if (badRows.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${badRows.rows[0].n} market-state rows with negative values, out-of-range drawdown/momentum, a non-monotonic peak, or a plateau target below the starting index`);
+
+  // One state row per cycle (the UNIQUE constraint enforces this; the check
+  // catches any historical anomaly).
+  const duplicates = await q(
+    `SELECT count(*)::int AS n FROM (
+       SELECT cycle_id FROM apocalypse_market_state
+       GROUP BY cycle_id HAVING count(*) > 1
+     ) d`
+  );
+  if (duplicates.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${duplicates.rows[0].n} cycles with more than one market-state row`);
+}
+
 async function verifyGameSchema({ query } = {}) {
   const q = query || ((...args) => db.query(...args));
   const problems = [];
@@ -1401,15 +1479,15 @@ async function verifyGameSchema({ query } = {}) {
   await verifyV2PricePrecision(q, problems);
   await verifyPriceHistoryProvenance(q, problems);
   await verifyCoinEventsAndMarketPhases(q, problems);
+  await verifyMarketState(q, problems);
 
   return { ok: problems.length === 0, problems };
 }
-
 if (require.main === module) {
   verifyGameSchema()
     .then(async ({ ok, problems }) => {
       if (ok) {
-        console.log('game schema verification PASSED (apocalypse_cycles [SETTLING lifecycle + settlement observability], coins.cycle_baseline_price, canonical coin catalogue [migrations 013 + 014 retirement], coin_collapse_schedule, apocalypse_participants, apocalypse_holdings, apocalypse_transactions, users.is_bot, apocalypse_bots, apocalypse_bot_ticks, apocalypse_cash_events, apocalypse_economy_ticks, apocalypse_economy_events, apocalypse_results [immutable], apocalypse_coin_events [0-5 active cap], apocalypse_market_phases [one primary phase])');
+        console.log('game schema verification PASSED (apocalypse_cycles [SETTLING lifecycle + settlement observability], coins.cycle_baseline_price, canonical coin catalogue [migrations 013 + 014 retirement], coin_collapse_schedule, apocalypse_participants, apocalypse_holdings, apocalypse_transactions, users.is_bot, apocalypse_bots, apocalypse_bot_ticks, apocalypse_cash_events, apocalypse_economy_ticks, apocalypse_economy_events, apocalypse_results [immutable], apocalypse_coin_events [0-5 active cap], apocalypse_market_phases [one primary phase], apocalypse_market_state [one row per cycle, monotonic peak])');
         await db.end();
         return;
       }
