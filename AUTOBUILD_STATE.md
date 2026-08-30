@@ -2,17 +2,17 @@
 
 ## Current Execution
 
-- **Current wave:** Wave 0 — Audit and Baseline (complete)
-- **Current ticket:** SIM-03
-- **Status:** READY FOR WAVE 1 — Wave 0 implementation and review complete
+- **Current wave:** Wave 1 — Coin Events and Market Phases (complete)
+- **Current ticket:** SIM-06
+- **Status:** READY FOR WAVE 2 — Wave 1 implementation, review, and gates complete
 - **Current branch:** Backend `v2-legacy-cleanup-20260825`; frontend `gameplay-overhaul-20260830`
-- **Latest successful commit:** Backend `69553cf41a0ebd3698dff3b499c611c14c0ed3cd`; frontend `67b59a6a6eec138eaa874b4e567543bc2858aae3`
-- **Last pushed commit:** Backend `69553cf41a0ebd3698dff3b499c611c14c0ed3cd` on `v2-legacy-cleanup-20260825`; frontend remote `f06b5a903b5a4fa6b7ea04385ce37f4059e829ef`
+- **Latest successful commit:** Backend `e0a80ac5134660a1ff41c9bacb20261be44f3c80`; frontend `67b59a6a6eec138eaa874b4e567543bc2858aae3`
+- **Last pushed commit:** Backend `e0a80ac5134660a1ff41c9bacb20261be44f3c80` on `v2-legacy-cleanup-20260825`; frontend remote `f06b5a903b5a4fa6b7ea04385ce37f4059e829ef`
 - **Last deployed commit:** Not checked
-- **Database migration status:** Not checked
-- **Review status:** Fresh strict review passed after correction; no significant unresolved findings
+- **Database migration status:** Local disposable test DB migration 020 applied and verified; production not checked or applied
+- **Review status:** Fresh strict Wave 1 review passed; migration index-shape finding fixed; no unresolved P0/P1 findings
 - **Blocking issue:** None
-- **Next action:** Commit/push the reviewed Wave 0 checkpoint, then read state and plan Wave 1 only.
+- **Next action:** Read state and plan Wave 2 only: SIM-06 market index/peak/drawdown, then SIM-07 hidden lifecycle.
 
 ## Startup Safety Check
 
@@ -31,8 +31,8 @@
 
 - **Baseline backend:** `npm test` — 80 suites passed, 1 suite failed; 759 tests passed, 1 failed due to the recorded 5-second timeout in `__tests__/game-public-state-no-seed.test.js`; total 760 tests. Treat as baseline unless changed/worsened by this overhaul.
 - **Baseline frontend:** `npm run test:ui` passed; `npm run test:unit` passed 216 tests; `npm run lint` passed with 0 errors and 6 existing warnings; `npm run build` passed with standard bundle-size/Browserslist warnings.
-- **Latest targeted tests:** `NODE_ENV=test npx jest __tests__/simulation-config.test.js --runInBand` — 38/38 passed; `node --check game/simulationConfig.js`; `node --check __tests__/simulation-config.test.js`; `git diff --check` passed.
-- **Latest full tests:** Backend `npm test` — 82 suites, 797 passed, 1 failed; the one failure is the same recorded 5-second timeout in `__tests__/game-public-state-no-seed.test.js`, with no change in the failing test or failure mode.
+- **Latest targeted tests:** Wave 1 focused suites — 6 suites, 103 tests passed; affected regression suites — 8 suites, 110 tests passed; changed-file Node syntax checks and `git diff --check` passed. ESLint is not configured in this backend (`npx eslint` installed ESLint 10 and stopped because no `eslint.config.*` exists); no source change was made for that tooling mismatch.
+- **Latest full tests:** Backend `npm test` — 87 suites, 862 passed, 1 failed; the one failure is the same recorded 5-second timeout in `__tests__/game-public-state-no-seed.test.js`, confirmed against the pre-Wave-1 baseline commit and unchanged in failure mode.
 
 ## Current Wave Audit Notes
 
@@ -41,19 +41,21 @@
 - Current scheduled collapse authority is `game/collapseScheduleService.js`, persisted in `coin_collapse_schedule`, reconciled by `game/gameCycleService.js` and settlement.
 - Current cycle authority/recovery is `game/gameCycleService.js`; bots use `game/botWorker.js`/`game/botService.js`; price history is written by the market writer and collapse executor; settlement uses `game/gameSettlementService.js`.
 - The current repository therefore requires an explicit migration design to avoid running a new dynamic collapse engine alongside the existing schedule.
-- Wave 0 implementation adds only the DB-free, deeply frozen `game/simulationConfig.js`, its 38-test focused suite, and the audit note; the live runtime remains unwired and behaviour is unchanged.
+- Wave 1 adds separate deterministic coin-event and market-phase engines, additive migration 020, disposable-schema wiring/verification, and Core 1 lifecycle integration. It does not alter the existing price writer, scheduled collapse authority, trade rules, portfolios, transaction history, price history, settlement, or public API shapes.
+- Coin events use rolling seeded persistence, 0–5 active-per-coin cap, 1–15 minute durations, separate flavour/name and signed modifier fields, expiry by timestamp, and no portfolio/trade/price-history coupling.
+- Market phases use all six required phase types, lifecycle-weighted deterministic selection with GROWTH wired until Wave 2, one contiguous persisted primary chain, and restart/idempotency coverage.
 - Strict review correction enforced negative bias strictly above 1, non-decreasing crash probability through the lifecycle, and both positive/negative phase groups remaining possible in every lifecycle state.
 
 ## Completed Tickets
 
 - SIM-01 Audit current authoritative market simulation
 - SIM-02 Centralise simulation configuration
-
-## Remaining Tickets
-
 - SIM-03 Implement coin event engine
 - SIM-04 Add coin event persistence/state recovery
 - SIM-05 Implement market phase engine
+
+## Remaining Tickets
+
 - SIM-06 Add market index and peak/drawdown tracking
 - SIM-07 Implement hidden lifecycle state machine
 - SIM-08 Integrate unified normal price calculation
