@@ -22,6 +22,15 @@ const gameRoundService = require('./gameRoundService');
 // pass/player-view entry points require it lazily), exactly like the
 // settlement chain above.
 const economyService = require('./economyService');
+// Wave 1 (SIM-03/04/05): every cycle start (and every recovery of a
+// pre-existing ACTIVE cycle) extends the cycle's deterministic coin-event
+// streams and its persisted primary market-phase chain to cover `now`.
+// Load order is safe: neither engine requires this module at any
+// level, exactly like the economy chain above. Both run inside the same
+// Core 1 advisory-locked transaction; both observe persisted rows and
+// never reroll them.
+const coinEventEngine = require('./coinEventEngine');
+const marketPhaseEngine = require('./marketPhaseEngine');
 
 // Default global apocalypse cycle length: 30 minutes.
 const DEFAULT_GAME_CYCLE_DURATION_MS = 30 * 60 * 1000;
@@ -169,6 +178,14 @@ async function ensureActiveCycle({ now, durationMs, generateSeed }) {
       // schedule atomically with the cycle start — derived from the cycle's
       // persisted seed, so restarts observe it and never reroll it.
       await economyService.ensureCycleEconomy(client, active);
+      // Wave 1: persist this cycle's coin-event streams and the start of
+      // its primary market-phase chain atomically with the cycle start —
+      // both derived from the cycle's persisted seed, so restarts observe
+      // them and never reroll them. Coin events extend only up to `now`
+      // (rolling coverage: cycle creation cost does not scale with the
+      // cycle length).
+      await coinEventEngine.ensureCoinEventCoverage(client, active, new Date(nowMs));
+      await marketPhaseEngine.ensureMarketPhaseCoverage(client, active, new Date(nowMs));
     } else {
       // Recovery path: a pre-existing active cycle gets its schedule created
       // if (and only if) it is missing. No baseline reset mid-cycle.
@@ -182,6 +199,11 @@ async function ensureActiveCycle({ now, durationMs, generateSeed }) {
       // covers cycles created before the economy engine shipped. ON
       // CONFLICT DO NOTHING: the persisted schedule is never rerolled.
       await economyService.ensureCycleEconomy(client, active);
+      // Wave 1: extend the live cycle's coin-event streams and primary
+      // market-phase chain to cover `now` — deterministic continuation,
+      // observing persisted rows, never rerolling, never overlapping.
+      await coinEventEngine.ensureCoinEventCoverage(client, active, new Date(nowMs));
+      await marketPhaseEngine.ensureMarketPhaseCoverage(client, active, new Date(nowMs));
       // While the cycle is live, reconcile its persisted due collapse rows.
       // An expired cycle's collapses run at exactly cycle end during
       // settlement, not here.

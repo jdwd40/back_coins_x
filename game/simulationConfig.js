@@ -20,9 +20,11 @@
 //   * The resolved config is deeply frozen: tuning must be changed here (or
 //     via an explicit override object), never mutated at runtime.
 //
-// Wave 0 scope note: nothing in the live runtime requires this module yet.
-// Later waves (SIM-03 onwards) wire these values into the engines; until
-// then adding this module changes no existing behaviour.
+// Wave 0 scope note: added unwired; adding this module alone changed no
+// existing behaviour. Wave 1 (SIM-03/04/05) wires the coinEvents and
+// marketPhases sections into game/coinEventEngine.js and
+// game/marketPhaseEngine.js; the lifecycle/crashRally/tradingPressure/
+// dynamicCollapse sections remain unwired until their own waves.
 //
 // All fractions (modifiers, probabilities, magnitudes) are plain numbers:
 // 0.02 means 2%. Durations are integer milliseconds.
@@ -78,6 +80,11 @@ const DEFAULT_SIMULATION_CONFIG = {
     durationMs: { min: 1 * MINUTE_MS, max: 15 * MINUTE_MS },
     // Up to 5 active events per coin simultaneously.
     maxActivePerCoin: 5,
+    // Per-coin event arrival spacing (SIM-03): the gap between consecutive
+    // event start draws on a coin's seeded stream. Overlapping arrivals are
+    // what allow several events to be active at once (bounded by
+    // maxActivePerCoin); longer gaps mean quieter coins.
+    arrivalGapMs: { min: 30 * 1000, max: 4 * MINUTE_MS },
     // Direction selection weights (normalised). The long-term negative
     // expectation comes from strength/bias, not from more negative events.
     directionWeights: { positive: 0.5, negative: 0.5 },
@@ -307,7 +314,7 @@ function requireNormalisedWeights(name, weights, expectedKeys) {
 
 function validateCoinEvents(name, coinEvents) {
   requireExactKeys(name, coinEvents, [
-    'durationMs', 'maxActivePerCoin', 'directionWeights', 'strengthRanges',
+    'durationMs', 'maxActivePerCoin', 'arrivalGapMs', 'directionWeights', 'strengthRanges',
     'strengthProbabilities', 'maxStackedModifier', 'negativeBiasFactor'
   ]);
 
@@ -316,6 +323,10 @@ function validateCoinEvents(name, coinEvents) {
   requirePositiveInteger(`${name}.durationMs.max`, duration.max);
 
   requirePositiveInteger(`${name}.maxActivePerCoin`, coinEvents.maxActivePerCoin);
+
+  const arrivalGap = requireRange(`${name}.arrivalGapMs`, coinEvents.arrivalGapMs);
+  requirePositiveInteger(`${name}.arrivalGapMs.min`, arrivalGap.min);
+  requirePositiveInteger(`${name}.arrivalGapMs.max`, arrivalGap.max);
 
   requireNormalisedWeights(`${name}.directionWeights`, coinEvents.directionWeights, ['positive', 'negative']);
 

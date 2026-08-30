@@ -33,6 +33,8 @@ const seed = async (shouldEnd = false) => {
       DROP TABLE IF EXISTS "apocalypse_cash_events" CASCADE;
       DROP TABLE IF EXISTS "apocalypse_economy_events" CASCADE;
       DROP TABLE IF EXISTS "apocalypse_economy_ticks" CASCADE;
+      DROP TABLE IF EXISTS "apocalypse_coin_events" CASCADE;
+      DROP TABLE IF EXISTS "apocalypse_market_phases" CASCADE;
       DROP TABLE IF EXISTS "apocalypse_transactions" CASCADE;
       DROP TABLE IF EXISTS "apocalypse_holdings" CASCADE;
       DROP TABLE IF EXISTS "apocalypse_participants" CASCADE;
@@ -266,6 +268,15 @@ const seed = async (shouldEnd = false) => {
       'utf8'
     );
     await db.query(priceHistoryProvenanceMigration);
+
+    console.log('📦 Applying coin-events/market-phases migration (db/migrations/020_create_coin_events_and_market_phases.sql)...');
+    // Wave 1 (SIM-03/04/05) cycle-scoped coin-event schedule and
+    // market-phase chain DDL, sourced from the production migration only.
+    const coinEventsPhasesMigration = require('fs').readFileSync(
+      require('path').join(__dirname, 'migrations', '020_create_coin_events_and_market_phases.sql'),
+      'utf8'
+    );
+    await db.query(coinEventsPhasesMigration);
 
     console.log('📦 Inserting coins data...');
     // Insert coins data

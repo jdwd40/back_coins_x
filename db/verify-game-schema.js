@@ -40,12 +40,21 @@
 //     (monetary precision, net_profit identity, rank/count consistency), the
 //     immutability triggers, and live-data invariants (results only on
 //     COMPLETED cycles, gapless 1..N ranks, settled-cycle completeness).
+//   * Wave 1 (SIM-03/04/05): apocalypse_coin_events (columns, PK, FKs,
+//     UNIQUE identity, CHECK constraints, lookup index, and live-data
+//     invariants: positive windows, direction/modifier sign consistency,
+//     the configured 0-5 active-per-coin overlap cap) and
+//     apocalypse_market_phases (columns, PK, FK, UNIQUE chain identity,
+//     CHECK constraints, lookup index, and live-data invariants: positive
+//     windows, phase/modifier sign consistency, no overlapping primary
+//     phases within a cycle).
 //
 // Exits non-zero with an explicit problem list on any mismatch.
 //
 // Usage: node db/verify-game-schema.js   (uses db/connection env configuration)
 
 const db = require('./connection');
+const { resolveSimulationConfig } = require('../game/simulationConfig');
 
 const EXPECTED_COLUMNS = [
   ['cycle_id', 'integer', 'NO'],
@@ -1233,6 +1242,150 @@ async function verifyPriceHistoryProvenance(q, problems) {
   if (badCollapse.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${badCollapse.rows[0].n} COLLAPSE price_history rows with non-zero price`);
 }
 
+// --- Wave 1 (SIM-03/04/05): cycle-scoped coin events + market phases ------
+// apocalypse_coin_events: the persisted deterministic per-coin event
+// schedule (0-5 active per coin, seeded from the cycle's Core 1 seed, never
+// rerolled; expiry is purely time-based and rows are immutable).
+// apocalypse_market_phases: the persisted primary market-phase chain —
+// exactly one phase covers any instant (contiguous chain, one row per
+// (cycle_id, phase_seq)). Both tables are internal-only in Wave 1.
+
+const EXPECTED_COIN_EVENT_COLUMNS = [
+  ['event_id', 'integer', 'NO'],
+  ['cycle_id', 'integer', 'NO'],
+  ['coin_id', 'integer', 'NO'],
+  ['event_seq', 'integer', 'NO'],
+  ['name', 'character varying', 'NO'],
+  ['direction', 'character varying', 'NO'],
+  ['strength_category', 'character varying', 'NO'],
+  ['modifier', 'numeric', 'NO'],
+  ['starts_at', 'timestamp with time zone', 'NO'],
+  ['ends_at', 'timestamp with time zone', 'NO'],
+  ['created_at', 'timestamp with time zone', 'NO']
+];
+
+const EXPECTED_MARKET_PHASE_COLUMNS = [
+  ['phase_id', 'integer', 'NO'],
+  ['cycle_id', 'integer', 'NO'],
+  ['phase_seq', 'integer', 'NO'],
+  ['phase', 'character varying', 'NO'],
+  ['lifecycle_state', 'character varying', 'NO'],
+  ['modifier', 'numeric', 'NO'],
+  ['starts_at', 'timestamp with time zone', 'NO'],
+  ['ends_at', 'timestamp with time zone', 'NO'],
+  ['created_at', 'timestamp with time zone', 'NO']
+];
+
+async function verifyCoinEventsAndMarketPhases(q, problems) {
+  await verifyCore4Table(q, problems, 'apocalypse_coin_events', 'event_id', EXPECTED_COIN_EVENT_COLUMNS, {
+    uniques: ['^UNIQUE \\(cycle_id, coin_id, event_seq\\)'],
+    fks: [
+      { target: 'apocalypse_cycles', pattern: '^FOREIGN KEY \\(cycle_id\\)' },
+      { target: 'coins', pattern: '^FOREIGN KEY \\(coin_id\\)' }
+    ],
+    checks: [
+      { label: "direction IN ('POSITIVE', 'NEGATIVE')", pattern: 'direction.*POSITIVE.*NEGATIVE' },
+      { label: "strength_category IN ('MINOR', 'MODERATE', 'MAJOR', 'EXTREME')", pattern: 'MINOR.*MODERATE.*MAJOR.*EXTREME' },
+      { label: 'event_seq >= 1', pattern: 'event_seq >= \\(??1' },
+      { label: 'ends_at > starts_at', pattern: 'ends_at > starts_at' },
+      { label: 'modifier sign matches direction', pattern: 'POSITIVE.*modifier' }
+    ],
+    nowDefaults: ['created_at']
+  });
+
+  await verifyCore4Table(q, problems, 'apocalypse_market_phases', 'phase_id', EXPECTED_MARKET_PHASE_COLUMNS, {
+    uniques: ['^UNIQUE \\(cycle_id, phase_seq\\)'],
+    fks: [{ target: 'apocalypse_cycles', pattern: '^FOREIGN KEY \\(cycle_id\\)' }],
+    checks: [
+      { label: "phase IN ('GOLDEN_AGE', 'BOOM', 'BULL', 'BEAR', 'BUST', 'RECESSION')", pattern: 'GOLDEN_AGE.*BOOM.*BULL.*BEAR.*BUST.*RECESSION' },
+      { label: "lifecycle_state IN ('GROWTH', 'PLATEAU', 'DECLINE', 'COLLAPSE')", pattern: 'GROWTH.*PLATEAU.*DECLINE.*COLLAPSE' },
+      { label: 'phase_seq >= 1', pattern: 'phase_seq >= \\(??1' },
+      { label: 'ends_at > starts_at', pattern: 'ends_at > starts_at' },
+      { label: 'modifier sign matches phase group', pattern: 'GOLDEN_AGE.*modifier' }
+    ],
+    nowDefaults: ['created_at']
+  });
+
+  // Lookup indexes.
+  for (const { name, table } of [
+    { name: 'idx_apocalypse_coin_events_active', table: 'apocalypse_coin_events' },
+    { name: 'idx_apocalypse_market_phases_active', table: 'apocalypse_market_phases' }
+  ]) {
+    const idx = await q(
+      `SELECT 1 FROM pg_class c
+       JOIN pg_index i ON i.indexrelid = c.oid
+       WHERE c.relname = '${name}' AND i.indrelid = to_regclass('public.${table}')`
+    );
+    if (idx.rowCount === 0) problems.push(`missing index ${name}`);
+  }
+
+  // Live-data invariants (only when the tables exist AND carry the columns
+  // the invariants read — an incompatible stub table must produce shape
+  // problems above, not a crash here).
+  const tables = await q(
+    `SELECT to_regclass('public.apocalypse_coin_events') AS ce,
+            to_regclass('public.apocalypse_market_phases') AS mp`
+  );
+  const hasColumns = async (table, names) => {
+    const { rows } = await q(
+      `SELECT count(*)::int AS n FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = '${table}'
+         AND column_name = ANY('{${names.join(',')}}')`
+    );
+    return rows[0].n === names.length;
+  };
+
+  if (tables.rows[0].ce && await hasColumns('apocalypse_coin_events', ['event_id', 'cycle_id', 'coin_id', 'direction', 'modifier', 'starts_at', 'ends_at'])) {
+    // Every event is well-formed: positive window, sign matching direction.
+    const badEvents = await q(
+      `SELECT count(*)::int AS n FROM apocalypse_coin_events
+       WHERE ends_at <= starts_at
+          OR (direction = 'POSITIVE' AND modifier <= 0)
+          OR (direction = 'NEGATIVE' AND modifier >= 0)`
+    );
+    if (badEvents.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${badEvents.rows[0].n} coin events with inverted window or direction/modifier sign mismatch`);
+
+    // The 0-5 active-per-coin cap: no instant may have more than the
+    // configured maximum concurrent events for one coin. Concurrency only
+    // changes at event boundaries, so measuring at each event's starts_at
+    // is exact.
+    const cap = resolveSimulationConfig().coinEvents.maxActivePerCoin;
+    const overCap = await q(
+      `SELECT count(*)::int AS n FROM (
+         SELECT e1.event_id
+         FROM apocalypse_coin_events e1
+         JOIN apocalypse_coin_events e2
+           ON e2.cycle_id = e1.cycle_id AND e2.coin_id = e1.coin_id
+          AND e2.starts_at <= e1.starts_at AND e2.ends_at > e1.starts_at
+         GROUP BY e1.event_id
+         HAVING count(*) > ${cap}
+       ) d`
+    );
+    if (overCap.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${overCap.rows[0].n} coin events overlap more than the configured ${cap}-event active cap`);
+  }
+
+  if (tables.rows[0].mp && await hasColumns('apocalypse_market_phases', ['phase_id', 'cycle_id', 'phase_seq', 'phase', 'modifier', 'starts_at', 'ends_at'])) {
+    // Every phase row is well-formed: positive window, sign matching group.
+    const badPhases = await q(
+      `SELECT count(*)::int AS n FROM apocalypse_market_phases
+       WHERE ends_at <= starts_at
+          OR (phase IN ('GOLDEN_AGE', 'BOOM', 'BULL') AND modifier <= 0)
+          OR (phase IN ('BEAR', 'BUST', 'RECESSION') AND modifier >= 0)`
+    );
+    if (badPhases.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${badPhases.rows[0].n} market phases with inverted window or phase/modifier sign mismatch`);
+
+    // One-primary invariant: two phases of the same cycle may never
+    // overlap in time.
+    const overlaps = await q(
+      `SELECT count(*)::int AS n FROM apocalypse_market_phases a
+       JOIN apocalypse_market_phases b
+         ON b.cycle_id = a.cycle_id AND a.phase_id < b.phase_id
+        AND a.starts_at < b.ends_at AND b.starts_at < a.ends_at`
+    );
+    if (overlaps.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${overlaps.rows[0].n} overlapping market-phase pairs (one primary phase per cycle at a time)`);
+  }
+}
+
 async function verifyGameSchema({ query } = {}) {
   const q = query || ((...args) => db.query(...args));
   const problems = [];
@@ -1247,6 +1400,7 @@ async function verifyGameSchema({ query } = {}) {
   await verifyResults(q, problems);
   await verifyV2PricePrecision(q, problems);
   await verifyPriceHistoryProvenance(q, problems);
+  await verifyCoinEventsAndMarketPhases(q, problems);
 
   return { ok: problems.length === 0, problems };
 }
@@ -1255,7 +1409,7 @@ if (require.main === module) {
   verifyGameSchema()
     .then(async ({ ok, problems }) => {
       if (ok) {
-        console.log('game schema verification PASSED (apocalypse_cycles [SETTLING lifecycle + settlement observability], coins.cycle_baseline_price, canonical coin catalogue [migrations 013 + 014 retirement], coin_collapse_schedule, apocalypse_participants, apocalypse_holdings, apocalypse_transactions, users.is_bot, apocalypse_bots, apocalypse_bot_ticks, apocalypse_cash_events, apocalypse_economy_ticks, apocalypse_economy_events, apocalypse_results [immutable])');
+        console.log('game schema verification PASSED (apocalypse_cycles [SETTLING lifecycle + settlement observability], coins.cycle_baseline_price, canonical coin catalogue [migrations 013 + 014 retirement], coin_collapse_schedule, apocalypse_participants, apocalypse_holdings, apocalypse_transactions, users.is_bot, apocalypse_bots, apocalypse_bot_ticks, apocalypse_cash_events, apocalypse_economy_ticks, apocalypse_economy_events, apocalypse_results [immutable], apocalypse_coin_events [0-5 active cap], apocalypse_market_phases [one primary phase])');
         await db.end();
         return;
       }

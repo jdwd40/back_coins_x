@@ -47,6 +47,7 @@ describe('simulation config defaults', () => {
     const { coinEvents } = DEFAULT_SIMULATION_CONFIG;
     expect(coinEvents.durationMs).toEqual({ min: 60 * 1000, max: 15 * 60 * 1000 });
     expect(coinEvents.maxActivePerCoin).toBe(5);
+    expect(coinEvents.arrivalGapMs).toEqual({ min: 30 * 1000, max: 4 * 60 * 1000 });
     expect(coinEvents.maxStackedModifier).toBe(0.06);
     expect(coinEvents.negativeBiasFactor).toBeGreaterThanOrEqual(1.2);
     expect(coinEvents.negativeBiasFactor).toBeLessThanOrEqual(1.3);
@@ -86,6 +87,20 @@ describe('simulation config boundary validation', () => {
     const config = freshConfig();
     config.coinEvents.durationMs = { min: 900000, max: 60000 };
     expect(() => validateSimulationConfig(config)).toThrow(/min < max/);
+  });
+
+  test('rejects a broken arrival-gap range (SIM-03 event spacing knob)', () => {
+    const inverted = freshConfig();
+    inverted.coinEvents.arrivalGapMs = { min: 240000, max: 30000 };
+    expect(() => validateSimulationConfig(inverted)).toThrow(/min < max/);
+
+    const fractional = freshConfig();
+    fractional.coinEvents.arrivalGapMs = { min: 30000.5, max: 240000 };
+    expect(() => validateSimulationConfig(fractional)).toThrow(/positive integer/);
+
+    expect(() => resolveSimulationConfig({
+      coinEvents: { arrivalGapMs: { min: 0, max: 240000 } }
+    })).toThrow(/positive integer/);
   });
 
   test('rejects non-integer or non-positive durations', () => {
