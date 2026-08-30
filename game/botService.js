@@ -74,6 +74,8 @@ const marketDomain = require('./marketDomain');
 const collapseRiskDomain = require('./collapseRiskDomain');
 const powerDomain = require('./powerDomain');
 const { getApocalypseVolatility } = require('./apocalypseVolatility');
+const { computeLiveCoinSignal } = require('./marketSignalsService');
+const { loadPricingContext } = require('./pricingContext');
 
 // How many recent price points each coin carries in the shaped public state.
 // A fixed game-design constant — deliberately not configurable.
@@ -248,6 +250,12 @@ async function buildPublicMarketState({ cycle, participant, now = new Date(), qu
   });
   const amplitude = getApocalypseVolatility(apocalypsePercent);
   const roundStartMs = new Date(cycle.start_time).getTime();
+  const cycleDurationMs = Number(cycle.duration_ms);
+
+  // SIM-08: the persisted Wave 1/2 pricing context for the shared unified
+  // signal, read through the caller's queryable (same transaction snapshot
+  // when inside the advisory-locked bot tick). Internal only.
+  const pricingContext = await loadPricingContext(queryable, cycle);
 
   const { rows: coinRows } = await queryable.query(
     `SELECT c.coin_id, c.symbol, c.current_price, c.cycle_baseline_price,
@@ -294,30 +302,27 @@ async function buildPublicMarketState({ cycle, participant, now = new Date(), qu
       });
       continue;
     }
-    // The SAME shared public-signal domains the human-facing endpoint uses.
-    // The seed never leaves this function; only the coarse signal survives.
-    const signal = marketDomain.getPublicCoinSignal({
+    // The SAME shared public signal the human-facing market-signals
+    // endpoint publishes for this instant (SIM-08: unified price path via
+    // marketSignalsService.computeLiveCoinSignal — parity enforced by
+    // v2-bot-signals.test.js). The seed never leaves this function; only
+    // the coarse signal survives.
+    const signal = computeLiveCoinSignal({
       seed: cycle.seed,
-      coinId: row.coin_id,
-      baselinePrice: parseFloat(row.cycle_baseline_price),
-      roundStartMs,
+      coin: row,
       nowMs,
-      amplitude
+      amplitude,
+      apocalypsePercent,
+      roundStartMs,
+      cycleDurationMs,
+      pricingContext
     });
     coins.push({
       ...base,
       phase: signal.phase,
       momentum: signal.momentum,
       archetype: signal.archetype,
-      collapseRisk: collapseRiskDomain.getCollapseRisk({
-        seed: cycle.seed,
-        coinId: row.coin_id,
-        apocalypsePercent,
-        phase: signal.phase,
-        momentum: signal.momentum,
-        recentChangePct: signal.recentChangePct,
-        nowMs
-      }),
+      collapseRisk: signal.collapseRisk,
       recentChangePct: signal.recentChangePct
     });
   }

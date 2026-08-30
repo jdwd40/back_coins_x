@@ -24,8 +24,10 @@
 // existing behaviour. Wave 1 (SIM-03/04/05) wires the coinEvents and
 // marketPhases sections into game/coinEventEngine.js and
 // game/marketPhaseEngine.js; Wave 2 (SIM-06/07) wires the lifecycle section
-// into game/marketStateEngine.js; the crashRally/tradingPressure/
-// dynamicCollapse sections remain unwired until their own waves.
+// into game/marketStateEngine.js; Wave 3 (SIM-08/09/10) wires the
+// crashRally and lifecycle pressure sections into the unified price path
+// (game/priceEngine.js); the tradingPressure/dynamicCollapse sections
+// remain unwired until Wave 4.
 //
 // All fractions (modifiers, probabilities, magnitudes) are plain numbers:
 // 0.02 means 2%. Durations are integer milliseconds.
@@ -177,6 +179,20 @@ const DEFAULT_SIMULATION_CONFIG = {
   // gameplay_changes.md §14-19 / build plan Stages 7-8: crashes and rallies.
   // Crashes/rallies are distinct simulation states, NOT ordinary coin events.
   crashRally: {
+    // Candidate crash-episode timing (SIM-09). Each coin walks a seeded
+    // chain of candidate episodes: the next candidate starts episodeGapMs
+    // after the previous candidate's full window (crash + rally durations)
+    // ended. A candidate ACTIVATES only when its seeded activation roll
+    // clears the current lifecycle state's crashProbability — the chain
+    // itself is drawn regardless of activation, so it is stable and pure.
+    // The per-candidate activation roll is the amortised form of the
+    // per-evaluation probability below (spec: crashes are uncommon early).
+    episodeGapMs: { min: 2 * MINUTE_MS, max: 6 * MINUTE_MS },
+    // A crash is a sudden large downward movement over a short period
+    // (spec §17): tens of seconds, not minutes.
+    crashDurationMs: { min: 30 * 1000, max: 90 * 1000 },
+    // The rally/recovery window following an activated crash.
+    rallyDurationMs: { min: 1 * MINUTE_MS, max: 4 * MINUTE_MS },
     // Base crash probability per evaluation, per lifecycle state. Crashes
     // are uncommon early and increasingly likely after the plateau.
     crashProbability: { GROWTH: 0.02, PLATEAU: 0.04, DECLINE: 0.08, COLLAPSE: 0.12 },
@@ -489,9 +505,17 @@ function validateLifecycle(name, lifecycle) {
 
 function validateCrashRally(name, crashRally) {
   requireExactKeys(name, crashRally, [
+    'episodeGapMs', 'crashDurationMs', 'rallyDurationMs',
     'crashProbability', 'crashMagnitude', 'rallyProbabilityAfterCrash',
     'recoveryStrength', 'lowerHighBias'
   ]);
+
+  // Episode timing ranges: positive integer millisecond ranges.
+  for (const key of ['episodeGapMs', 'crashDurationMs', 'rallyDurationMs']) {
+    const range = requireRange(`${name}.${key}`, crashRally[key]);
+    requirePositiveInteger(`${name}.${key}.min`, range.min);
+    requirePositiveInteger(`${name}.${key}.max`, range.max);
+  }
 
   requireExactKeys(`${name}.crashProbability`, crashRally.crashProbability, LIFECYCLE_STATE_IDS);
   for (const state of LIFECYCLE_STATE_IDS) {

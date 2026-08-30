@@ -2,14 +2,16 @@
 //
 // This class owns ONLY lifecycle (start/stop of the periodic write batch)
 // and persistence (coins + price_history + market_history, atomically, with
-// Core 4 peak reconciliation). All pricing mathematics live in the shared
-// gameplay domain (game/marketDomain.js) — the exact same functions the
-// headless simulator (simulation/) calls. There is no random walk, no
-// Math.random(), no in-memory volatility/event state: prices are a pure
-// function of the persisted apocalypse cycle (seed + window), each coin's
-// persisted cycle_baseline_price, its gameplay-roster archetype and
-// authoritative time, so restarts reproduce identical prices from the
-// database alone.
+// Core 4 peak reconciliation). All pricing mathematics live in the unified
+// price engine (game/priceEngine.js, SIM-08/09/10) — the exact same pure
+// calculation the headless simulator (simulation/) calls — composed over
+// the shared gameplay domain baseline (game/marketDomain.js). There is no
+// random walk, no Math.random(), no in-memory volatility/event state:
+// prices are a pure function of the persisted apocalypse cycle (seed +
+// window), each coin's persisted cycle_baseline_price, its gameplay-roster
+// archetype, the persisted Wave 1/2 phase/event/lifecycle authorities
+// (loaded per batch via game/pricingContext.js) and authoritative time, so
+// restarts reproduce identical prices from the database alone.
 //
 // Core 2: the apocalypse volatility factor is resolved ONCE per batch from
 // authoritative Core 1 progress and passed to the domain as the amplitude
@@ -25,6 +27,8 @@ const { getApocalypseVolatility } = require('../game/apocalypseVolatility');
 const collapseScheduleService = require('../game/collapseScheduleService');
 const gameRoundService = require('../game/gameRoundService');
 const marketDomain = require('../game/marketDomain');
+const priceEngine = require('../game/priceEngine');
+const { loadPricingContext } = require('../game/pricingContext');
 
 // Time range options for price history
 const TIME_RANGES = {
@@ -56,19 +60,24 @@ class MarketSimulator {
     this.lastBatch = null;
   }
 
-  // Price one live coin through the shared domain. Extracted as a method so
-  // a fundamentally invalid domain result can be guarded per coin and tests
-  // can observe the exact pricing calls of a batch.
+  // Price one live coin through the unified price engine (SIM-08): the
+  // shared pure calculation that the headless simulator also calls, fed by
+  // the persisted Wave 1/2 pricing context loaded for this batch. Extracted
+  // as a method so a fundamentally invalid domain result can be guarded per
+  // coin and tests can observe the exact pricing calls of a batch.
   calculateNewPrice(coin, marketContext) {
-    const point = marketDomain.evaluateMarketPoint({
+    return priceEngine.unifiedPriceAt({
       seed: marketContext.seed,
       coinId: coin.coin_id,
       baselinePrice: parseFloat(coin.cycle_baseline_price),
       roundStartMs: marketContext.roundStartMs,
       nowMs: marketContext.nowMs,
-      amplitude: marketContext.amplitude
+      amplitude: marketContext.amplitude,
+      lifecycleState: marketContext.pricingContext.lifecycleState,
+      cycleProgress: marketContext.cycleProgress,
+      phaseModifier: marketContext.pricingContext.phaseModifierAt(marketContext.nowMs),
+      eventModifier: marketContext.pricingContext.eventModifierFor(coin.coin_id, marketContext.nowMs)
     });
-    return marketDomain.roundGamePrice(point.price);
   }
 
   // Start the market writer
@@ -170,11 +179,20 @@ class MarketSimulator {
       // never held in memory — so collapsed coins are excluded.
       const collapsedCoinIds = await collapseScheduleService.getCollapsedCoinIds();
 
+      // SIM-08: the persisted Wave 1/2 pricing context (hidden lifecycle
+      // state, primary market phase chain, coin-event streams) for this
+      // batch, read from the same reconciled authorities the cycle service
+      // just extended. Internal only — never serialised publicly.
+      const pricingContext = await loadPricingContext(db, cycle);
+
       const marketContext = {
         seed: cycle.seed,
         roundStartMs: new Date(cycle.start_time).getTime(),
         nowMs: batchNowMs,
-        amplitude
+        amplitude,
+        pricingContext,
+        cycleProgress: Math.min(1, Math.max(0, apocalypsePercent / 100)),
+        cycleDurationMs: Number(cycle.duration_ms)
       };
 
       client = await db.getClient();
@@ -225,15 +243,24 @@ class MarketSimulator {
         );
         totalMarketValue += newPrice;
 
-        // Coarse recent movement for the market_history trend: same domain,
-        // same batch instant, one public-lookback behind.
-        const previousPrice = marketDomain.priceAt({
+        // Coarse recent movement for the market_history trend: the SAME
+        // unified calculation, one public-lookback behind. The persisted
+        // phase/event windows are evaluated exactly at the lookback
+        // instant; the lifecycle input is the current persisted state (the
+        // only one persisted — the trend vocabulary is coarse, so this
+        // approximation is bounded by a single lifecycle step).
+        const lookbackMs = marketContext.nowMs - marketDomain.PUBLIC_SIGNAL_LOOKBACK_MS;
+        const previousPrice = priceEngine.unifiedPriceAt({
           seed: marketContext.seed,
           coinId: coin.coin_id,
           baselinePrice: parseFloat(coin.cycle_baseline_price),
           roundStartMs: marketContext.roundStartMs,
-          nowMs: marketContext.nowMs - marketDomain.PUBLIC_SIGNAL_LOOKBACK_MS,
-          amplitude
+          nowMs: lookbackMs,
+          amplitude,
+          lifecycleState: marketContext.pricingContext.lifecycleState,
+          cycleProgress: Math.min(1, Math.max(0, (lookbackMs - marketContext.roundStartMs) / marketContext.cycleDurationMs)),
+          phaseModifier: marketContext.pricingContext.phaseModifierAt(lookbackMs),
+          eventModifier: marketContext.pricingContext.eventModifierFor(coin.coin_id, lookbackMs)
         });
         changePctSum += ((newPrice - previousPrice) / previousPrice) * 100;
         changePctCount += 1;

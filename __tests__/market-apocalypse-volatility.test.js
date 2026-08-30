@@ -122,9 +122,13 @@ describe('Core 2: apocalypse volatility in the V2 market writer', () => {
       });
       const expectedAmplitude = getApocalypseVolatility(apocalypsePercent);
       expect(domainSpy).toHaveBeenCalled();
+      const lookbackMs = marketDomain.PUBLIC_SIGNAL_LOOKBACK_MS;
       for (const call of domainSpy.mock.calls) {
         expect(call[0].seed).toBe(cycle.seed);
-        expect(call[0].nowMs).toBe(MID_CYCLE_MS);
+        // SIM-08: the batch prices the pinned instant; the coarse
+        // market_history trend lookback prices one public-lookback behind
+        // it. Both instants go through the shared domain.
+        expect([MID_CYCLE_MS, MID_CYCLE_MS - lookbackMs]).toContain(call[0].nowMs);
         expect(call[0].amplitude).toBe(expectedAmplitude);
       }
     });

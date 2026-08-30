@@ -63,10 +63,14 @@ describe('V2-1 market writer: batch state resolution', () => {
       now: new Date(MID_CYCLE_MS)
     });
     const expectedAmplitude = getApocalypseVolatility(apocalypsePercent);
+    const lookbackMs = marketDomain.PUBLIC_SIGNAL_LOOKBACK_MS;
     for (const call of domainSpy.mock.calls) {
       expect(call[0].seed).toBe(cycle.seed);
       expect(call[0].roundStartMs).toBe(new Date(cycle.start_time).getTime());
-      expect(call[0].nowMs).toBe(MID_CYCLE_MS);
+      // SIM-08: the batch prices the pinned instant; the coarse
+      // market_history trend lookback prices one public-lookback behind it.
+      // Both instants go through the shared domain via the unified engine.
+      expect([MID_CYCLE_MS, MID_CYCLE_MS - lookbackMs]).toContain(call[0].nowMs);
       expect(call[0].amplitude).toBe(expectedAmplitude);
     }
   });
