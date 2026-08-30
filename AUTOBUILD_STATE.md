@@ -2,17 +2,17 @@
 
 ## Current Execution
 
-- **Current wave:** Wave 1 — Coin Events and Market Phases (complete)
-- **Current ticket:** SIM-06
-- **Status:** READY FOR WAVE 2 — Wave 1 implementation, review, and gates complete
+- **Current wave:** Wave 2 — Market Index and Lifecycle (complete)
+- **Current ticket:** SIM-08
+- **Status:** READY FOR WAVE 3 — Wave 2 implementation, review, and gates complete
 - **Current branch:** Backend `v2-legacy-cleanup-20260825`; frontend `gameplay-overhaul-20260830`
-- **Latest successful commit:** Backend `e0a80ac5134660a1ff41c9bacb20261be44f3c80`; frontend `67b59a6a6eec138eaa874b4e567543bc2858aae3`
-- **Last pushed commit:** Backend `e0a80ac5134660a1ff41c9bacb20261be44f3c80` on `v2-legacy-cleanup-20260825`; frontend remote `f06b5a903b5a4fa6b7ea04385ce37f4059e829ef`
+- **Latest successful commit:** Backend `e94e5bfb7ffa3b355c0bc4bce63155cc8406cc25`; frontend `67b59a6a6eec138eaa874b4e567543bc2858aae3`
+- **Last pushed commit:** Backend `e94e5bfb7ffa3b355c0bc4bce63155cc8406cc25` on `v2-legacy-cleanup-20260825`; frontend remote `f06b5a903b5a4fa6b7ea04385ce37f4059e829ef`
 - **Last deployed commit:** Not checked
-- **Database migration status:** Local disposable test DB migration 020 applied and verified; production not checked or applied
-- **Review status:** Fresh strict Wave 1 review passed; migration index-shape finding fixed; no unresolved P0/P1 findings
+- **Database migration status:** Local disposable test DB migrations 020 and 021 applied and verified; production not checked or applied
+- **Review status:** Fresh strict Wave 2 review passed; no unresolved P0/P1 findings
 - **Blocking issue:** None
-- **Next action:** Read state and plan Wave 2 only: SIM-06 market index/peak/drawdown, then SIM-07 hidden lifecycle.
+- **Next action:** Read state and plan Wave 3 only: SIM-08 unified normal price calculation, then SIM-09 crash engine and SIM-10 rally/lower-high behaviour.
 
 ## Startup Safety Check
 
@@ -31,8 +31,8 @@
 
 - **Baseline backend:** `npm test` — 80 suites passed, 1 suite failed; 759 tests passed, 1 failed due to the recorded 5-second timeout in `__tests__/game-public-state-no-seed.test.js`; total 760 tests. Treat as baseline unless changed/worsened by this overhaul.
 - **Baseline frontend:** `npm run test:ui` passed; `npm run test:unit` passed 216 tests; `npm run lint` passed with 0 errors and 6 existing warnings; `npm run build` passed with standard bundle-size/Browserslist warnings.
-- **Latest targeted tests:** Wave 1 focused suites — 6 suites, 103 tests passed; affected regression suites — 8 suites, 110 tests passed; changed-file Node syntax checks and `git diff --check` passed. ESLint is not configured in this backend (`npx eslint` installed ESLint 10 and stopped because no `eslint.config.*` exists); no source change was made for that tooling mismatch.
-- **Latest full tests:** Backend `npm test` — 87 suites, 862 passed, 1 failed; the one failure is the same recorded 5-second timeout in `__tests__/game-public-state-no-seed.test.js`, confirmed against the pre-Wave-1 baseline commit and unchanged in failure mode.
+- **Latest targeted tests:** Wave 2 focused suites — 4 suites, 54 tests passed; affected regression suites — 16 suites, 213 tests passed; changed/new-file Node syntax checks and `git diff --check` passed. ESLint is not configured in this backend (`npx eslint` installed ESLint 10 and stopped because no `eslint.config.*` exists); no source change was made for that tooling mismatch.
+- **Latest full tests:** Backend `npm test` — 91 suites, 916 passed, 1 failed; the one failure is the same recorded 5-second timeout in `__tests__/game-public-state-no-seed.test.js`, confirmed against the pre-Wave-2 baseline commit and unchanged in failure mode.
 
 ## Current Wave Audit Notes
 
@@ -44,6 +44,7 @@
 - Wave 1 adds separate deterministic coin-event and market-phase engines, additive migration 020, disposable-schema wiring/verification, and Core 1 lifecycle integration. It does not alter the existing price writer, scheduled collapse authority, trade rules, portfolios, transaction history, price history, settlement, or public API shapes.
 - Coin events use rolling seeded persistence, 0–5 active-per-coin cap, 1–15 minute durations, separate flavour/name and signed modifier fields, expiry by timestamp, and no portfolio/trade/price-history coupling.
 - Market phases use all six required phase types, lifecycle-weighted deterministic selection with GROWTH wired until Wave 2, one contiguous persisted primary chain, and restart/idempotency coverage.
+- Wave 2 adds separate `apocalypse_market_state` persistence, canonical surviving-coin market index calculation, monotonic peak/drawdown/momentum tracking, seed-generated plateau targets, and hidden legal-order lifecycle transitions. It does not write prices or price history and leaves the scheduled-collapse authority in place until Wave 4.
 - Strict review correction enforced negative bias strictly above 1, non-decreasing crash probability through the lifecycle, and both positive/negative phase groups remaining possible in every lifecycle state.
 
 ## Completed Tickets
@@ -53,11 +54,11 @@
 - SIM-03 Implement coin event engine
 - SIM-04 Add coin event persistence/state recovery
 - SIM-05 Implement market phase engine
+- SIM-06 Add market index and peak/drawdown tracking
+- SIM-07 Implement hidden lifecycle state machine
 
 ## Remaining Tickets
 
-- SIM-06 Add market index and peak/drawdown tracking
-- SIM-07 Implement hidden lifecycle state machine
 - SIM-08 Integrate unified normal price calculation
 - SIM-09 Implement crash engine
 - SIM-10 Implement rally and lower-high behaviour
