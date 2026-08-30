@@ -17,6 +17,7 @@ jobs:
           username: ${{ secrets.SSH_USERNAME }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
+            set -e
             echo "Current directory before cd:"
             pwd
             cd /home/jd/back_coins_x
@@ -30,6 +31,21 @@ jobs:
             git reset --hard origin/main
             echo "Installing dependencies..."
             npm install
+            echo "Applying production database migrations..."
+            NODE_ENV=production npm run migrate
+            echo "Verifying production game schema..."
+            NODE_ENV=production npm run verify:game-schema
             echo "Restarting PM2..."
             pm2 restart back_coins_x
+            echo "Verifying backend health..."
+            health_attempt=1
+            until curl --fail --silent --show-error --max-time 5 http://127.0.0.1:3000/api/coins >/dev/null; do
+              if [ "$health_attempt" -ge 5 ]; then
+                echo "Backend health check failed after PM2 restart."
+                exit 1
+              fi
+              health_attempt=$((health_attempt + 1))
+              sleep 2
+            done
+            echo "Backend health check passed"
             echo "Deployment complete"
