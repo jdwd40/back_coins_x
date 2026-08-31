@@ -2,17 +2,17 @@
 
 ## Current Execution
 
-- **Current wave:** Wave 4 — Trading Pressure, Bot Reactions, and Dynamic Collapse (complete)
-- **Current ticket:** SIM-15
-- **Status:** READY FOR WAVE 5 — Wave 4 implementation, strict review, and regression gates complete
+- **Current wave:** Wave 6 — Automated Multi-Cycle Simulation and Balance
+- **Current ticket:** SIM-18
+- **Status:** IN PROGRESS — Wave 6 simulation-harness inspection
 - **Current branch:** Backend `v2-legacy-cleanup-20260825`; frontend `gameplay-overhaul-20260830`
-- **Latest successful commit:** Backend `f0b9575cd54ebbb9fee8f4ece11e9b86fb0aa984`; frontend `67b59a6a6eec138eaa874b4e567543bc2858aae3`
-- **Last pushed commit:** Backend `f0b9575cd54ebbb9fee8f4ece11e9b86fb0aa984` on `v2-legacy-cleanup-20260825`; frontend remote `f06b5a903b5a4fa6b7ea04385ce37f4059e829ef`
+- **Latest successful commit:** Backend `b7761d50297b411eb24c83f37feb6db42584f1e6`; frontend `1bb44543300aa067234de30cd46fd29f03cf3e9b`
+- **Last pushed commit:** Backend `b7761d50297b411eb24c83f37feb6db42584f1e6` on `v2-legacy-cleanup-20260825`; frontend `1bb44543300aa067234de30cd46fd29f03cf3e9b` on `gameplay-overhaul-20260830`
 - **Last deployed commit:** Not checked
 - **Database migration status:** Local disposable test DB migration 022 applied and schema verification passed; production not checked or applied
-- **Review status:** Wave 4 strict review passed; no unresolved significant findings. Runtime source has no old scheduled-collapse controller references or legacy schedule writes.
+- **Review status:** Wave 5 strict backend API and frontend contract/UI review passed; explicit public-field redaction, server-time countdowns, mobile wrapping, and preserved trade/auth paths verified. No unresolved significant findings.
 - **Blocking issue:** None
-- **Next action:** Plan Wave 5 API/frontend contract extension without changing the hidden lifecycle/collapse internals or existing buy/sell/auth contracts.
+- **Next action:** Build the accelerated multi-cycle simulation harness and quality metrics for SIM-18/19, then balance Waves 6–7 from measured runs.
 
 ## Startup Safety Check
 
@@ -31,8 +31,8 @@
 
 - **Baseline backend:** `npm test` — 80 suites passed, 1 suite failed; 759 tests passed, 1 failed due to the recorded 5-second timeout in `__tests__/game-public-state-no-seed.test.js`; total 760 tests. Treat as baseline unless changed/worsened by this overhaul.
 - **Baseline frontend:** `npm run test:ui` passed; `npm run test:unit` passed 216 tests; `npm run lint` passed with 0 errors and 6 existing warnings; `npm run build` passed with standard bundle-size/Browserslist warnings.
-- **Latest targeted tests:** Wave 4 focused correction suites — 2 suites, 45 tests passed; `__tests__/v2-power-trades.test.js` — 1 suite, 22 tests passed; schema verifier passed; changed/new-file syntax checks passed for 48 files; `git diff --check` passed.
-- **Latest full tests:** Backend `npm test` after all Wave 4 corrections — 94 passed / 95 total suites and 976 passed / 977 total tests; the sole failure is the known 5-second timeout in `__tests__/game-public-state-no-seed.test.js`; no Wave 4 failures.
+- **Latest targeted tests:** Wave 5 backend API/fixture batch — 6 suites, 52 tests passed; seed search returned the documented safe seed; frontend UI contract passed; frontend unit tests passed 220; frontend typecheck/build passed; lint passed with 0 errors and 6 existing warnings.
+- **Latest full tests:** Backend `npm test` after all Wave 5 corrections — 95 passed / 96 total suites and 985 passed / 986 total tests; the sole failure is the known 5-second timeout in `__tests__/game-public-state-no-seed.test.js`; no Wave 5 failures.
 
 ## Current Wave Audit Notes
 
@@ -64,12 +64,12 @@
 - SIM-12 Adapt bot reactions to panic and dip buying
 - SIM-13 Implement dynamic coin collapse pressure
 - SIM-14 Retire/disable old scheduled collapse logic
-
-## Remaining Tickets
-
 - SIM-15 Extend game-state API with player-facing events/phases
 - SIM-16 Add market-phase frontend UI
 - SIM-17 Add active coin-event frontend UI
+
+## Remaining Tickets
+
 - SIM-18 Build automated multi-cycle simulation harness
 - SIM-19 Add simulation quality/failure metrics
 - SIM-20 Balance growth and coin-event drain
