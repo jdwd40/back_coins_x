@@ -3,16 +3,16 @@
 ## Current Execution
 
 - **Current wave:** Wave 7 — Balance Passes A–F and Release Gates
-- **Current ticket:** SIM-24
-- **Status:** IN PROGRESS — Wave 7 tuning committed/pushed; final cross-repo release gates and deployment verification pending
+- **Current ticket:** SIM-25 (complete)
+- **Status:** PLAYTEST READY — reviewed backend/frontend commits deployed and public API/game smoke verified
 - **Current branch:** Backend `v2-legacy-cleanup-20260825`; frontend `gameplay-overhaul-20260830`
-- **Latest successful commit:** Backend `f33cf83dd8d8d963c61cb652a854d25e34de7a31`; frontend `1bb44543300aa067234de30cd46fd29f03cf3e9b`
-- **Last pushed commit:** Backend `f33cf83dd8d8d963c61cb652a854d25e34de7a31` on `v2-legacy-cleanup-20260825`; frontend `1bb44543300aa067234de30cd46fd29f03cf3e9b` on `gameplay-overhaul-20260830`
-- **Last deployed commit:** Not checked
-- **Database migration status:** Local disposable test DB migration 022 applied and schema verification passed; production not checked or applied
-- **Review status:** Wave 7 strict review passed; tuning is centralized and threshold-preserving, fixtures use deterministic time/seed isolation, and no significant auth/trade/settlement/collapse-safety finding remains. Frontend contract/UI review passed.
+- **Latest successful commit:** Backend deployed `12f860aebd4d305a8b0382cbc15c8007a863e1f2`; frontend deployed `1bb44543300aa067234de30cd46fd29f03cf3e9b`
+- **Last pushed commit:** Backend `12f860aebd4d305a8b0382cbc15c8007a863e1f2` on `main` and `v2-legacy-cleanup-20260825`; frontend `1bb44543300aa067234de30cd46fd29f03cf3e9b` on `master` and `gameplay-overhaul-20260830`
+- **Last deployed commit:** Backend `12f860aebd4d305a8b0382cbc15c8007a863e1f2` via workflow run `33395514461`; frontend `1bb44543300aa067234de30cd46fd29f03cf3e9b` via workflow run `33395833840`
+- **Database migration status:** Production workflow applied migrations 020–022 and reported production game-schema verification passed; no destructive seed was run in production
+- **Review status:** Wave 7 strict review passed; frontend contract/UI review passed; both deployed workflows passed; exact deployed SHAs verified from workflow logs/remote heads. Browser visual smoke was unavailable because no Chrome instance could be launched; public HTML/assets/API smoke passed.
 - **Blocking issue:** None
-- **Next action:** Commit/push the state checkpoint, then inspect the live deployment workflow/target and perform the authorized backend-first release gates before production migration/deploy.
+- **Next action:** None — stop after reporting `PLAYTEST READY`; monitor the known baseline public-state timeout separately.
 
 ## Startup Safety Check
 
@@ -73,11 +73,12 @@
 - SIM-21 Balance plateau and decline
 - SIM-22 Balance crash/rally behaviour
 - SIM-23 Balance dynamic collapse
+- SIM-24 Full regression and readiness review
+- SIM-25 Controlled playtest deployment
 
 ## Remaining Tickets
 
-- SIM-24 Full regression and readiness review
-- SIM-25 Controlled playtest deployment
+- None — gameplay overhaul is deployed and playtest-ready
 
 ## Wave 7 Balance Tuning Record (SIM-20..23)
 
@@ -101,6 +102,14 @@
 
 - Backend baseline contains one existing timeout failure in the public-state/results test; Wave 0 did not worsen or affect it. It remains a pre-existing suite issue to track before final readiness.
 - Frontend lint has six warnings and the build reports normal bundle-size/Browserslist warnings.
+
+## Deployment Verification (2026-08-31)
+
+- Backend remote `main` promoted by fast-forward to `12f860aebd4d305a8b0382cbc15c8007a863e1f2`; Actions run `33395514461` succeeded. Its log verified VPS reset to the exact SHA, production migrations, schema verification, PM2 restart, and localhost health.
+- Frontend remote `master` promoted by fast-forward to `1bb44543300aa067234de30cd46fd29f03cf3e9b`; Actions run `33395833840` succeeded. Build, UI/type verification, SSH access, static sync, and public URL check all passed.
+- Public smoke: `/coins/`, reviewed JS/CSS assets, `/api-2/api/coins`, `/api-2/api/game/state`, and `/api-2/api/game/market-signals` returned valid responses. Live state was `ACTIVE`, Apocalypse `APOC-0474`, 10 coins, public phase/event fields present, and no seed/lifecycle/sequence/peak-target/schedule data. Unauthenticated participant access returned 401; diagnostics remained fail-closed.
+- The public coarse `collapseRisk` vocabulary is an existing allowed player-facing bucket (`DEAD`/`CRITICAL`/`DANGER`), not a hidden numeric probability; Wave 5 contract tests and deployed payload agree.
+- Browser visual smoke was attempted but unavailable because the browser harness could not launch Chrome; no visual claim is made. Public HTML/assets and API/game smoke are verified.
 
 ## Decisions / Notes
 
