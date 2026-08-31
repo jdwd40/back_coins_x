@@ -2,17 +2,17 @@
 
 ## Current Execution
 
-- **Current wave:** Wave 6 — Automated Multi-Cycle Simulation and Balance
-- **Current ticket:** SIM-18
-- **Status:** IN PROGRESS — Wave 6 simulation-harness inspection
+- **Current wave:** Wave 7 — Balance Passes A–F and Release Gates
+- **Current ticket:** SIM-24
+- **Status:** IN PROGRESS — Wave 7 tuning committed/pushed; final cross-repo release gates and deployment verification pending
 - **Current branch:** Backend `v2-legacy-cleanup-20260825`; frontend `gameplay-overhaul-20260830`
-- **Latest successful commit:** Backend `b7761d50297b411eb24c83f37feb6db42584f1e6`; frontend `1bb44543300aa067234de30cd46fd29f03cf3e9b`
-- **Last pushed commit:** Backend `b7761d50297b411eb24c83f37feb6db42584f1e6` on `v2-legacy-cleanup-20260825`; frontend `1bb44543300aa067234de30cd46fd29f03cf3e9b` on `gameplay-overhaul-20260830`
+- **Latest successful commit:** Backend `f33cf83dd8d8d963c61cb652a854d25e34de7a31`; frontend `1bb44543300aa067234de30cd46fd29f03cf3e9b`
+- **Last pushed commit:** Backend `f33cf83dd8d8d963c61cb652a854d25e34de7a31` on `v2-legacy-cleanup-20260825`; frontend `1bb44543300aa067234de30cd46fd29f03cf3e9b` on `gameplay-overhaul-20260830`
 - **Last deployed commit:** Not checked
 - **Database migration status:** Local disposable test DB migration 022 applied and schema verification passed; production not checked or applied
-- **Review status:** Wave 5 strict backend API and frontend contract/UI review passed; explicit public-field redaction, server-time countdowns, mobile wrapping, and preserved trade/auth paths verified. No unresolved significant findings.
+- **Review status:** Wave 7 strict review passed; tuning is centralized and threshold-preserving, fixtures use deterministic time/seed isolation, and no significant auth/trade/settlement/collapse-safety finding remains. Frontend contract/UI review passed.
 - **Blocking issue:** None
-- **Next action:** Build the accelerated multi-cycle simulation harness and quality metrics for SIM-18/19, then balance Waves 6–7 from measured runs.
+- **Next action:** Commit/push the state checkpoint, then inspect the live deployment workflow/target and perform the authorized backend-first release gates before production migration/deploy.
 
 ## Startup Safety Check
 
@@ -31,8 +31,8 @@
 
 - **Baseline backend:** `npm test` — 80 suites passed, 1 suite failed; 759 tests passed, 1 failed due to the recorded 5-second timeout in `__tests__/game-public-state-no-seed.test.js`; total 760 tests. Treat as baseline unless changed/worsened by this overhaul.
 - **Baseline frontend:** `npm run test:ui` passed; `npm run test:unit` passed 216 tests; `npm run lint` passed with 0 errors and 6 existing warnings; `npm run build` passed with standard bundle-size/Browserslist warnings.
-- **Latest targeted tests:** Wave 5 backend API/fixture batch — 6 suites, 52 tests passed; seed search returned the documented safe seed; frontend UI contract passed; frontend unit tests passed 220; frontend typecheck/build passed; lint passed with 0 errors and 6 existing warnings.
-- **Latest full tests:** Backend `npm test` after all Wave 5 corrections — 95 passed / 96 total suites and 985 passed / 986 total tests; the sole failure is the known 5-second timeout in `__tests__/game-public-state-no-seed.test.js`; no Wave 5 failures.
+- **Latest targeted tests:** Wave 7 SIM-20..23 — focused suites `simulation-config`, `price-engine`, `multi-cycle-simulation`, `dynamic-collapse`, and `game-bot-exit-strategy`: 134/134 passed; three 200-cycle full-scenario CLI validations passed; frontend UI contract/unit/typecheck/lint/build passed.
+- **Latest full tests:** Backend fresh independent `npm test` — 96 passed / 97 total suites and 1011 passed / 1012 total tests; sole failure is the known baseline timeout in `__tests__/game-public-state-no-seed.test.js`; the prior seed-corruption run was classified as shared disposable-DB setup flake and was cleared by fresh reseed.
 
 ## Current Wave Audit Notes
 
@@ -67,17 +67,35 @@
 - SIM-15 Extend game-state API with player-facing events/phases
 - SIM-16 Add market-phase frontend UI
 - SIM-17 Add active coin-event frontend UI
-
-## Remaining Tickets
-
 - SIM-18 Build automated multi-cycle simulation harness
 - SIM-19 Add simulation quality/failure metrics
 - SIM-20 Balance growth and coin-event drain
 - SIM-21 Balance plateau and decline
 - SIM-22 Balance crash/rally behaviour
 - SIM-23 Balance dynamic collapse
+
+## Remaining Tickets
+
 - SIM-24 Full regression and readiness review
 - SIM-25 Controlled playtest deployment
+
+## Wave 7 Balance Tuning Record (SIM-20..23)
+
+- Method: K3 parameter sweeps through `simulation/run.js --mode multi-cycle` with UNMODIFIED thresholds; 100-cycle market+events sweeps per candidate to reject weak knobs, 200-cycle full-scenario CLI validations for acceptance; candidate metrics recorded under `/tmp/w7-*.json` only. Root-cause finding: the three failing flags shared one dominant driver — the dynamic-collapse pre-decline cap (0.01/30s evaluation) killed coins early, and each early death REMOVED that coin from the market index, dragging it below the starting index by 25% progress.
+- Pass order followed: event bias, early growth, rally/crash, dynamic collapse (iterating as interactions were measured).
+- Final config changes (all in `game/simulationConfig.js` defaults; single source of truth, production/simulation parity preserved):
+  - `dynamicCollapse.preDeclineRiskCap` 0.01 -> 0.003 (SIM-23): pre-decline death now rare/variable; DECLINE/COLLAPSE risk untouched (maxRiskPerEvaluation 0.10). Dynamic collapse NOT weakened — late-game risk path unchanged.
+  - `lifecycle.growthSupportModifier` 0.012 -> 0.12 (SIM-20/21): the domain baseline has no secular growth and starts scattered ~3% below baseline; measured level that keeps the early index supported.
+  - `crashRally.episodeGapMs` {2-6min} -> {1-3min} and `crashRally.crashProbability` 0.02/0.04/0.08/0.12 -> 0.06/0.10/0.12/0.16 (SIM-22): enough candidate episodes and activations for reliable crash/rally cadence; non-decreasing lifecycle ordering kept.
+  - `crashRally.recoveryStrength.early` {0.90-1.10} -> {1.00-1.25} (SIM-22): early crashes reliably recover to new highs (Rule 3); late range unchanged (0.40-0.80, lower highs intact).
+  - Event bias UNCHANGED (negativeBiasFactor 1.25): sweeps showed event drain was not the early-growth driver; ratio stays in the 1.20-1.30 design band.
+- Acceptance (200 cycles, full market+pressure+events scenarios, unmodified thresholds, exit 0 on all three):
+  - default seed `sim18-multi-cycle-base-seed`: prematureMassCollapse 0/200 (<=4), noMeaningfulRally 4/200 (<=20), negativeEventsKillEarlyGrowth 44/200 (<=50); all 9 other flags PASS.
+  - alt seed `wave7-alt-seed-alpha`: 0/200, 10/200, 38/200; all others PASS.
+  - alt seed `wave7-alt-seed-beta`: 0/200, 5/200, 37/200; all others PASS.
+- No previously passing flag worsened: lateCrashFullRecovery 0/953 full recoveries (default), negative:positive modifier ratio 1.269/1.2608/1.2397 (slight negative bias kept), peak growth max 2.2058/2.2925/2.3558x (bound 50; baseline was 2.1692x), exact final £0 with zero survivors every cycle, deterministic replay 0 mismatches, 16 distinct events / 6 phases / 0 zero-event cycles, identical collapse-order pairs 0%, forced safety collapses mean 0.65-0.70/cycle.
+- Validation command: `node simulation/run.js --mode multi-cycle --cycles 200 [--base-seed <seed>]` (exit 0 = PASS).
+- Focused regression updates: `__tests__/simulation-config.test.js` (three boundary tests now derive from the tuned defaults instead of pinning 0.012/0.04/1.10-era values) and `__tests__/price-engine.test.js` (composed-modifier expectation follows the 0.12 growth support). No test encodes a single seed's exact numbers.
 
 ## Known Non-Blocking Issues
 
