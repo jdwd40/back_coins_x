@@ -17,7 +17,11 @@ const botConfig = require('../game/botConfig');
 const botService = require('../game/botService');
 
 const LONG_DURATION_MS = 7 * 24 * 60 * 60 * 1000;
-const FIXED_SEED = 'issue20-simulated-round-seed';
+// Wave 7 (SIM-20..23): the pre-Wave-7 seed relied on the old over-aggressive
+// pre-decline collapse cap (both tracked momentum/flat coins died in the
+// first ~8% of the cycle). Re-selected under the tuned config to restore the
+// documented scenario shape: c2 collapses ~97%, c4 ~92%, c9 is the survivor.
+const FIXED_SEED = 'issue20-simulated-round-seed-w7-3';
 
 const BOT_ENV_KEYS = [
   'GAME_BOT_TICK_INTERVAL_MS',
@@ -475,13 +479,25 @@ describe('issue #20: representative multi-tick simulated round', () => {
   }
 
   test('a full simulated Apocalypse produces credible exits, not one-way accumulation', async () => {
-    const base = new Date();
+    // Wave 7: pin the simulation clock to a fixed explicit base. The
+    // bot-visible collapse-risk level carries a seeded jitter bucketed on
+    // ABSOLUTE time (collapseRiskDomain.RISK_JITTER_BUCKET_MS, 5-minute
+    // buckets keyed floor(nowMs / bucket)), so a wall-clock base made the
+    // fixture's late-phase risk labels — and with them the late-exit count —
+    // depend on when the suite happened to start (the batch run observed
+    // lateSells 2 where the isolated run saw 3, same seed). This base is
+    // aligned to a 5-minute UTC boundary and verified against the tuned
+    // config to preserve the documented scenario shape (c2 collapses ~97%,
+    // c4 ~92%, c9 survives, exactly 3 late sells). Every tick instant is
+    // base + pct% of the 7-day duration, so the whole scenario now replays
+    // identically at any wall-clock time and in any suite order.
+    const base = new Date('2026-01-05T00:00:00.000Z');
     const cycle = await reconcileCycle({ now: base, durationMs: LONG_DURATION_MS, generateSeed: () => FIXED_SEED });
     const { rows: coinRows } = await db.query('SELECT coin_id FROM coins ORDER BY coin_id');
     const ids = coinRows.map((r) => r.coin_id);
-    const c2 = ids[1]; // the momentum play (collapses ~90% under this fixed seed)
-    const c4 = ids[3]; // the flat "stable" coin (collapses ~93%)
-    const c9 = ids[8]; // the dip coin AND the scheduled survivor under this seed
+    const c2 = ids[1]; // the momentum play (collapses ~97% under this fixed seed)
+    const c4 = ids[3]; // the flat "stable" coin (collapses ~92%)
+    const c9 = ids[8]; // the dip coin AND the final survivor under this seed
 
     // Freeze the market deterministically, then concentrate it: only the
     // three tracked coins remain tradable, so late-phase positions are still

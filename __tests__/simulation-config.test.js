@@ -155,7 +155,7 @@ describe('simulation config boundary validation', () => {
 
   test('rejects a decline pressure that is not below growth support', () => {
     const config = freshConfig();
-    config.lifecycle.declinePressureModifier = 0.02;
+    config.lifecycle.declinePressureModifier = config.lifecycle.growthSupportModifier + 0.01;
     expect(() => validateSimulationConfig(config)).toThrow(/below growthSupportModifier/);
   });
 
@@ -189,7 +189,7 @@ describe('simulation config boundary validation', () => {
 
   test('rejects a late recovery stronger than the early recovery', () => {
     const config = freshConfig();
-    config.crashRally.recoveryStrength.late = { min: 0.5, max: 1.2 };
+    config.crashRally.recoveryStrength.late = { min: 0.5, max: config.crashRally.recoveryStrength.early.max + 0.1 };
     expect(() => validateSimulationConfig(config)).toThrow(/late rallies are weaker/);
   });
 
@@ -253,9 +253,9 @@ describe('simulation config probability and weight validation', () => {
     expect(validateSimulationConfig(flat)).toBeDefined();
 
     // Same rejection through the override resolution path: overriding
-    // GROWTH above the default PLATEAU (0.04) breaks the ordering.
+    // GROWTH above the default PLATEAU breaks the ordering.
     expect(() => resolveSimulationConfig({
-      crashRally: { crashProbability: { GROWTH: 0.05 } }
+      crashRally: { crashProbability: { GROWTH: DEFAULT_SIMULATION_CONFIG.crashRally.crashProbability.PLATEAU + 0.01 } }
     })).toThrow(/non-decreasing/);
   });
 
@@ -362,7 +362,7 @@ describe('simulation config immutability', () => {
     expect(resolved.crashRally.crashProbability.GROWTH).toBe(0.01);
     // Untouched leaves keep the defaults.
     expect(resolved.coinEvents.maxStackedModifier).toBe(0.06);
-    expect(resolved.crashRally.crashProbability.DECLINE).toBe(0.08);
+    expect(resolved.crashRally.crashProbability.DECLINE).toBe(0.12);
     expect(Object.isFrozen(resolved)).toBe(true);
     expect(Object.isFrozen(resolved.crashRally.crashProbability)).toBe(true);
     // Resolving does not mutate the defaults.

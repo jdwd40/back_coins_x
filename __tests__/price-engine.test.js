@@ -141,8 +141,8 @@ describe('SIM-08 normal composition: lifecycle + phase + coin events', () => {
       eventModifier: 0.06,
       config: NO_CRASH_CONFIG
     });
-    // 0.012 + 0.04 + 0.06 = 0.112 — inside the limit, unclamped.
-    expect(modifier).toBeCloseTo(0.112, 12);
+    // 0.12 + 0.04 + 0.06 = 0.22 — inside the limit, unclamped.
+    expect(modifier).toBeCloseTo(0.22, 12);
 
     const extreme = priceEngine.computeNormalModifier({
       lifecycleState: 'GROWTH',

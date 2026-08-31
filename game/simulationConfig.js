@@ -141,10 +141,15 @@ const DEFAULT_SIMULATION_CONFIG = {
 
   // gameplay_changes.md §7-13 / build plan Stages 4-5: hidden lifecycle.
   lifecycle: {
-    // Macro market support during Growth (spec §3 example: +1.2% market
-    // pressure overpowering roughly -0.4% coin-event drain). Must be
-    // positive.
-    growthSupportModifier: 0.012,
+    // Macro market support during Growth (spec §3: market pressure
+    // overpowers the per-coin negative drain). Wave 7 (SIM-20/21) tuning:
+    // the domain baseline path starts scattered around/below baseline and
+    // carries no secular growth, so the Wave 6 starting value (0.012) left
+    // ~73% of cycles below their starting index at 25% progress. 0.12 is
+    // the measured level that keeps the early market clearly supported
+    // (negativeEventsKillEarlyGrowth within threshold across seeds). Must
+    // be positive.
+    growthSupportModifier: 0.12,
     // Per-cycle generated peak region as a multiple of the starting market
     // index (spec §10: each cycle generates a target peak region rather
     // than one fixed number). Must be >= 1 (a plateau below the starting
@@ -188,7 +193,11 @@ const DEFAULT_SIMULATION_CONFIG = {
     // itself is drawn regardless of activation, so it is stable and pure.
     // The per-candidate activation roll is the amortised form of the
     // per-evaluation probability below (spec: crashes are uncommon early).
-    episodeGapMs: { min: 2 * MINUTE_MS, max: 6 * MINUTE_MS },
+    // Wave 7 (SIM-22) tuning: 2-6 minute gaps yielded too few candidate
+    // episodes for reliable rally formation (~23% of cycles had zero
+    // rallies); 1-3 minutes keeps episodes distinct while giving every
+    // cycle a healthy crash/rally cadence.
+    episodeGapMs: { min: 1 * MINUTE_MS, max: 3 * MINUTE_MS },
     // A crash is a sudden large downward movement over a short period
     // (spec §17): tens of seconds, not minutes.
     crashDurationMs: { min: 30 * 1000, max: 90 * 1000 },
@@ -196,7 +205,11 @@ const DEFAULT_SIMULATION_CONFIG = {
     rallyDurationMs: { min: 1 * MINUTE_MS, max: 4 * MINUTE_MS },
     // Base crash probability per evaluation, per lifecycle state. Crashes
     // are uncommon early and increasingly likely after the plateau.
-    crashProbability: { GROWTH: 0.02, PLATEAU: 0.04, DECLINE: 0.08, COLLAPSE: 0.12 },
+    // Wave 7 (SIM-22) tuning: raised across all states (from
+    // 0.02/0.04/0.08/0.12) so activated crash/rally episodes are a
+    // reliable feature of every cycle (noMeaningfulRally within threshold)
+    // while preserving the non-decreasing lifecycle ordering.
+    crashProbability: { GROWTH: 0.06, PLATEAU: 0.10, DECLINE: 0.12, COLLAPSE: 0.16 },
     // Crash magnitude as a fraction of price removed. Significantly larger
     // than ordinary tick movement (Rule: crashes are dramatic).
     crashMagnitude: { min: 0.10, max: 0.35 },
@@ -207,8 +220,12 @@ const DEFAULT_SIMULATION_CONFIG = {
     // Early: may exceed 1 (Rule 3: early crashes normally recover to a new
     // high). Late: usually below 1 (Rule 7: lower highs). Ordering
     // enforced: late.max <= early.max, early.max >= 1.
+    // Wave 7 (SIM-22) tuning: the early range shifted from 0.90-1.10 to
+    // 1.00-1.25 so early crashes reliably recover to a new high (Rule 3 is
+    // now the norm, not a coin flip) and their residuals give the early
+    // market a small net lift instead of a net drag.
     recoveryStrength: {
-      early: { min: 0.90, max: 1.10 },
+      early: { min: 1.0, max: 1.25 },
       late: { min: 0.40, max: 0.80 }
     },
     // Probability that a late rally forms a lower high rather than
@@ -253,7 +270,13 @@ const DEFAULT_SIMULATION_CONFIG = {
     },
     // Collapse chance is very low before the late game: the effective risk
     // is capped at this probability until the DECLINE state is reached.
-    preDeclineRiskCap: 0.01,
+    // Wave 7 (SIM-23) tuning: the 0.01 starting cap let early dips/events
+    // push enough coins to ~1% risk per 30s evaluation that mass premature
+    // collapses occurred in ~8.5% of cycles (and early deaths dragged the
+    // market index below its start). 0.003 keeps pre-decline death rare
+    // and variable while leaving DECLINE/COLLAPSE risk (up to
+    // maxRiskPerEvaluation) fully dynamic.
+    preDeclineRiskCap: 0.003,
     // Hard cap on per-evaluation collapse probability regardless of inputs.
     maxRiskPerEvaluation: 0.10
   }
