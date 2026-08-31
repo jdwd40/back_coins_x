@@ -529,3 +529,87 @@ Verified through the final backend suite, focused tests, API contracts and simul
 - Unresolved V2 defects: the known pre-existing full-suite settlement/worker reseed deadlock flake; existing frontend lint warnings; build advisories; no newly discovered V2 gameplay gate failures.
 - Final status: **Crypto Chaos V2 gameplay pivot complete and backed up on `gameplay-v2-20260824`**.
 - Do not merge, deploy or begin another milestone.
+
+---
+
+## GAMEPLAY OVERHAUL Wave 6 — SIM-18/19 multi-cycle harness (Stage 13)
+
+New phase after the V2-6 milestone: the `gameplay-overhaul` balancing programme.
+This section documents the Stage 13 authoritative automated multi-cycle
+harness; it does not change any earlier V2 verification record.
+
+### Command
+
+```text
+node simulation/run.js --mode multi-cycle \
+  [--cycles N]            # default 200; use 10-20 for a smoke run, hundreds/thousands for validation
+  [--base-seed S]         # default sim18-multi-cycle-base-seed
+  [--observation-ms MS]   # default 15000
+  [--economy on|off]      # default on
+  [--scenarios market,pressure,events]  # default all three; 'market' is always included
+  [--out PATH]            # default simulation/output/multi-cycle-latest.json (git-ignored)
+  [--json]                # machine-readable stdout instead of the human summary
+# npm script alias: npm run simulate:multi-cycle -- --cycles 200
+```
+
+Exit code is the harness verdict: 0 = all SIM-19 quality flags pass, 1 = at
+least one fails. The only non-deterministic report field is the explicitly
+separate top-level `runtimeMs` (wall-clock); every other field is a pure
+function of the options, so identical options produce a byte-identical report.
+
+### What it does (`simulation/multiCycle.js`)
+
+Runs N accelerated, complete, deterministic apocalypse cycles through the
+SAME pure `roundEnvironment`/`engine` modules the other simulation studies
+use — there is no second market implementation. Cycle seeds derive from the
+base seed (`sha256(baseSeed:multi-cycle:N)`), never cherry-picked. Three
+scenario sections run over the same deterministic cycles:
+
+- `market` — no-trade market shape. Per cycle: starting/peak/final index,
+  peak position %, crash/rally counts and largest episodes, first
+  Plateau/Decline times, full collapse order with first/final natural
+  collapse times and spread, coins the final safety rule had to force, event
+  counts and positive/negative totals, phase ids, coin-path divergence, and
+  the exact final £0 / zero-survivor assertion. Per coin: starting/peak/min
+  pre-collapse price, event counts/totals, natural collapse time or explicit
+  `null` when the safety rule forced it.
+- `pressure` — trading/bot shape. A fixed legal roster (DIP_BOOM, RANDOM,
+  SPAM) plays each cycle twice: pass A on the no-tape environment records an
+  executed-trade tape (engine `recordTrades`); pass B rebuilds the same seed
+  WITH the tape wired into pricing (one bounded feedback iteration) and
+  re-plays, capturing tape size/notional, mean/max absolute pressure
+  modifier, tape-induced price-path divergence %, collapse-order shift
+  (discordant pairs) and per-strategy ROI/trade metrics.
+- `events` — event bias/variety analysis over the market cycles: aggregate
+  positive/negative totals, negative:positive modifier ratio, distinct event
+  names and phase ids, zero-event cycles.
+
+The first `min(10, cycles)` cycles are captured TWICE and deep-compared; any
+drift raises `deterministicReplayMismatch`.
+
+### Reading the report
+
+`flags` carries every SIM-19 quality check with `measured` values and the
+`threshold` string it was judged against (thresholds are exported as
+`DEFAULT_THRESHOLDS` and echoed into the report — a run is self-describing):
+prematureMassCollapse, noMeaningfulRally, lateCrashFullRecovery,
+identicalCoinPaths, unboundedCoinGrowth, positiveEventsOverwhelming,
+negativeEventsKillEarlyGrowth, identicalCollapseOrderAcrossSeeds,
+nonzeroFinalMarketValue, deterministicReplayMismatch, noPhaseEventVariety,
+latePeakInstantDeath. `verdict.pass` requires every flag.
+
+Interpretation rules: never call one cycle (or a tiny smoke batch) a balance
+conclusion — flags are aggregate judgements and small samples legitimately
+fail share-based thresholds. A FAIL at hundreds of cycles is a genuine
+Wave 7 balancing signal, not a harness defect; tuning belongs to Wave 7 and
+must not be done by editing production config just to make the simulation
+pass.
+
+### Tests
+
+`__tests__/multi-cycle-simulation.test.js` (26 tests): complete per-cycle/
+per-coin metric capture, exact final £0 survivor assertion, deterministic
+replay (two byte-identical runs + the built-in re-capture check), executed-
+tape determinism, cross-seed variation, every failure flag individually
+forced on synthetic aggregates, and the CLI/report shape including the
+verdict exit code.

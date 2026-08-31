@@ -380,11 +380,15 @@ function createRoundEnvironment({ seed, coins = CANONICAL_COINS, durationMs = DE
     // --- 3. THE FINAL SAFETY RULE (gameplay_changes.md §22): every coin
     // still alive at round end dies exactly at round end — the same
     // unconditional end-of-cycle reconciliation settlement performs.
+    // SIM-18: capture the NATURAL death instants first, so the Wave 6
+    // harness can tell engine-driven collapses apart from coins the safety
+    // rule had to force (its per-coin collapseTimeMs is null for those).
+    const naturalCollapseAtMs = new Map(collapseAtMs);
     for (const coin of coins) {
       if (!collapseAtMs.has(coin.coinId)) collapseAtMs.set(coin.coinId, durationMs);
     }
 
-    return { steps, phases, phaseModifierAt, livePriceAt, collapseAtMs };
+    return { steps, phases, phaseModifierAt, livePriceAt, collapseAtMs, naturalCollapseAtMs };
   }
 
   function gameplay() {
@@ -520,6 +524,26 @@ function createRoundEnvironment({ seed, coins = CANONICAL_COINS, durationMs = DE
     };
   }
 
+  // Internal harness/test surface (SIM-18): the memoised forward-pass
+  // state of this environment — the market-state step trajectory (index,
+  // peak, drawdown, momentum, lifecycle state per evaluation instant), the
+  // lazily extended phase chain, the NATURAL dynamic-collapse instants
+  // (before the final safety rule) with the explicit list of coins the
+  // safety rule had to force, and the pure per-coin event streams. Never
+  // part of any public response; readings stay identical for a given seed.
+  function gameplayDiagnostics() {
+    const g = gameplay();
+    return {
+      steps: g.steps,
+      phases: g.phases,
+      naturalCollapseAtMs: new Map(g.naturalCollapseAtMs),
+      forcedSafetyCoinIds: coins
+        .filter((coin) => !g.naturalCollapseAtMs.has(coin.coinId))
+        .map((coin) => coin.coinId),
+      coinEventsByCoin
+    };
+  }
+
   return {
     seed,
     coins,
@@ -531,7 +555,8 @@ function createRoundEnvironment({ seed, coins = CANONICAL_COINS, durationMs = DE
     isDead,
     priceAt,
     publicSignal,
-    pricingInputsAt
+    pricingInputsAt,
+    gameplayDiagnostics
   };
 }
 

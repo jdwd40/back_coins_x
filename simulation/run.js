@@ -2,12 +2,17 @@
 // V2-1 headless accelerated simulator CLI.
 //
 // Usage:
-//   node simulation/run.js [--mode tune|gate] [--rounds N] [--base-seed S]
+//   node simulation/run.js [--mode tune|gate|power|v2-3|bots|multi-cycle]
+//                          [--rounds N] [--base-seed S]
 //                          [--economy on|off] [--observation-ms MS]
 //                          [--strategies A,B,C] [--out PATH] [--json]
+//                          [--cycles N] [--scenarios market,pressure,events]
 //
 // Defaults: --mode tune --rounds 200 (tune) / 2000 (gate), economy on,
 // 15s observation cadence (a realistic client), all seven strategies.
+// --mode multi-cycle (SIM-18/19): --cycles 200 default (use 10-20 for a
+// smoke run; a real validation run uses hundreds/thousands), all three
+// scenario sections.
 //
 // The simulator is intentionally DB-free: it only uses pure domain modules.
 // Some shared modules (dynamicCollapseService, economyService) require the
@@ -35,6 +40,12 @@ const {
   BOT_STUDY_BASE_SEED,
   ALL_PLAYER_IDS: BOT_PLAYER_IDS
 } = require('./botStudy');
+const {
+  runMultiCycle,
+  buildMultiCycleReport,
+  MULTI_CYCLE_BASE_SEED,
+  SCENARIO_IDS
+} = require('./multiCycle');
 
 function parseArgs(argv) {
   const args = {};
@@ -235,9 +246,93 @@ function printBotSummary(report) {
   console.log(`GATE VERDICT: ${gate.pass === null ? 'SKIPPED (partial roster)' : gate.pass ? 'PASS' : 'FAIL'}`);
 }
 
+function printMultiCycleSummary(report) {
+  const { config, scenarios, flags, verdict, replay } = report;
+  const market = scenarios.market;
+  console.log('=== Crypto Chaos SIM-18/19 multi-cycle harness ===');
+  console.log(`cycles: ${config.cycles} complete deterministic cycles | baseSeed: ${config.baseSeed} | economy: ${config.economy ? 'on' : 'off'} | observation: ${config.observationMs}ms | scenarios: ${config.scenarios.join(',')}`);
+  console.log('');
+  console.log('--- market shape (no-trade) ---');
+  console.log(`peak index: median ${market.peakIndex.median} (start ${market.startingIndex.median}) at median ${market.peakPositionPct.median}% of the cycle`);
+  console.log(`crashes/cycle: median ${market.crashCount.median} (largest median ${market.largestCrashPct.median}%) | rallies/cycle: median ${market.rallyCount.median} (largest median ${market.largestRallyPct.median}%)`);
+  console.log(`first Plateau at median ${Math.round(market.firstPlateauAtMs.median / 60000)}min | first Decline at median ${Math.round(market.firstDeclineAtMs.median / 60000)}min | first collapse at median ${Math.round(market.firstCollapseAtMs.median / 60000)}min | collapse spread median ${Math.round(market.collapseSpreadMs.median / 60000)}min`);
+  console.log(`forced safety collapses: mean ${market.forcedSafetyCollapses.mean}/cycle | path divergence median ${market.pathDivergence.median} | peak growth max ${market.peakGrowthMultiple.max}x | identical collapse-order pairs ${market.collapseOrderVariation.identicalOrderPairPct}%`);
+  const events = scenarios.events;
+  console.log('');
+  console.log('--- event bias / variety ---');
+  console.log(`events/cycle: median ${events.eventCount.median} (+${events.positiveEventCount.median}/-${events.negativeEventCount.median}) | negative:positive modifier ratio ${events.negativeToPositiveRatio} | distinct events ${events.distinctEventNames.length} | distinct phases ${events.distinctPhaseIds.length} | zero-event cycles ${events.zeroEventCycles}`);
+  if (scenarios.pressure) {
+    const pressure = scenarios.pressure;
+    console.log('');
+    console.log(`--- trading pressure / bots (${pressure.strategyIds.join(', ')}, two-pass tape feedback) ---`);
+    console.log(`tape: median ${pressure.tapeEntries.median} trades/cycle (buys £${pressure.buyNotional.median} / sells £${pressure.sellNotional.median}) | pressure modifier mean ${pressure.meanAbsPressureModifier.mean} max ${pressure.maxAbsPressureModifier} | price divergence ${pressure.priceDivergencePct.mean}% | collapse-order shift mean ${pressure.collapseOrderShift.mean} pairs`);
+    const header = ['player', 'medianROI', 'meanROI', 'profit%', 'trades/r', 'buys/r', 'sells/r'];
+    console.log(header.map((h) => h.padStart(11)).join(''));
+    for (const [id, p] of Object.entries(pressure.players)) {
+      console.log([
+        id.padStart(11),
+        `${p.medianRoi}%`.padStart(11),
+        `${p.meanRoi}%`.padStart(11),
+        `${p.profitableRoundPct}%`.padStart(11),
+        String(p.meanTradesPerRound).padStart(11),
+        String(p.meanBuysPerRound).padStart(11),
+        String(p.meanSellsPerRound).padStart(11)
+      ].join(''));
+    }
+  }
+  console.log('');
+  console.log(`replay: ${replay.cyclesChecked} cycles re-captured, ${replay.mismatches.length} mismatches`);
+  console.log('');
+  console.log('=== SIM-19 quality flags ===');
+  for (const [name, flag] of Object.entries(flags)) {
+    console.log(`${flag.pass ? 'PASS' : 'FAIL'}  ${name}: ${JSON.stringify(flag.measured)}`);
+  }
+  console.log('');
+  console.log(`HARNESS VERDICT: ${verdict.pass ? 'PASS' : 'FAIL'}`);
+}
+
 function main() {
   const args = parseArgs(process.argv);
   const mode = args.mode || 'tune';
+
+  if (mode === 'multi-cycle') {
+    const cycles = Number(args.cycles || args.rounds || 200);
+    const baseSeed = args['base-seed'] || MULTI_CYCLE_BASE_SEED;
+    const economy = args.economy !== 'off';
+    const observationMs = Number(args['observation-ms'] || 15000);
+    const scenarios = args.scenarios
+      ? String(args.scenarios).split(',').map((s) => s.trim())
+      : SCENARIO_IDS.slice();
+    if (!scenarios.includes('market')) scenarios.unshift('market'); // every analysis consumes market cycles
+
+    const startedAt = Date.now();
+    const run = runMultiCycle({
+      cycles,
+      baseSeed,
+      observationMs,
+      economy,
+      scenarios,
+      onProgress: (done, total) => {
+        if (!args.json) process.stdout.write(`\rprogress: ${done}/${total} cycles`);
+      }
+    });
+    if (!args.json) process.stdout.write('\n');
+    const report = buildMultiCycleReport(run);
+    report.runtimeMs = Date.now() - startedAt; // explicitly separate runtime field
+    report.mode = mode;
+
+    const outPath = args.out || path.join(__dirname, 'output', `${mode}-latest.json`);
+    fs.mkdirSync(path.dirname(outPath), { recursive: true });
+    fs.writeFileSync(outPath, JSON.stringify(report, null, 2));
+
+    if (args.json) {
+      console.log(JSON.stringify(report));
+    } else {
+      printMultiCycleSummary(report);
+      console.log(`\nreport written to ${outPath} (${report.runtimeMs}ms)`);
+    }
+    process.exit(report.verdict.pass ? 0 : 1);
+  }
 
   if (mode === 'bots') {
     const sequences = Number(args.sequences || 24);

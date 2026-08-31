@@ -233,6 +233,12 @@ function quoteBuy(portfolio, spend, price) {
 //     economy variants experience identical prices and collapses; ONLY the
 //     deduction stream differs (exactly what an economy configuration
 //     changes live). Omitting it reproduces env.debits behaviour.
+//   recordTrades: SIM-18 multi-cycle harness — when true, every EXECUTED
+//     trade is appended to the returned executedTape as
+//     { coinId, type: 'BUY'|'SELL', notional, atMs } entries (the executed
+//     2dp consideration/proceeds at the tick instant), ready to feed back
+//     into a follow-up environment's static trade tape. Default false;
+//     omitting it reproduces prior behaviour exactly (empty tape).
 function runRound(context, strategy, {
   startingCash = GAME_STARTING_CASH,
   powerAccount = null,
@@ -240,7 +246,8 @@ function runRound(context, strategy, {
   joinAtMs = 0,
   powerConfig: powerConfigOverrides = null,
   timeOffsetMs = 0,
-  debits = null
+  debits = null,
+  recordTrades = false
 } = {}) {
   const { env, ticks, gridByCoin, signalGrid } = context;
   const debitSchedule = debits || env.debits;
@@ -297,6 +304,10 @@ function runRound(context, strategy, {
   let maxOpenPositionsSeen = 0;
   let zeroPowerSellAttempts = 0;
   let zeroPowerSellExecuted = 0;
+
+  // SIM-18: executed-trade tape for the multi-cycle harness (empty unless
+  // recordTrades is on).
+  const executedTape = [];
 
   const liveCoinIdsAt = (t) => {
     const ids = [];
@@ -395,6 +406,9 @@ function runRound(context, strategy, {
             executedBuys += 1;
             bandTrades[getEscalationBand(env.apocalypsePercentAt(t))] += 1;
             cashDeployed = round2(cashDeployed + (cashBefore - portfolio.cash));
+            if (recordTrades) {
+              executedTape.push({ coinId: action.coinId, type: 'BUY', notional: round2(cashBefore - portfolio.cash), atMs: t });
+            }
             // V2-4: the entry's PUBLIC phase/risk at this tick.
             const entrySignal = signalGrid[i].find((c) => c.coinId === action.coinId);
             if (entrySignal) {
@@ -419,6 +433,9 @@ function runRound(context, strategy, {
             const after = portfolio.holdings.get(action.coinId);
             basisRemoved = round2(basisRemoved + (basisBefore - (after ? after.costBasis : 0)));
             cashRecovered = round2(cashRecovered + (portfolio.cash - cashBefore));
+            if (recordTrades) {
+              executedTape.push({ coinId: action.coinId, type: 'SELL', notional: round2(portfolio.cash - cashBefore), atMs: t });
+            }
           }
         }
       }
@@ -513,7 +530,9 @@ function runRound(context, strategy, {
     buyRiskCounts,
     maxOpenPositionsSeen,
     zeroPowerSellAttempts,
-    zeroPowerSellExecuted
+    zeroPowerSellExecuted,
+    // SIM-18: executed-trade tape (empty unless recordTrades was enabled).
+    executedTape
   };
 }
 

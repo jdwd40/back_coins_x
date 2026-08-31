@@ -390,6 +390,7 @@ module.exports = {
   computeLifecyclePressure,
   computeNormalModifier,
   drawCrashEpisode,
+  resolveRecoveryStrength,
   evaluateCrashRallyFactor,
   computeUnifiedPrice,
   unifiedPriceAt
