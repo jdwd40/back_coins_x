@@ -196,12 +196,12 @@ async function lockParticipant(client, cycleId, userId) {
   return participant;
 }
 
-// True when the coin has an executed Core 3 collapse in THIS cycle. Death is
-// read from the persisted execution state of the given cycle only.
+// True when the coin has a persisted dynamic-collapse death record in THIS
+// cycle. Death is read from the persisted records of the given cycle only.
 async function isCoinCollapsedInCycle(client, cycleId, coinId) {
   const { rows } = await client.query(
-    `SELECT 1 FROM coin_collapse_schedule
-     WHERE cycle_id = $1 AND coin_id = $2 AND executed_at IS NOT NULL`,
+    `SELECT 1 FROM apocalypse_coin_collapses
+     WHERE cycle_id = $1 AND coin_id = $2`,
     [cycleId, coinId]
   );
   return rows.length > 0;
@@ -505,9 +505,8 @@ async function buyRoundTrade({ userId, apocalypseId, coinId, quantity: rawQuanti
        FROM apocalypse_holdings h
        WHERE h.participant_id = $1 AND h.quantity > 0
          AND NOT EXISTS (
-           SELECT 1 FROM coin_collapse_schedule s
-           WHERE s.cycle_id = h.cycle_id AND s.coin_id = h.coin_id
-             AND s.executed_at IS NOT NULL
+           SELECT 1 FROM apocalypse_coin_collapses cc
+           WHERE cc.cycle_id = h.cycle_id AND cc.coin_id = h.coin_id
          )`,
       [participant.participant_id]
     );

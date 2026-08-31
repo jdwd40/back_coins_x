@@ -98,15 +98,16 @@ describe('V2-1 public signals: GET /api/game/market-signals', () => {
   });
 
   test('a collapsed coin is reported dead at exactly £0 with no phase pretence', async () => {
-    // Drive a real cycle to its first scheduled collapse.
     const cycle = await reconcileCycle({ now: new Date('2026-08-20T10:07:00.000Z') });
-    const windowStartMs = new Date(cycle.start_time).getTime() + Number(cycle.duration_ms) * 0.70;
-    await reconcileCycle({ now: new Date(windowStartMs) });
-    const { rows: deadRows } = await db.query(
-      'SELECT coin_id FROM coin_collapse_schedule WHERE cycle_id = $1 AND executed_at IS NOT NULL',
-      [cycle.cycle_id]
+    const { rows: live } = await db.query('SELECT coin_id FROM coins WHERE retired = FALSE ORDER BY coin_id LIMIT 1');
+    const doomedId = live[0].coin_id;
+    await db.query(
+      `INSERT INTO apocalypse_coin_collapses (cycle_id, coin_id, collapse_rank, collapsed_at)
+       VALUES ($1, $2, 0, $3)`,
+      [cycle.cycle_id, doomedId, new Date(cycle.start_time)]
     );
-    expect(deadRows.length).toBeGreaterThan(0);
+    await db.query('UPDATE coins SET current_price = 0 WHERE coin_id = $1', [doomedId]);
+    const deadRows = [{ coin_id: doomedId }];
 
     // Pin the endpoint's lifecycle reconciliation to that live mid-collapse
     // cycle (the real wall clock is past the fixture cycle's window).

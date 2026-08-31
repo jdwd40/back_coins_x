@@ -36,6 +36,7 @@ const seed = async (shouldEnd = false) => {
       DROP TABLE IF EXISTS "apocalypse_coin_events" CASCADE;
       DROP TABLE IF EXISTS "apocalypse_market_phases" CASCADE;
       DROP TABLE IF EXISTS "apocalypse_market_state" CASCADE;
+      DROP TABLE IF EXISTS "apocalypse_coin_collapses" CASCADE;
       DROP TABLE IF EXISTS "apocalypse_transactions" CASCADE;
       DROP TABLE IF EXISTS "apocalypse_holdings" CASCADE;
       DROP TABLE IF EXISTS "apocalypse_participants" CASCADE;
@@ -288,6 +289,15 @@ const seed = async (shouldEnd = false) => {
       'utf8'
     );
     await db.query(marketStateMigration);
+
+    console.log('📦 Applying dynamic-collapse migration (db/migrations/022_create_dynamic_collapse.sql)...');
+    // Wave 4 (SIM-13/14) durable dynamic-collapse death record DDL, sourced
+    // from the production migration only.
+    const dynamicCollapseMigration = require('fs').readFileSync(
+      require('path').join(__dirname, 'migrations', '022_create_dynamic_collapse.sql'),
+      'utf8'
+    );
+    await db.query(dynamicCollapseMigration);
 
     console.log('📦 Inserting coins data...');
     // Insert coins data

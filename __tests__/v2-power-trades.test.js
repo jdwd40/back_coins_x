@@ -28,6 +28,7 @@ const EARLY = new Date(CYCLE_START_MS + DURATION_MS * 0.10);
 const WINDOW_START = new Date(CYCLE_START_MS + DURATION_MS * 0.70);
 const AFTER_END = new Date(CYCLE_START_MS + DURATION_MS + 60 * 1000);
 const LONG_DURATION_MS = 7 * 24 * 60 * 60 * 1000;
+const LONG_ROUND_NOW = new Date('2020-01-01T00:00:00.000Z');
 
 function round2(value) {
   return Math.round(value * 100) / 100;
@@ -68,24 +69,30 @@ async function txRows(participantId) {
   return rows;
 }
 
-// Wall-clock cycle (7-day window: every coin stays alive) with user 1 joined.
+// Fixed-time cycle (fresh 7-day window: every coin stays alive) with user 1 joined.
 async function setupLongRound(userId = 1) {
-  const now = new Date();
+  const now = LONG_ROUND_NOW;
   const cycle = await reconcileCycle({ now, durationMs: LONG_DURATION_MS });
   const participant = await joinRound({ userId, now });
   return { cycle, participant, now };
 }
 
-// Fixed-time cycle matching the Core 4 lifecycle suites (rank-0 collapse
-// executes when reconciled at WINDOW_START).
+// Fixed-time cycle used by lifecycle tests. Dynamic collapse deaths are
+// created only on actual risk evaluation; collapse-specific cases insert an
+// already-executed durable death record via markDynamicCollapse below.
 async function setupFixedRound(userId = 1) {
-  const cycle = await reconcileCycle({ now: EARLY });
+  const cycle = await reconcileCycle({ now: EARLY, durationMs: DURATION_MS, generateSeed: () => 'v2-power-fixed-seed' });
   const participant = await joinRound({ userId, now: EARLY });
-  const { rows } = await db.query(
-    'SELECT coin_id FROM coin_collapse_schedule WHERE cycle_id = $1 AND collapse_rank = 0',
-    [cycle.cycle_id]
+  return { cycle, participant, rank0CoinId: 1 };
+}
+
+async function markDynamicCollapse(cycleId, coinId, at = WINDOW_START) {
+  await db.query(
+    `INSERT INTO apocalypse_coin_collapses (cycle_id, coin_id, collapse_rank, collapsed_at)
+     VALUES ($1, $2, 0, $3)`,
+    [cycleId, coinId, at]
   );
-  return { cycle, participant, rank0CoinId: rows[0].coin_id };
+  await db.query('UPDATE coins SET current_price = 0 WHERE coin_id = $1', [coinId]);
 }
 
 describe('V2-2 live Power: guard', () => {
@@ -319,8 +326,8 @@ describe('V2-2 live position limit', () => {
       await buyRoundTrade({ userId: 1, apocalypseId: cycle.apocalypse_id, coinId, quantity: 1, now: EARLY });
     }
 
-    // Execute the rank-0 collapse for real through the Core 1/3 lifecycle.
-    await reconcileCycle({ now: WINDOW_START });
+    // Mark this held coin dead through the persisted dynamic authority.
+    await markDynamicCollapse(cycle.cycle_id, rank0CoinId);
 
     // The dead holding is still there, worth exactly £0 — but no longer
     // consumes a live slot, so a fourth distinct coin can be opened. The
@@ -448,7 +455,7 @@ describe('V2-2 cost basis and unrealised P&L', () => {
     const expectedBasis = round2(quantity * entryPrice);
 
     await buyRoundTrade({ userId: 1, apocalypseId: cycle.apocalypse_id, coinId: rank0CoinId, quantity, now: EARLY });
-    await reconcileCycle({ now: WINDOW_START }); // executes the rank-0 collapse
+    await markDynamicCollapse(cycle.cycle_id, rank0CoinId);
 
     const state = await getParticipantRoundState(participant.participantId);
     const dead = state.holdings.find((h) => h.coinId === rank0CoinId);

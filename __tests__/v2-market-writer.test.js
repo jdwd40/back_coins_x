@@ -124,14 +124,21 @@ describe('V2-1 market writer: batch state resolution', () => {
 describe('V2-1 market writer: collapsed coins stay exactly £0', () => {
   const WINDOW_START_MS = new Date('2026-08-25T10:00:00.000Z').getTime() + DURATION_MS * 0.70;
 
-  async function collapseRankZeroCoin() {
+  async function collapseOneCoin() {
     const cycle = await gameCycleService.reconcileCycle({ now: new Date('2026-08-25T10:07:00.000Z') });
-    const { rows } = await db.query(
-      'SELECT coin_id FROM coin_collapse_schedule WHERE cycle_id = $1 AND collapse_rank = 0',
-      [cycle.cycle_id]
+    // The writer test needs one already-authoritative durable death and live
+    // survivors. Dynamic execution itself is covered in dynamic-collapse;
+    // here insert the persisted execution record exactly as that authority
+    // commits it, with no legacy future schedule involved.
+    const { rows } = await db.query('SELECT coin_id FROM coins WHERE retired = FALSE ORDER BY coin_id LIMIT 1');
+    const coinId = rows[0].coin_id;
+    await db.query(
+      `INSERT INTO apocalypse_coin_collapses (cycle_id, coin_id, collapse_rank, collapsed_at)
+       VALUES ($1, $2, 0, $3)`,
+      [cycle.cycle_id, coinId, new Date(WINDOW_START_MS)]
     );
-    await gameCycleService.reconcileCycle({ now: new Date(WINDOW_START_MS) });
-    return { cycle, coinId: rows[0].coin_id };
+    await db.query('UPDATE coins SET current_price = 0 WHERE coin_id = $1', [coinId]);
+    return { cycle, coinId };
   }
 
   beforeEach(() => {
@@ -145,7 +152,7 @@ describe('V2-1 market writer: collapsed coins stay exactly £0', () => {
   });
 
   test('the market update never revives a collapsed coin and never writes new history for it', async () => {
-    const { cycle, coinId } = await collapseRankZeroCoin();
+    const { cycle, coinId } = await collapseOneCoin();
     pinCycle(cycle, WINDOW_START_MS + 60_000);
 
     const historyBefore = await db.query('SELECT count(*)::int AS n FROM price_history WHERE coin_id = $1', [coinId]);
@@ -158,7 +165,7 @@ describe('V2-1 market writer: collapsed coins stay exactly £0', () => {
   });
 
   test('the collapsed coin is never priced: domain calls cover exactly the survivors', async () => {
-    const { cycle, coinId } = await collapseRankZeroCoin();
+    const { cycle, coinId } = await collapseOneCoin();
     pinCycle(cycle, WINDOW_START_MS + 60_000);
     const calcSpy = jest.spyOn(marketSimulator, 'calculateNewPrice');
 
@@ -172,7 +179,7 @@ describe('V2-1 market writer: collapsed coins stay exactly £0', () => {
   });
 
   test('a zero-priced dead coin does not trip the invalid-write protection: the batch commits', async () => {
-    const { cycle } = await collapseRankZeroCoin();
+    const { cycle } = await collapseOneCoin();
     pinCycle(cycle, WINDOW_START_MS + 60_000);
 
     const marketHistoryBefore = await db.query('SELECT count(*)::int AS n FROM market_history');
@@ -182,7 +189,7 @@ describe('V2-1 market writer: collapsed coins stay exactly £0', () => {
   });
 
   test('malformed state (collapsed coin with a non-zero price) fails safely: nothing written, nothing revived', async () => {
-    const { cycle, coinId } = await collapseRankZeroCoin();
+    const { cycle, coinId } = await collapseOneCoin();
     pinCycle(cycle, WINDOW_START_MS + 60_000);
     await db.query('UPDATE coins SET current_price = 5 WHERE coin_id = $1', [coinId]);
 

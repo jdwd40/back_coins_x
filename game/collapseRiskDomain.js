@@ -10,24 +10,25 @@
 //   A coarse danger hint for the desired late-game decision:
 //     "My position is +30%. Apocalypse is 92%. The coin is CRITICAL.
 //      Do I cash out or risk another rise?"
-//   Risk rises with apocalypse progress (collapses only happen inside the
-//   final 30% window — that window boundary is a fixed, publicly documented
-//   game-design constant), with the coin's PUBLIC archetype personality,
-//   and with currently OBSERVABLE market stress (phase/momentum/recent
-//   movement — all already legal public signals).
+//   Risk rises with apocalypse progress (dynamic collapses are very rare
+//   before the late game and escalate with market damage — the public
+//   progress percentage is the legal coarse proxy), with the coin's
+//   PUBLIC archetype personality, and with currently OBSERVABLE market
+//   stress (phase/momentum/recent movement — all already legal public
+//   signals).
 //
 // WHAT THE SIGNAL MUST NEVER BE
-//   A leak of the hidden collapse schedule. This module NEVER reads the
-//   persisted schedule, collapse ranks, scheduled timestamps or the
-//   collapse RNG stream, and never derives risk from "is this the next
-//   scheduled coin?" or any equivalent future lookup. Its only seeded
-//   inputs are two noise streams with their own domain separators
-//   (':v2-risk:' / ':v2-risk-jitter:'), which are INDEPENDENT of the Core 3
-//   collapse shuffle — so the per-coin noise cannot correlate with the
-//   collapse order. The result is deliberately useful but imperfect:
-//   CRITICAL coins are genuinely dangerous to hold late in the round, yet
-//   the risk ranking is provably NOT a classifier for which coin dies next
-//   (asserted by test over seeded samples).
+//   A leak of hidden collapse state. This module NEVER reads the persisted
+//   dynamic-collapse death records, the seeded collapse rolls or any
+//   equivalent future lookup, and never derives risk from "is this coin
+//   about to die?". Its only seeded inputs are two noise streams with their
+//   own domain separators (':v2-risk:' / ':v2-risk-jitter:'), which are
+//   INDEPENDENT of the SIM-13 dynamic-collapse roll stream — so the
+//   per-coin noise cannot correlate with actual death order. The result is
+//   deliberately useful but imperfect: CRITICAL coins are genuinely
+//   dangerous to hold late in the round, yet the risk ranking is provably
+//   NOT a classifier for which coin dies next (asserted by test over
+//   seeded samples).
 //
 // Vocabulary (fixed, exported): STABLE < SHAKY < DANGER < CRITICAL for
 // live coins. Collapsed coins are not rated here at all — the callers
@@ -63,9 +64,11 @@ const ARCHETYPE_RISK = Object.freeze({
   RUG: 1.75
 });
 
-// Progress danger ramp. Collapses only occur from 70% onward, so danger
-// begins rising ahead of the window and steepens inside it: zero below
-// 45%, full weight at 100%. Uses ONLY the public apocalypse percentage.
+// Progress danger ramp. Dynamic collapses (SIM-13) become meaningfully
+// likely only late in the cycle (the pre-decline risk cap keeps early
+// deaths very rare), so danger begins rising ahead of the late game and
+// steepens inside it: zero below 45%, full weight at 100%. Uses ONLY the
+// public apocalypse percentage.
 function progressDanger(apocalypsePercent) {
   const p = typeof apocalypsePercent === 'number' && Number.isFinite(apocalypsePercent)
     ? Math.min(100, Math.max(0, apocalypsePercent))

@@ -20,8 +20,11 @@ const marketSimulator = require('../models/market-simulator');
 const CYCLE_START_MS = new Date('2026-08-20T10:00:00.000Z').getTime();
 const DURATION_MS = 30 * 60 * 1000;
 const EARLY = new Date(CYCLE_START_MS + DURATION_MS * 0.10);
-const WINDOW_START = new Date(CYCLE_START_MS + DURATION_MS * 0.70);
 const AFTER_END = new Date(CYCLE_START_MS + DURATION_MS + 60 * 1000);
+
+function atFraction(fraction) {
+  return new Date(CYCLE_START_MS + DURATION_MS * fraction);
+}
 
 function tokenFor(userId) {
   return jwt.sign({ user_id: userId }, process.env.JWT_SECRET, { expiresIn: '1h' });
@@ -35,34 +38,71 @@ async function participantRow(participantId) {
   return rows[0];
 }
 
-// Create the fixed-time cycle and return { cycle, firstCoinId } where
-// firstCoinId is the coin scheduled to collapse first (rank 0).
+// Create the fixed-time cycle with a fixed seed.
 async function fixedCycle() {
-  const cycle = await reconcileCycle({ now: EARLY });
-  const { rows } = await db.query(
-    'SELECT coin_id FROM coin_collapse_schedule WHERE cycle_id = $1 AND collapse_rank = 0',
-    [cycle.cycle_id]
-  );
-  return { cycle, firstCoinId: rows[0].coin_id };
+  const cycle = await reconcileCycle({ now: EARLY, durationMs: DURATION_MS, generateSeed: () => 'round-lifecycle-seed' });
+  return { cycle };
 }
 
-describe('Core 4: Core 3 collapsed-coin behaviour in round trades', () => {
+// Crash the market and reconcile until the dynamic engine has executed at
+// least one real death; returns the first dead coin id.
+async function collapseOneCoin(cycle) {
+  await db.query('UPDATE coins SET current_price = GREATEST(0.0001, current_price * 0.0001)');
+  await reconcileCycle({ now: atFraction(0.56) });
+  await reconcileCycle({ now: atFraction(0.71) });
+  await reconcileCycle({ now: atFraction(0.72) });
+  for (let p = 0.73; p < 1; p += 0.02) {
+    await reconcileCycle({ now: atFraction(p) });
+    const { rows } = await db.query(
+      'SELECT coin_id FROM apocalypse_coin_collapses WHERE cycle_id = $1 ORDER BY collapse_rank LIMIT 1',
+      [cycle.cycle_id]
+    );
+    if (rows.length > 0) return rows[0].coin_id;
+  }
+  throw new Error('dynamic collapse engine produced no deaths for a crashed market');
+}
+
+// Crash the market and reconcile until THIS coin is dead (falling back to
+// the settlement safety rule at cycle end when the rolls spare it — either
+// way the death authority is the real engine and the coin ends dead).
+async function collapseThisCoin(cycle, coinId) {
+  await db.query('UPDATE coins SET current_price = GREATEST(0.0001, current_price * 0.0001)');
+  await reconcileCycle({ now: atFraction(0.56) });
+  await reconcileCycle({ now: atFraction(0.71) });
+  await reconcileCycle({ now: atFraction(0.72) });
+  for (let p = 0.73; p < 0.99; p += 0.02) {
+    await reconcileCycle({ now: atFraction(p) });
+    const { rows } = await db.query(
+      'SELECT 1 FROM apocalypse_coin_collapses WHERE cycle_id = $1 AND coin_id = $2',
+      [cycle.cycle_id, coinId]
+    );
+    if (rows.length > 0) return;
+  }
+  await reconcileCycle({ now: AFTER_END }); // settlement safety rule
+  const { rows } = await db.query(
+    'SELECT 1 FROM apocalypse_coin_collapses WHERE cycle_id = $1 AND coin_id = $2',
+    [cycle.cycle_id, coinId]
+  );
+  expect(rows).toHaveLength(1);
+}
+
+describe('SIM-13/14: collapsed-coin behaviour in round trades', () => {
   test('buying a coin collapsed in this cycle is rejected with a clear domain error, nothing written', async () => {
-    const { cycle, firstCoinId } = await fixedCycle();
+    const { cycle } = await fixedCycle();
     const participant = await joinRound({ userId: 1, now: EARLY });
-    await reconcileCycle({ now: WINDOW_START }); // rank 0 collapses to £0
+    const deadCoinId = await collapseOneCoin(cycle);
 
     const response = await request(app)
       .post('/api/game/trades/buy')
       .set('Authorization', `Bearer ${tokenFor(1)}`)
-      .send({ cycleId: cycle.apocalypse_id, coin_id: firstCoinId, amount: 1 });
+      .send({ cycleId: cycle.apocalypse_id, coin_id: deadCoinId, amount: 1 });
 
     // The API runs at wall-clock now; if the fixed cycle has already rolled
     // over in real time the stale-cycle rejection (409) is equally correct —
     // assert the domain behaviour via the service at the fixed time instead.
     if (response.status === 409) {
       await expect(
-        buyRoundTrade({ userId: 1, apocalypseId: cycle.apocalypse_id, coinId: firstCoinId, quantity: 1, now: WINDOW_START })
+        buyRoundTrade({ userId: 1, apocalypseId: cycle.apocalypse_id, coinId: deadCoinId, quantity: 1, now: EARLY })
       ).rejects.toMatchObject({ status: 400, message: expect.stringMatching(/collapsed to £0/) });
     } else {
       expect(response.status).toBe(400);
@@ -76,31 +116,54 @@ describe('Core 4: Core 3 collapsed-coin behaviour in round trades', () => {
   });
 
   test('a collapsed holding sells at the authoritative £0 and credits exactly zero cash', async () => {
-    const { cycle, firstCoinId } = await fixedCycle();
+    const { cycle } = await fixedCycle();
     const participant = await joinRound({ userId: 1, now: EARLY });
 
-    // Buy while alive (service-level, fixed time for determinism).
-    const { rows: coinRows } = await db.query('SELECT current_price FROM coins WHERE coin_id = $1', [firstCoinId]);
-    const price = parseFloat(coinRows[0].current_price);
-    const buy = await buyRoundTrade({
-      userId: 1, apocalypseId: cycle.apocalypse_id, coinId: firstCoinId, quantity: 5, now: EARLY
-    });
-    const expectedCost = Math.round(5 * price * 100) / 100;
-    expect(buy.transaction.totalAmount).toBeCloseTo(expectedCost, 2);
-    const cashAfterBuy = 10000 - expectedCost;
+    // Buy a small position in three coins while everything is alive (the
+    // shared 3-position limit), so at least one held coin is there when the
+    // dynamic engine kills it.
+    const heldCoinIds = [1, 2, 3];
+    let totalSpent = 0;
+    for (const coinId of heldCoinIds) {
+      const { rows: coinRows } = await db.query('SELECT current_price FROM coins WHERE coin_id = $1', [coinId]);
+      const price = parseFloat(coinRows[0].current_price);
+      const buy = await buyRoundTrade({
+        userId: 1, apocalypseId: cycle.apocalypse_id, coinId, quantity: 5, now: EARLY
+      });
+      const expectedCost = Math.round(5 * price * 100) / 100;
+      expect(buy.transaction.totalAmount).toBeCloseTo(expectedCost, 2);
+      totalSpent += expectedCost;
+    }
+    const cashAfterBuys = Math.round((10000 - totalSpent) * 100) / 100;
 
-    // The coin collapses while held.
-    await reconcileCycle({ now: WINDOW_START });
+    // The market crashes; the dynamic engine executes real deaths. Sell the
+    // first HELD coin to die: executed at £0, adds exactly zero cash.
+    await db.query('UPDATE coins SET current_price = GREATEST(0.0001, current_price * 0.0001)');
+    await reconcileCycle({ now: atFraction(0.56) });
+    await reconcileCycle({ now: atFraction(0.71) });
+    await reconcileCycle({ now: atFraction(0.72) });
+    let deadCoinId = null;
+    let sellNow = null;
+    for (let p = 0.73; p < 0.99 && deadCoinId === null; p += 0.02) {
+      sellNow = atFraction(p);
+      await reconcileCycle({ now: sellNow });
+      const { rows } = await db.query(
+        `SELECT coin_id FROM apocalypse_coin_collapses
+         WHERE cycle_id = $1 AND coin_id = ANY($2) ORDER BY collapse_rank LIMIT 1`,
+        [cycle.cycle_id, heldCoinIds]
+      );
+      if (rows.length > 0) deadCoinId = rows[0].coin_id;
+    }
+    expect(deadCoinId).not.toBeNull();
 
-    // Sell the dead holding: executed at £0, adds exactly zero cash.
     const sell = await sellRoundTrade({
-      userId: 1, apocalypseId: cycle.apocalypse_id, coinId: firstCoinId, quantity: 5, now: WINDOW_START
+      userId: 1, apocalypseId: cycle.apocalypse_id, coinId: deadCoinId, quantity: 5, now: sellNow
     });
     expect(sell.transaction.price).toBe(0);
     expect(sell.transaction.totalAmount).toBe(0);
 
     const p = await participantRow(participant.participantId);
-    expect(parseFloat(p.current_cash)).toBeCloseTo(cashAfterBuy, 2);
+    expect(parseFloat(p.current_cash)).toBeCloseTo(cashAfterBuys, 2);
 
     const { rows: txs } = await db.query(
       `SELECT * FROM apocalypse_transactions WHERE participant_id = $1 AND type = 'SELL'`,
@@ -114,12 +177,12 @@ describe('Core 4: Core 3 collapsed-coin behaviour in round trades', () => {
 
 describe('Core 4: wealth and monotonic peak', () => {
   test('wealth = current cash + live holdings value; collapsed holdings count £0', async () => {
-    const { cycle, firstCoinId } = await fixedCycle();
+    const { cycle } = await fixedCycle();
     const participant = await joinRound({ userId: 1, now: EARLY });
-    const { rows: coinRows } = await db.query('SELECT current_price FROM coins WHERE coin_id = $1', [firstCoinId]);
+    const { rows: coinRows } = await db.query('SELECT current_price FROM coins WHERE coin_id = 1');
     const price = parseFloat(coinRows[0].current_price);
 
-    await buyRoundTrade({ userId: 1, apocalypseId: cycle.apocalypse_id, coinId: firstCoinId, quantity: 10, now: EARLY });
+    await buyRoundTrade({ userId: 1, apocalypseId: cycle.apocalypse_id, coinId: 1, quantity: 10, now: EARLY });
     let state = await getParticipantRoundState(participant.participantId);
     const cost = Math.round(10 * price * 100) / 100;
     expect(state.currentCash).toBeCloseTo(10000 - cost, 2);
@@ -127,21 +190,16 @@ describe('Core 4: wealth and monotonic peak', () => {
     expect(state.wealth).toBeCloseTo(10000, 2);
 
     // Collapse: holdings now worth exactly £0; wealth falls to cash only.
-    await reconcileCycle({ now: WINDOW_START });
+    await collapseThisCoin(cycle, 1);
     state = await getParticipantRoundState(participant.participantId);
     expect(state.holdingsValue).toBe(0);
     expect(state.wealth).toBeCloseTo(10000 - cost, 2);
   });
 
   test('peak is monotonic across live price movements via the set-based reconciliation', async () => {
-    const { cycle, firstCoinId } = await fixedCycle();
+    const { cycle } = await fixedCycle();
     const participant = await joinRound({ userId: 1, now: EARLY });
-    // Use a coin that is NOT rank 0 so it survives the first collapse.
-    const { rows: survivors } = await db.query(
-      `SELECT coin_id FROM coins WHERE coin_id <> $1 ORDER BY coin_id LIMIT 1`,
-      [firstCoinId]
-    );
-    const coinId = survivors[0].coin_id;
+    const coinId = 2;
     await db.query('UPDATE coins SET current_price = 50.00 WHERE coin_id = $1', [coinId]);
 
     await buyRoundTrade({ userId: 1, apocalypseId: cycle.apocalypse_id, coinId, quantity: 10, now: EARLY });
@@ -198,10 +256,10 @@ describe('Core 4: wealth and monotonic peak', () => {
 
 describe('Core 4: finalization and consecutive-cycle isolation', () => {
   test('rollover finalizes participants (final_cash = current_cash), creates no successor state, and the next join starts fresh £10,000', async () => {
-    const { cycle, firstCoinId } = await fixedCycle();
+    const { cycle } = await fixedCycle();
     const participant = await joinRound({ userId: 1, now: EARLY });
     // Trade so finalization is observably copied from authoritative cash.
-    await buyRoundTrade({ userId: 1, apocalypseId: cycle.apocalypse_id, coinId: firstCoinId, quantity: 2, now: EARLY });
+    await buyRoundTrade({ userId: 1, apocalypseId: cycle.apocalypse_id, coinId: 1, quantity: 2, now: EARLY });
     const before = await participantRow(participant.participantId);
 
     // Roll over past the end: Core 3 final collapses execute first, then
@@ -243,18 +301,18 @@ describe('Core 4: finalization and consecutive-cycle isolation', () => {
   });
 
   test("previous cycle's holdings cannot be sold in the successor cycle", async () => {
-    const { cycle, firstCoinId } = await fixedCycle();
+    const { cycle } = await fixedCycle();
     await joinRound({ userId: 1, now: EARLY });
     // Buy a coin that survives the whole first cycle? All coins collapse by
     // cycle end — but the HOLDING row persists regardless; cross-cycle
     // isolation must still reject the sale in the successor.
-    await buyRoundTrade({ userId: 1, apocalypseId: cycle.apocalypse_id, coinId: firstCoinId, quantity: 3, now: EARLY });
+    await buyRoundTrade({ userId: 1, apocalypseId: cycle.apocalypse_id, coinId: 1, quantity: 3, now: EARLY });
 
     const successor = await reconcileCycle({ now: AFTER_END });
     const next = await joinRound({ userId: 1, now: AFTER_END });
 
     await expect(
-      sellRoundTrade({ userId: 1, apocalypseId: successor.apocalypse_id, coinId: firstCoinId, quantity: 3, now: AFTER_END })
+      sellRoundTrade({ userId: 1, apocalypseId: successor.apocalypse_id, coinId: 1, quantity: 3, now: AFTER_END })
     ).rejects.toMatchObject({ status: 400, message: expect.stringMatching(/Insufficient round holdings/) });
 
     // Successor state untouched.
@@ -267,7 +325,7 @@ describe('Core 4: finalization and consecutive-cycle isolation', () => {
     // Old holding row still belongs to the old cycle.
     const { rows: oldH } = await db.query(
       'SELECT cycle_id FROM apocalypse_holdings WHERE coin_id = $1',
-      [firstCoinId]
+      [1]
     );
     expect(oldH[0].cycle_id).toBe(cycle.cycle_id);
   });

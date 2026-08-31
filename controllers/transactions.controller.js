@@ -7,7 +7,7 @@ const {
 } = require('../models/transactions.model');
 const { selectCoinRawById } = require('../models/coins.model');
 const { getUserFunds } = require('../models/users.model');
-const { isCoinCollapsed } = require('../game/collapseScheduleService');
+const { isCoinCollapsed } = require('../game/dynamicCollapseService');
 
 // V2 legacy cleanup (#22): exports.createTransaction (the root POST
 // /api/transactions handler) is removed with its route. It trusted

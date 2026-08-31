@@ -43,11 +43,16 @@ describe('V2-1 simulation: paired identical market paths', () => {
     }
   });
 
-  test('the collapse window matches Core 3: no deaths before 70%, all dead at 100%', () => {
+  test('dynamic deaths stay within the round and the final safety rule kills every survivor at 100%', () => {
     const env = createRoundEnvironment({ seed: SEED });
     for (const [, atMs] of env.collapseAtMs) {
-      expect(atMs).toBeGreaterThanOrEqual(env.durationMs * 0.7);
+      // SIM-13 replaces the fixed 70% scheduler with bounded, market-reactive
+      // risk rolls; early deaths are possible but deliberately rare.
+      expect(atMs).toBeGreaterThanOrEqual(0);
       expect(atMs).toBeLessThanOrEqual(env.durationMs);
+    }
+    for (const coin of CANONICAL_COINS) {
+      expect(env.isDead(coin.coinId, env.durationMs)).toBe(true);
     }
   });
 

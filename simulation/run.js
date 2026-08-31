@@ -10,7 +10,7 @@
 // 15s observation cadence (a realistic client), all seven strategies.
 //
 // The simulator is intentionally DB-free: it only uses pure domain modules.
-// Some shared modules (collapseScheduleService, economyService) require the
+// Some shared modules (dynamicCollapseService, economyService) require the
 // app's pg pool module at load time; the pool is lazily connected and never
 // queried here, so a placeholder database name keeps module loading hermetic
 // without touching any real database.

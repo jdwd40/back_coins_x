@@ -16,16 +16,19 @@
 //
 // Public-state-only decisions: the decision layer accepts ONLY the
 // deliberately shaped market state built here — live coin prices, recent
-// public price history, EXECUTED collapse status, the SAME coarse V2 public
-// signals human clients receive (phase, momentum, archetype, recent public
-// movement, collapse-risk level), the bot's own cash/holdings economics,
-// its own effective Power view and open-position count/limit, and
-// apocalypsePercent. Scheduled-but-unexecuted (future) collapse data is
-// never read for decisions and never present in the shaped state; the cycle
-// seed is used ONLY to evaluate the shared public-signal domains and to key
-// the deterministic random stream — it never enters the shaped state. V2-4
-// enforces this with an exact-key allowlist (assertPublicBotState) that runs
-// on every live AND simulated decision input.
+// public price history, EXECUTED collapse status (a coin publicly dead at
+// £0, read from the dynamic collapse engine's persisted death records),
+// the SAME coarse V2 public signals human clients receive (phase,
+// momentum, archetype, recent public movement, collapse-risk level), the
+// bot's own cash/holdings economics, its own effective Power view and
+// open-position count/limit, and apocalypsePercent. Future collapse data
+// is never read for decisions and — under the dynamic engine — is never
+// even persisted ahead of time, so none can exist in the shaped state; the
+// cycle seed is used ONLY to evaluate the shared public-signal domains and
+// to key the deterministic random stream — it never enters the shaped
+// state. V2-4 enforces this with an exact-key allowlist
+// (assertPublicBotState) that runs on every live AND simulated decision
+// input.
 //
 // V2-4 resource legality: bots buy/sell only through the shared Core 4
 // domain ops, so every bot buy pays the SAME Power cost and obeys the SAME
@@ -233,11 +236,12 @@ async function ensureBotsProvisioned({ queryable = db } = {}) {
 // client receives from the market-signals endpoint (phase, momentum,
 // archetype, recent public movement, collapse-risk level), the bot's own
 // cash/holdings economics, its own effective Power view and its own open
-// live position count/limit, plus apocalypsePercent. Future/scheduled
-// collapse data is never selected here; the cycle seed is used ONLY to
-// evaluate the shared public-signal domains (exactly like
-// marketSignalsService) and is never present in the returned shape — the
-// exact key allowlists above are the contract.
+// live position count/limit, plus apocalypsePercent. Future collapse data
+// is never selected here (and under the dynamic engine is never persisted
+// ahead of time); the cycle seed is used ONLY to evaluate the shared
+// public-signal domains (exactly like marketSignalsService) and is never
+// present in the returned shape — the exact key allowlists above are the
+// contract.
 // ---------------------------------------------------------------------------
 async function buildPublicMarketState({ cycle, participant, now = new Date(), queryable = db } = {}) {
   const nowDate = now instanceof Date ? now : new Date(now);
@@ -252,16 +256,16 @@ async function buildPublicMarketState({ cycle, participant, now = new Date(), qu
   const roundStartMs = new Date(cycle.start_time).getTime();
   const cycleDurationMs = Number(cycle.duration_ms);
 
-  // SIM-08: the persisted Wave 1/2 pricing context for the shared unified
-  // signal, read through the caller's queryable (same transaction snapshot
-  // when inside the advisory-locked bot tick). Internal only.
-  const pricingContext = await loadPricingContext(queryable, cycle);
+  // SIM-08/SIM-11: the persisted Wave 1/2/4 pricing context for the shared
+  // unified signal, read through the caller's queryable (same transaction
+  // snapshot when inside the advisory-locked bot tick). Internal only.
+  const pricingContext = await loadPricingContext(queryable, cycle, { nowMs });
 
   const { rows: coinRows } = await queryable.query(
     `SELECT c.coin_id, c.symbol, c.current_price, c.cycle_baseline_price,
             EXISTS (
-              SELECT 1 FROM coin_collapse_schedule s
-              WHERE s.cycle_id = $1 AND s.coin_id = c.coin_id AND s.executed_at IS NOT NULL
+              SELECT 1 FROM apocalypse_coin_collapses cc
+              WHERE cc.cycle_id = $1 AND cc.coin_id = c.coin_id
             ) AS collapsed
      FROM coins c
      WHERE c.retired = FALSE
@@ -679,6 +683,21 @@ function guardedBuy({ coin, snapshot, profile, maxTradeSize, maxCoinExposureFrac
 //                  big wins and panic-cuts deep losses — sometimes winning
 //                  large, sometimes riding a collapse — while the central
 //                  caps and universal late/extreme safeguards still bind.
+//
+// SIM-12 layers on top (still public-state only, still through the shared
+// Core 4 ops and the same bounded pressure path as human trades):
+//   panic selling  — a held coin whose public recent move breaches the
+//                    personality's panic threshold is exited before any
+//                    other strategy rule (thresholds and fractions differ
+//                    per personality; the Dip Buyer never panics);
+//   crash-dip buys — the Dip Buyer treats a crash-sized public drop as a
+//                    dip entry in any coarse phase;
+//   contrarian     — an otherwise-HOLD decision is occasionally (small
+//                    seeded per-personality probability) overridden by a
+//                    guarded buy of the most-fallen FALL coin or a trim of
+//                    the best BOOM gainer. No two personalities share a
+//                    panic threshold, dip rule and contrarian rate, so the
+//                    roster stays observably non-identical.
 function decideBotAction({
   strategy,
   marketState,
@@ -742,6 +761,23 @@ function decideBotAction({
       };
     });
 
+  // SIM-12 panic selling, differentiated by personality: a held coin whose
+  // PUBLIC recent move is a crash-sized drop forces the personality's panic
+  // exit (worst public drop first, deterministic tie-break) — Conservative
+  // bails in full almost immediately, Momentum trims on a violent drop even
+  // before its trend rules confirm, Reckless only folds on a truly violent
+  // drop, and the Dip Buyer has no panic threshold at all (a crash is what
+  // it hunts). Pure function of the shaped public state — no random draws,
+  // no hidden inputs.
+  if (typeof profile.panicSellThreshold === 'number') {
+    const panicked = rankedHoldings
+      .filter((e) => e.coin && e.move <= profile.panicSellThreshold)
+      .sort((a, b) => a.move - b.move || a.entry.holding.coinId - b.entry.holding.coinId);
+    if (panicked.length > 0) {
+      return boundedSell(panicked[0].entry.holding, profile.panicSellFraction);
+    }
+  }
+
   // A held coin whose public risk reading has reached the personality's
   // exit level is sold (worst P&L first). This is the intended V2-3
   // decision mechanised per personality: Conservative bails at DANGER,
@@ -787,6 +823,33 @@ function decideBotAction({
       .sort(sorter || ((a, b) => a.coinId - b.coinId));
   }
 
+  // SIM-12 occasional contrarian behaviour: only ever converts an
+  // otherwise-HOLD decision, with the personality's small seeded
+  // probability. Two legal public-state plays, in order: BUY the most
+  // fallen FALL-phase coin the personality's risk tolerance allows (fading
+  // public pessimism, still through every central guard), or TRIM the best
+  // BOOM-phase gainer (fading public euphoria). Returns null when neither
+  // play exists — the HOLD stands.
+  function contrarianAction() {
+    const maxRisk = riskOrdinal(profile.maxEntryRisk);
+    const fallen = alive
+      .filter((coin) => coin.phase === 'FALL' && riskOrdinal(coin.collapseRisk) <= maxRisk)
+      .sort((a, b) => coinMoveFraction(a) - coinMoveFraction(b) || a.coinId - b.coinId);
+    if (fallen.length > 0) {
+      const buy = guardedBuy({ coin: fallen[0], ...buyGuards, investedCapScale });
+      if (buy.type === 'BUY') return buy;
+    }
+    const euphoric = rankedHoldings
+      .filter((e) => e.coin && e.coin.phase === 'BOOM' && e.pnl > 0)
+      .sort((a, b) => b.pnl - a.pnl || a.entry.holding.coinId - b.entry.holding.coinId);
+    if (euphoric.length > 0) {
+      return boundedSell(euphoric[0].entry.holding, 0.25);
+    }
+    return null;
+  }
+
+  // The personality's own strategy logic. Each case returns its decision.
+  function personalityDecision() {
   switch (strategy) {
     case 'conservative': {
       // Capital preservation first: bail out of any coin the public risk
@@ -875,13 +938,16 @@ function decideBotAction({
       // Buy the public DIP phase (deepest recent public drop first) or a
       // RISE that has barely left the trough — the same legal public cues
       // as the DIP_BOOM human benchmark. Held coins qualify for an add only
-      // when the dip has gone deeper than entry.
+      // when the dip has gone deeper than entry. SIM-12: a crash-sized
+      // public drop qualifies as a dip entry in ANY coarse phase (panic
+      // selling elsewhere is exactly the dip this personality buys).
       const heldIds = new Set(marketState.holdings.filter((h) => h.quantity > 0).map((h) => h.coinId));
       const candidates = entryCandidates({
         extraFilter: (coin) =>
-          coin.phase === 'RISE' && coin.momentum !== 'DOWN'
+          (coin.phase === 'RISE' && coin.momentum !== 'DOWN'
             && typeof coin.recentChangePct === 'number'
-            && coin.recentChangePct <= profile.riseEntryMaxChangePct,
+            && coin.recentChangePct <= profile.riseEntryMaxChangePct)
+          || coinMoveFraction(coin) <= profile.crashDipBuyThreshold,
         sorter: (a, b) => coinMoveFraction(a) - coinMoveFraction(b) || a.coinId - b.coinId
       }).filter((coin) => !heldIds.has(coin.coinId) || recentChange(coin) <= profile.dipEntryThreshold);
       if (candidates.length === 0) return { type: 'HOLD' };
@@ -907,6 +973,19 @@ function decideBotAction({
       // Unreachable: strategy validated above.
       throw new BotServiceError(`unknown bot strategy ${JSON.stringify(strategy)}`, 400);
   }
+  }
+
+  const decided = personalityDecision();
+  if (decided.type !== 'HOLD') return decided;
+  // SIM-12: an otherwise-HOLD decision is occasionally overridden by the
+  // personality's contrarian play (seeded, small probability, public-state
+  // only). The draw is consumed ONLY on the HOLD path, so every
+  // non-HOLD personality decision keeps its existing stream usage.
+  if (random() < profile.contrarianProbability) {
+    const contrarian = contrarianAction();
+    if (contrarian) return contrarian;
+  }
+  return decided;
 }
 
 // Service-side enforcement of the configured per-trade size cap. The pure

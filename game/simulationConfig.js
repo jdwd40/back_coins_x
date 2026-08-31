@@ -26,8 +26,9 @@
 // game/marketPhaseEngine.js; Wave 2 (SIM-06/07) wires the lifecycle section
 // into game/marketStateEngine.js; Wave 3 (SIM-08/09/10) wires the
 // crashRally and lifecycle pressure sections into the unified price path
-// (game/priceEngine.js); the tradingPressure/dynamicCollapse sections
-// remain unwired until Wave 4.
+// (game/priceEngine.js); Wave 4 (SIM-11/13) wires the tradingPressure
+// section into game/tradePressureDomain.js and the dynamicCollapse section
+// into game/dynamicCollapseService.js.
 //
 // All fractions (modifiers, probabilities, magnitudes) are plain numbers:
 // 0.02 means 2%. Durations are integer milliseconds.

@@ -406,15 +406,16 @@ describe('V2-4: live builder publishes the same public signals humans get', () =
     const { rows: botUser } = await db.query('SELECT user_id FROM users WHERE username = $1', [bot.username]);
     const participant = await gameRoundService.joinRound({ userId: botUser[0].user_id, now });
 
-    // Execute the first scheduled collapse publicly (Core 3 semantics).
-    const { rows: scheduled } = await db.query(
-      `SELECT coin_id FROM coin_collapse_schedule WHERE cycle_id = $1 AND executed_at IS NULL ORDER BY collapse_rank LIMIT 1`,
-      [cycle.cycle_id]
+    // Record a real persisted dynamic death (never a future schedule) and
+    // set its authoritative £0 price.
+    const { rows: live } = await db.query(
+      'SELECT coin_id FROM coins WHERE retired = FALSE ORDER BY coin_id LIMIT 1'
     );
-    const doomedId = scheduled[0].coin_id;
+    const doomedId = live[0].coin_id;
     await db.query(
-      `UPDATE coin_collapse_schedule SET executed_at = scheduled_at WHERE cycle_id = $1 AND coin_id = $2`,
-      [cycle.cycle_id, doomedId]
+      `INSERT INTO apocalypse_coin_collapses (cycle_id, coin_id, collapse_rank, collapsed_at)
+       VALUES ($1, $2, 0, $3)`,
+      [cycle.cycle_id, doomedId, now]
     );
     await db.query('UPDATE coins SET current_price = 0 WHERE coin_id = $1', [doomedId]);
 

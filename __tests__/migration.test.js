@@ -30,6 +30,10 @@ async function dropGameSchema() {
   await db.query('DROP TABLE IF EXISTS apocalypse_coin_events CASCADE');
   await db.query('DROP TABLE IF EXISTS apocalypse_market_phases CASCADE');
   await db.query('DROP TABLE IF EXISTS apocalypse_market_state CASCADE');
+  // Wave 4 dynamic death record also references apocalypse_cycles. Drop it
+  // explicitly before the pre-game-schema simulation so dropping cycles
+  // cannot leave a compatible-looking table with its FKs stripped.
+  await db.query('DROP TABLE IF EXISTS apocalypse_coin_collapses CASCADE');
   await db.query('DROP TABLE IF EXISTS apocalypse_transactions CASCADE');
   await db.query('DROP TABLE IF EXISTS apocalypse_holdings CASCADE');
   await db.query('DROP TABLE IF EXISTS apocalypse_participants CASCADE');

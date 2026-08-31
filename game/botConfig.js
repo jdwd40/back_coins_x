@@ -318,7 +318,9 @@ const BOT_PERSONALITY_PROFILES = Object.freeze({
   // late-game cash target of the roster. V2-4: enters only DIP/early-RISE
   // coins reading STABLE/SHAKY, walks away from anything DANGEROUS, and
   // banks a BOOM the moment its momentum stops confirming — lower activity
-  // and lower drawdown than the rest of the roster by design.
+  // and lower drawdown than the rest of the roster by design. SIM-12: the
+  // fastest panic seller of the roster (any crash-sized public drop on a
+  // held coin is exited in full) and almost never contrarian.
   conservative: Object.freeze({
     stakeFraction: 0.05,
     activityGate: 0.5, // only acts when the seeded random lands below this
@@ -333,12 +335,17 @@ const BOT_PERSONALITY_PROFILES = Object.freeze({
     preferredEntryPhases: ['DIP', 'RISE'],
     maxEntryRisk: 'SHAKY',
     exitAtRisk: 'DANGER',
-    boomExitOnWeakMomentum: true
+    boomExitOnWeakMomentum: true,
+    panicSellThreshold: -0.08, // a public crash-sized drop on a held coin: bail in full
+    panicSellFraction: 1,
+    contrarianProbability: 0.02
   }),
   // Momentum Mike: trades the short-term trend. V2-4: enters an ESTABLISHED
   // RISE whose public momentum still reads UP (it may enter later than the
   // Dip Buyer), and exits the moment the trend stops confirming — public
   // momentum DOWN, the coin rolling into FALL, or a solid banked gain.
+  // SIM-12: panic-trims a crash-sized public drop on a held coin even
+  // before the trend rules fire, and occasionally fades the crowd.
   momentum: Object.freeze({
     stakeFraction: 0.1,
     momentumWindow: 4, // recent history points the trend is measured over
@@ -355,7 +362,10 @@ const BOT_PERSONALITY_PROFILES = Object.freeze({
     exitAtRisk: 'CRITICAL',
     exitOnDownMomentum: true,
     exitOnPhases: ['FALL'],
-    boomExitOnWeakMomentum: true
+    boomExitOnWeakMomentum: true,
+    panicSellThreshold: -0.12, // a violent public drop: trim before the trend rules confirm
+    panicSellFraction: 0.5,
+    contrarianProbability: 0.05
   }),
   // Dip Buyer Dana: buys meaningful dips, sells meaningful recoveries, cuts
   // a dip that keeps collapsing instead of averaging down forever, and is
@@ -365,6 +375,9 @@ const BOT_PERSONALITY_PROFILES = Object.freeze({
   // human benchmark uses) — riding toward the BOOM before selling. It
   // tolerates DANGER entries like a skilled dip buyer, holds longer than
   // Conservative and may occasionally overstay, but never buys CRITICAL.
+  // SIM-12: NEVER panic sells — a crash-sized public drop is exactly what
+  // it hunts (crash-dip entries qualify even outside the strict DIP-phase
+  // rule); the most deliberately contrarian calm personality.
   dip_buyer: Object.freeze({
     stakeFraction: 0.3,
     dipEntryThreshold: -0.1,
@@ -378,7 +391,9 @@ const BOT_PERSONALITY_PROFILES = Object.freeze({
     preferredEntryPhases: ['DIP'],
     riseEntryMaxChangePct: 2, // a RISE barely off the trough still counts as a dip entry
     fallExitThreshold: -0.08, // a FALL-phase position this far underwater: the boom did not come — cut
-    maxEntryRisk: 'DANGER'
+    maxEntryRisk: 'DANGER',
+    crashDipBuyThreshold: -0.08, // a crash-sized public drop qualifies as a dip entry anywhere
+    contrarianProbability: 0.08
   }),
   // Reckless Ray: still the aggressor — the largest stakes and the highest
   // invested cap — but locks big wins, panic-cuts only deep losses, and the
@@ -387,7 +402,8 @@ const BOT_PERSONALITY_PROFILES = Object.freeze({
   // willingly buys DANGER/CRITICAL readings the calmer personalities refuse
   // — sometimes winning large, sometimes riding a collapse. The universal
   // late/extreme safeguards still force liquidation, and sells never need
-  // Power.
+  // Power. SIM-12: slow to panic (only a truly violent public drop forces a
+  // full bail) and the most contrarian bot on the roster.
   reckless: Object.freeze({
     stakeFraction: 0.4,
     maxInvestedFraction: 0.8,
@@ -399,7 +415,10 @@ const BOT_PERSONALITY_PROFILES = Object.freeze({
     lateCashTargetFraction: 0.3,
     lateSellFraction: 0.5,
     preferredArchetypes: ['DEGEN', 'RUG'],
-    maxEntryRisk: 'CRITICAL'
+    maxEntryRisk: 'CRITICAL',
+    panicSellThreshold: -0.2, // only a genuinely violent public drop forces the bail
+    panicSellFraction: 1,
+    contrarianProbability: 0.15
   })
 });
 
@@ -446,7 +465,13 @@ function validateBotPersonalityProfiles(profiles = BOT_PERSONALITY_PROFILES) {
     ['exitOnPhases', ['momentum'], isPhaseList],
     ['riseEntryMaxChangePct', ['dip_buyer'], (v) => isFiniteNumber(v) && v >= 0],
     ['fallExitThreshold', ['dip_buyer'], (v) => isFiniteNumber(v) && v < 0],
-    ['preferredArchetypes', ['reckless'], isArchetypeList]
+    ['preferredArchetypes', ['reckless'], isArchetypeList],
+    // SIM-12 feedback fields: panic selling, crash-dip buying and
+    // occasional contrarian behaviour (all public-signal driven).
+    ['panicSellThreshold', ['conservative', 'momentum', 'reckless'], (v) => isFiniteNumber(v) && v < 0 && v > -1],
+    ['panicSellFraction', ['conservative', 'momentum', 'reckless'], isFraction],
+    ['crashDipBuyThreshold', ['dip_buyer'], (v) => isFiniteNumber(v) && v < 0 && v > -1],
+    ['contrarianProbability', BOT_STRATEGIES, (v) => isFiniteNumber(v) && v >= 0 && v <= 0.5]
   ];
   for (const strategy of BOT_STRATEGIES) {
     const profile = profiles[strategy];

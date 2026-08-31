@@ -25,7 +25,7 @@ const {
   ensureMarketState
 } = require('../game/marketStateEngine');
 const { ensureMarketPhaseCoverage, getCycleMarketPhases } = require('../game/marketPhaseEngine');
-const collapseSchedule = require('../game/collapseScheduleService');
+const dynamicCollapseService = require('../game/dynamicCollapseService');
 const { reconcileCycle } = require('../game/gameCycleService');
 const { assertDisposableTestDatabase } = require('./helpers/testDatabaseGuard');
 
@@ -69,8 +69,8 @@ async function expectedIndex(cycleId) {
      FROM coins c
      WHERE c.retired = FALSE
        AND NOT EXISTS (
-         SELECT 1 FROM coin_collapse_schedule cs
-         WHERE cs.cycle_id = $1 AND cs.coin_id = c.coin_id AND cs.executed_at IS NOT NULL
+         SELECT 1 FROM apocalypse_coin_collapses cc
+         WHERE cc.cycle_id = $1 AND cc.coin_id = c.coin_id
        )
      ORDER BY c.coin_id`,
     [cycleId]
@@ -179,37 +179,44 @@ describe('SIM-06/07: market state persistence and recovery', () => {
     expect(num(recovered, 'starting_index')).toBe(num(first, 'starting_index'));
   });
 
-  test('collapsed coins are excluded via the Core 3 collapse authority', async () => {
+  test('collapsed coins are excluded via the dynamic collapse authority', async () => {
     const cycle = await insertCycle({ apocalypseId: 'APOC-0001', seed: SEED });
     const t0 = new Date(START.getTime() + 60000);
-    const opened = await withLifecycleTransaction(async (client) => {
-      await collapseSchedule.createScheduleForCycle(client, cycle);
-      return ensureMarketState(client, cycle, t0);
-    });
+    const opened = await withLifecycleTransaction((client) => ensureMarketState(client, cycle, t0));
     const startIndex = num(opened, 'starting_index');
 
-    // Execute the collapses due at the 70% window start: exactly the first
-    // scheduled coin dies (price £0 by the collapse authority).
-    const windowStart = new Date(START.getTime() + (END.getTime() - START.getTime()) * 0.7);
-    const afterFirstDeath = await withLifecycleTransaction(async (client) => {
-      const executed = await collapseSchedule.executeDueCollapses(client, cycle.cycle_id, windowStart);
-      expect(executed).toHaveLength(1);
-      return ensureMarketState(client, cycle, windowStart);
-    });
-    const expected = await expectedIndex(cycle.cycle_id);
-    expect(num(afterFirstDeath, 'current_index')).toBe(expected);
-    expect(expected).toBeLessThan(startIndex);
-    // The dead coin's price row is £0, and the index fell by exactly the
-    // price the coin contributed when it died (its schedule baseline).
-    const { rows: dead } = await db.query(
-      `SELECT coin_id, current_price FROM coins WHERE current_price = 0`
-    );
-    expect(dead).toHaveLength(1);
-    const { rows: executedRows } = await db.query(
-      'SELECT baseline_price FROM coin_collapse_schedule WHERE cycle_id = $1 AND executed_at IS NOT NULL',
+    // Crash the whole market and mark the persisted state DECLINE (the
+    // simulated damage the risk engine reads), then let the dynamic engine
+    // evaluate deaths for real inside the lifecycle transaction.
+    await db.query('UPDATE coins SET current_price = GREATEST(0.0001, current_price * 0.0001)');
+    await db.query(
+      `UPDATE apocalypse_market_state SET lifecycle_state = 'DECLINE', drawdown = 0.95 WHERE cycle_id = $1`,
       [cycle.cycle_id]
     );
-    expect(startIndex - expected).toBeCloseTo(parseFloat(executedRows[0].baseline_price), 4);
+    const { rows: preDeath } = await db.query('SELECT coin_id, current_price FROM coins ORDER BY coin_id');
+    const priceBeforeDeath = new Map(preDeath.map((r) => [r.coin_id, parseFloat(r.current_price)]));
+
+    const evalAt = new Date(START.getTime() + (END.getTime() - START.getTime()) * 0.75);
+    const afterDeaths = await withLifecycleTransaction(async (client) => {
+      const executed = await dynamicCollapseService.evaluateAndExecuteCollapses(client, cycle, evalAt);
+      expect(executed.length).toBeGreaterThan(0);
+      return { state: await ensureMarketState(client, cycle, evalAt), executed };
+    });
+    const expected = await expectedIndex(cycle.cycle_id);
+    expect(num(afterDeaths.state, 'current_index')).toBe(expected);
+    expect(expected).toBeLessThan(startIndex);
+
+    // Each dead coin is exactly £0 with exactly one durable death record,
+    // and the index fell from its pre-death (crashed) level by exactly the
+    // prices the dead coins contributed.
+    const crashedIndex = preDeath.reduce((sum, r) => sum + parseFloat(r.current_price), 0);
+    const deadIds = new Set(afterDeaths.executed.map((r) => r.coin_id));
+    const { rows: dead } = await db.query('SELECT coin_id, current_price FROM coins WHERE current_price = 0');
+    expect(new Set(dead.map((r) => r.coin_id))).toEqual(deadIds);
+    let contributed = 0;
+    for (const coinId of deadIds) contributed += priceBeforeDeath.get(coinId);
+    expect(crashedIndex - expected).toBeCloseTo(contributed, 6);
+    expect(startIndex).toBeGreaterThan(expected);
   });
 
   test('retired coins are excluded from the index', async () => {
@@ -245,14 +252,11 @@ describe('SIM-06/07: market state persistence and recovery', () => {
   test('the all-collapsed edge: index 0, drawdown 1, momentum -1, then zero-base momentum 0', async () => {
     const cycle = await insertCycle({ apocalypseId: 'APOC-0001', seed: SEED });
     const t0 = new Date(START.getTime() + 60000);
-    await withLifecycleTransaction(async (client) => {
-      await collapseSchedule.createScheduleForCycle(client, cycle);
-      return ensureMarketState(client, cycle, t0);
-    });
+    await withLifecycleTransaction((client) => ensureMarketState(client, cycle, t0));
 
-    // Every collapse is due by cycle end: the whole market dies at once.
+    // The final safety rule at cycle end: the whole market dies at once.
     const wiped = await withLifecycleTransaction(async (client) => {
-      await collapseSchedule.executeDueCollapses(client, cycle.cycle_id, END);
+      await dynamicCollapseService.executeRemainingCollapses(client, cycle, END);
       return ensureMarketState(client, cycle, new Date(END.getTime() - 1));
     });
     expect(num(wiped, 'current_index')).toBe(0);

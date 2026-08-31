@@ -1,11 +1,13 @@
-// Genuine multi-process race coverage for Core 3 coin collapse.
+// Genuine multi-process race coverage for the dynamic collapse engine
+// (SIM-13/14) — adapted from the retired fixed schedule's Core 3 race
+// suite; every exactly-once/no-duplicate invariant is preserved.
 //
 // These tests spawn separate Node processes — never same-process Promise.all —
 // and hold them behind a shared wall-clock barrier so their reconcileCycle
-// calls (which now include the full collapse lifecycle: schedule generation,
-// due-collapse execution, baseline restore, rollover) collide on the database
-// at (nearly) the same instant. The disposable local test database is the
-// coordination authority; the guard module refuses any other target.
+// calls (which now include the full dynamic collapse lifecycle: risk
+// evaluation, death execution, baseline restore, rollover) collide on the
+// database at (nearly) the same instant. The disposable local test database
+// is the coordination authority; the guard module refuses any other target.
 
 const path = require('path');
 const { spawn } = require('child_process');
@@ -46,13 +48,13 @@ async function coinCount() {
   return rows[0].n;
 }
 
-describe('Core 3: genuine multi-process collapse races', () => {
+describe('SIM-13/14: genuine multi-process collapse races (dynamic collapse)', () => {
   test('guard: this suite only runs against the approved disposable test database', () => {
     const target = assertDisposableTestDatabase();
     expect(target.database).toMatch(/test/i);
   });
 
-  test('cold start: simultaneous processes create exactly one schedule and converge on the same persisted order', async () => {
+  test('cold start: simultaneous processes create exactly one cycle and persist no future collapse plan', async () => {
     const barrierMs = Date.now() + 1500;
     const results = parseResults(await Promise.all(spawnRaceWorkers(barrierMs, barrierMs)));
 
@@ -61,40 +63,25 @@ describe('Core 3: genuine multi-process collapse races', () => {
     const { rows: cycles } = await db.query('SELECT * FROM apocalypse_cycles');
     expect(cycles).toHaveLength(1);
 
-    // Exactly one schedule: one row per coin, dense unique ranks, no dupes.
-    const n = await coinCount();
-    const { rows: schedule } = await db.query(
-      'SELECT coin_id, collapse_rank, scheduled_at FROM coin_collapse_schedule WHERE cycle_id = $1 ORDER BY collapse_rank',
-      [cycles[0].cycle_id]
-    );
-    expect(schedule).toHaveLength(n);
-    expect(new Set(schedule.map((r) => r.coin_id)).size).toBe(n);
-    expect(schedule.map((r) => r.collapse_rank)).toEqual(Array.from({ length: n }, (_, i) => i));
+    // SIM-14: no schedule is ever created — the legacy table stays empty
+    // and nothing about future timing/order is persisted.
+    const { rows: legacy } = await db.query('SELECT count(*)::int AS n FROM coin_collapse_schedule');
+    expect(legacy[0].n).toBe(0);
 
-    // Whatever was due at the barrier instant executed exactly once; nothing
-    // scheduled later was touched. The wall-clock cycle alignment decides how
-    // much of the window had passed — derive the expectation from the
-    // persisted schedule so the test is deterministic at any wall time.
-    const due = schedule.filter((r) => new Date(r.scheduled_at).getTime() <= barrierMs);
-    const { rows: executed } = await db.query(
-      'SELECT coin_id FROM coin_collapse_schedule WHERE cycle_id = $1 AND executed_at IS NOT NULL',
-      [cycles[0].cycle_id]
-    );
-    expect(new Set(executed.map((r) => r.coin_id))).toEqual(new Set(due.map((r) => r.coin_id)));
-
-    // Each executed collapse: price exactly 0, exactly one £0 history row.
-    const { rows: zeroHistory } = await db.query(
-      'SELECT coin_id, count(*)::int AS n FROM price_history WHERE price = 0 GROUP BY coin_id'
-    );
-    expect(new Set(zeroHistory.map((r) => r.coin_id))).toEqual(new Set(due.map((r) => r.coin_id)));
-    for (const row of zeroHistory) expect(row.n).toBe(1);
-    const { rows: zeroCoins } = await db.query('SELECT coin_id FROM coins WHERE current_price = 0');
-    expect(new Set(zeroCoins.map((r) => r.coin_id))).toEqual(new Set(due.map((r) => r.coin_id)));
+    // A healthy market at the very start of the cycle: no deaths, no £0
+    // prices — and no racing process could double-execute anything.
+    const { rows: deaths } = await db.query('SELECT count(*)::int AS n FROM apocalypse_coin_collapses');
+    expect(deaths[0].n).toBe(0);
+    const { rows: zeroCoins } = await db.query('SELECT count(*)::int AS n FROM coins WHERE current_price = 0');
+    expect(zeroCoins[0].n).toBe(0);
+    const { rows: zeroHistory } = await db.query('SELECT count(*)::int AS n FROM price_history WHERE price = 0');
+    expect(zeroHistory[0].n).toBe(0);
   });
 
-  test('due-collapse race across the end boundary: final coin collapses exactly once, successor schedule created exactly once, baseline restored', async () => {
-    // Predecessor expires exactly at the barrier instant (no schedule yet —
-    // the racing workers must generate AND fully execute it through the end).
+  test('end-boundary race: every coin dies exactly once at exactly cycle end, successor created once, baseline restored', async () => {
+    // Predecessor expires exactly at the barrier instant — the racing
+    // workers must settle it (the final safety rule kills every coin) AND
+    // chain exactly one successor.
     const barrierMs = Date.now() + 1500;
     const predecessorStart = new Date(barrierMs - 30 * 60 * 1000).toISOString();
     const predecessorEnd = new Date(barrierMs).toISOString();
@@ -117,21 +104,22 @@ describe('Core 3: genuine multi-process collapse races', () => {
 
     const n = await coinCount();
 
-    // Predecessor: full schedule, every row executed exactly once, the final
-    // one exactly at the cycle end. No duplicate rows, no duplicate ranks.
-    const { rows: oldSchedule } = await db.query(
-      'SELECT coin_id, collapse_rank, executed_at FROM coin_collapse_schedule WHERE cycle_id = $1 ORDER BY collapse_rank',
+    // Predecessor: every coin has exactly one death record, killed at
+    // exactly the cycle end by the settlement safety rule. No duplicate
+    // records, no duplicate ranks — six racing processes could not
+    // double-execute a single death.
+    const { rows: deaths } = await db.query(
+      'SELECT coin_id, collapse_rank, collapsed_at FROM apocalypse_coin_collapses WHERE cycle_id = $1 ORDER BY collapse_rank',
       [predecessor.cycle_id]
     );
-    expect(oldSchedule).toHaveLength(n);
-    expect(new Set(oldSchedule.map((r) => r.coin_id)).size).toBe(n);
-    for (const row of oldSchedule) {
-      expect(row.executed_at).not.toBeNull();
-      expect(new Date(row.executed_at).getTime()).toBe(barrierMs);
+    expect(deaths).toHaveLength(n);
+    expect(new Set(deaths.map((r) => r.coin_id)).size).toBe(n);
+    expect(deaths.map((r) => r.collapse_rank)).toEqual(Array.from({ length: n }, (_, i) => i));
+    for (const row of deaths) {
+      expect(new Date(row.collapsed_at).getTime()).toBe(barrierMs);
     }
 
-    // Exactly one £0 history transition per coin, timestamped at the end —
-    // six racing processes could not duplicate a single execution.
+    // Exactly one £0 history transition per coin, timestamped at the end.
     const { rows: zeroHistory } = await db.query(
       'SELECT coin_id, count(*)::int AS n, max(created_at) AS latest FROM price_history WHERE price = 0 GROUP BY coin_id'
     );
@@ -141,15 +129,13 @@ describe('Core 3: genuine multi-process collapse races', () => {
       expect(new Date(row.latest).getTime()).toBe(barrierMs);
     }
 
-    // Successor: exactly one fresh schedule, nothing executed yet, and every
-    // coin restored to its explicit persisted baseline (no £0 leaked across
-    // the boundary).
-    const { rows: newSchedule } = await db.query(
-      'SELECT count(*)::int AS n, count(executed_at)::int AS executed FROM coin_collapse_schedule WHERE cycle_id = $1',
+    // Successor: no deaths yet, and every coin restored to its explicit
+    // persisted baseline (no £0 leaked across the boundary).
+    const { rows: successorDeaths } = await db.query(
+      'SELECT count(*)::int AS n FROM apocalypse_coin_collapses WHERE cycle_id = $1',
       [successor.cycle_id]
     );
-    expect(newSchedule[0].n).toBe(n);
-    expect(newSchedule[0].executed).toBe(0);
+    expect(successorDeaths[0].n).toBe(0);
 
     const { rows: coins } = await db.query('SELECT current_price, cycle_baseline_price FROM coins');
     for (const coin of coins) {
@@ -157,7 +143,7 @@ describe('Core 3: genuine multi-process collapse races', () => {
       expect(parseFloat(coin.current_price)).toBe(parseFloat(coin.cycle_baseline_price));
     }
 
-    // No process created duplicate cycles, schedules, or a second ACTIVE row.
+    // No process created duplicate cycles or a second ACTIVE row.
     const { rows: activeCount } = await db.query(`SELECT count(*)::int AS n FROM apocalypse_cycles WHERE status = 'ACTIVE'`);
     expect(activeCount[0].n).toBe(1);
   });

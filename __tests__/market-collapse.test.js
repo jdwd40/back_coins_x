@@ -1,6 +1,7 @@
-// Core 3 market integration, RESTORED legacy suite (deleted by mistake
-// during the V2-1 implementation; restored and adapted to the V2
-// deterministic market writer).
+// SIM-13/14 market integration: collapsed coins in the V2 market writer
+// under the DYNAMIC collapse engine (adapted from the retired fixed
+// schedule's Core 3 suite — every death/no-revival/rollback invariant is
+// preserved; only the death authority changed).
 //
 // A collapsed coin is permanently dead for the rest of the ACTIVE cycle —
 // the ordinary automatic market update and the Core 2 amplitude must never
@@ -8,43 +9,47 @@
 // never trip the writer's invalid-price protection. Malformed persisted
 // state fails safely.
 //
-// Pre-V2 this suite seeded the simulator's in-memory volatility maps and
-// injected Math.random(). V2-1 removed that machinery entirely: prices come
-// from the shared deterministic domain (game/marketDomain.js) as a pure
-// function of persisted state, and collapsed coins are read from the
-// persisted execution state of the live cycle (never inferred from
-// current_price === 0, never held in memory). The adaptation pins a real
-// reconcileCycle result and the writer clock instead of mocking
-// getGameState/Math.random; every death/no-revival/rollback invariant is
-// preserved.
+// Deaths are produced for real through the Core 1 lifecycle: a genuinely
+// crashed market (drawdown, decline/collapse lifecycle, per-coin damage)
+// drives the dynamic engine's risk evaluation, exactly as in production.
+// The writer clock and Core 1 resolution are then pinned so the batch under
+// test cannot reconcile further deaths or roll the cycle over; the collapse
+// state under observation is the persisted state created by the real
+// reconciliations.
 
 const marketSimulator = require('../models/market-simulator');
 const gameCycleService = require('../game/gameCycleService');
 const { getApocalypseVolatility } = require('../game/apocalypseVolatility');
 const db = require('../db/connection');
 
-jest.setTimeout(20000);
+jest.setTimeout(30000);
 
 const CYCLE_START = new Date('2026-08-25T14:00:00.000Z');
 const DURATION_MS = 30 * 60 * 1000;
-const WINDOW_START_MS = CYCLE_START.getTime() + DURATION_MS * 0.70;
-// Collapse ranks are evenly spaced by window/(coinCount - 1); the seeded
-// canonical catalogue holds 10 active coins (migrations 013/014).
-const SEEDED_COIN_COUNT = 10;
-const SPACING_MS = (DURATION_MS * 0.30) / (SEEDED_COIN_COUNT - 1);
 
-// Create the real aligned cycle (14:00-14:30) and reconcile exactly at the
-// first scheduled collapse, executing rank 0 for real.
-async function collapseRankZeroCoin() {
+function at(fraction) {
+  return new Date(CYCLE_START.getTime() + DURATION_MS * fraction);
+}
+
+// Create the real cycle, crash the market, and reconcile until the dynamic
+// engine has executed at least one death for real.
+async function collapseOneCoin() {
   const cycle = await gameCycleService.reconcileCycle({
-    now: new Date(CYCLE_START.getTime() + 7 * 60 * 1000)
+    now: at(0.05), durationMs: DURATION_MS, generateSeed: () => 'writer-collapse-seed'
   });
-  const { rows } = await db.query(
-    'SELECT coin_id FROM coin_collapse_schedule WHERE cycle_id = $1 AND collapse_rank = 0',
-    [cycle.cycle_id]
-  );
-  await gameCycleService.reconcileCycle({ now: new Date(WINDOW_START_MS) });
-  return { cycle, coinId: rows[0].coin_id };
+  await db.query('UPDATE coins SET current_price = GREATEST(0.0001, current_price * 0.0001)');
+  await gameCycleService.reconcileCycle({ now: at(0.56) }); // PLATEAU (guard)
+  await gameCycleService.reconcileCycle({ now: at(0.71) }); // DECLINE (guard)
+  await gameCycleService.reconcileCycle({ now: at(0.72) }); // COLLAPSE (drawdown)
+  for (let p = 0.73; p < 1; p += 0.02) {
+    await gameCycleService.reconcileCycle({ now: at(p) });
+    const { rows } = await db.query(
+      'SELECT coin_id FROM apocalypse_coin_collapses WHERE cycle_id = $1 ORDER BY collapse_rank LIMIT 1',
+      [cycle.cycle_id]
+    );
+    if (rows.length > 0) return { cycle, coinId: rows[0].coin_id, atMs: at(p).getTime() };
+  }
+  throw new Error('dynamic collapse engine produced no deaths for a crashed market');
 }
 
 // Pin the writer's Core 1 resolution and clock inside the live cycle window
@@ -63,7 +68,7 @@ async function historyCounts() {
   return new Map(rows.map((r) => [r.coin_id, r.n]));
 }
 
-describe('Core 3: collapsed coins in the V2 market writer', () => {
+describe('SIM-13/14: collapsed coins in the V2 market writer (dynamic collapse)', () => {
   beforeEach(() => {
     marketSimulator.stop();
     marketSimulator.lastBatch = null;
@@ -75,8 +80,8 @@ describe('Core 3: collapsed coins in the V2 market writer', () => {
   });
 
   test('the ordinary automatic market update never revives a collapsed coin and never writes new history for it', async () => {
-    const { cycle, coinId } = await collapseRankZeroCoin();
-    pinCycle(cycle, WINDOW_START_MS + 60_000);
+    const { cycle, coinId, atMs } = await collapseOneCoin();
+    pinCycle(cycle, atMs + 60_000);
 
     const historyBefore = await db.query('SELECT count(*)::int AS n FROM price_history WHERE coin_id = $1', [coinId]);
     await marketSimulator.updateAllPrices();
@@ -89,8 +94,8 @@ describe('Core 3: collapsed coins in the V2 market writer', () => {
   });
 
   test('Core 2 still applies to surviving coins while the collapsed coin is skipped entirely', async () => {
-    const { cycle, coinId } = await collapseRankZeroCoin();
-    const pinnedNowMs = WINDOW_START_MS + 60_000;
+    const { cycle, coinId, atMs } = await collapseOneCoin();
+    const pinnedNowMs = atMs + 60_000;
     pinCycle(cycle, pinnedNowMs);
     const calcSpy = jest.spyOn(marketSimulator, 'calculateNewPrice');
     const pricesBefore = await db.query('SELECT coin_id, current_price FROM coins ORDER BY coin_id');
@@ -100,8 +105,12 @@ describe('Core 3: collapsed coins in the V2 market writer', () => {
 
     // Every survivor priced exactly once through the current interface; the
     // dead coin never reaches calculateNewPrice.
+    const { rows: deadCount } = await db.query(
+      'SELECT count(*)::int AS n FROM apocalypse_coin_collapses WHERE cycle_id = $1',
+      [cycle.cycle_id]
+    );
     const { rows: coins } = await db.query('SELECT count(*)::int AS n FROM coins');
-    expect(calcSpy).toHaveBeenCalledTimes(coins[0].n - 1);
+    expect(calcSpy).toHaveBeenCalledTimes(coins[0].n - deadCount[0].n);
     const { apocalypsePercent } = gameCycleService.deriveProgress({
       startTime: cycle.start_time,
       endTime: cycle.end_time,
@@ -115,12 +124,17 @@ describe('Core 3: collapsed coins in the V2 market writer', () => {
     }
 
     // Survivors actually moved and recorded exactly one new history row
-    // each; the collapsed coin recorded none.
+    // each; collapsed coins recorded none.
+    const { rows: deadRows } = await db.query(
+      'SELECT coin_id FROM apocalypse_coin_collapses WHERE cycle_id = $1',
+      [cycle.cycle_id]
+    );
+    const deadIds = new Set(deadRows.map((r) => r.coin_id));
     const historyAfter = await historyCounts();
     let moved = 0;
     for (const before of pricesBefore.rows) {
-      if (before.coin_id === coinId) {
-        expect(historyAfter.get(coinId) ?? 0).toBe(historyBefore.get(coinId) ?? 0);
+      if (deadIds.has(before.coin_id)) {
+        expect(historyAfter.get(before.coin_id) ?? 0).toBe(historyBefore.get(before.coin_id) ?? 0);
         continue;
       }
       expect(historyAfter.get(before.coin_id) ?? 0).toBe((historyBefore.get(before.coin_id) ?? 0) + 1);
@@ -134,8 +148,8 @@ describe('Core 3: collapsed coins in the V2 market writer', () => {
   });
 
   test('a zero-priced dead coin does not trip the invalid-write protection: the batch completes for survivors', async () => {
-    const { cycle } = await collapseRankZeroCoin();
-    pinCycle(cycle, WINDOW_START_MS + 60_000);
+    const { cycle, atMs } = await collapseOneCoin();
+    pinCycle(cycle, atMs + 60_000);
 
     const marketHistoryBefore = await db.query('SELECT count(*)::int AS n FROM market_history');
     await marketSimulator.updateAllPrices();
@@ -145,18 +159,15 @@ describe('Core 3: collapsed coins in the V2 market writer', () => {
     expect(marketHistoryAfter.rows[0].n).toBe(marketHistoryBefore.rows[0].n + 1);
   });
 
-  test('several collapsed coins all stay dead across repeated updates', async () => {
-    const cycle = await gameCycleService.reconcileCycle({
-      now: new Date(CYCLE_START.getTime() + 7 * 60 * 1000)
-    });
-    await gameCycleService.reconcileCycle({ now: new Date(WINDOW_START_MS + 3 * SPACING_MS) }); // ranks 0..3 collapsed
+  test('every collapsed coin stays dead across repeated updates', async () => {
+    const { cycle, atMs } = await collapseOneCoin();
     const { rows: deadRows } = await db.query(
-      'SELECT coin_id FROM coin_collapse_schedule WHERE cycle_id = $1 AND executed_at IS NOT NULL',
+      'SELECT coin_id FROM apocalypse_coin_collapses WHERE cycle_id = $1',
       [cycle.cycle_id]
     );
-    expect(deadRows).toHaveLength(4);
+    expect(deadRows.length).toBeGreaterThan(0);
 
-    pinCycle(cycle, WINDOW_START_MS + 3 * SPACING_MS + 30_000);
+    pinCycle(cycle, atMs + 60_000);
     const historyBefore = await historyCounts();
 
     await marketSimulator.updateAllPrices();
@@ -172,10 +183,10 @@ describe('Core 3: collapsed coins in the V2 market writer', () => {
   });
 
   test('malformed state (collapsed coin with a non-zero price) fails safely: nothing written, nothing revived', async () => {
-    const { cycle, coinId } = await collapseRankZeroCoin();
-    pinCycle(cycle, WINDOW_START_MS + 60_000);
+    const { cycle, coinId, atMs } = await collapseOneCoin();
+    pinCycle(cycle, atMs + 60_000);
 
-    // Corrupt the live price behind the persisted schedule's back.
+    // Corrupt the live price behind the persisted death record's back.
     await db.query('UPDATE coins SET current_price = 5 WHERE coin_id = $1', [coinId]);
 
     const coinsBefore = await db.query('SELECT coin_id, current_price FROM coins ORDER BY coin_id');

@@ -2,11 +2,10 @@
 // seed string. Same seed -> identical stream, in every process, forever.
 //
 // This is the canonical seeded-RNG convention used by every replayable game
-// decision (Core 3 collapse schedules, Core 5 bots, the economy event
+// decision (the dynamic collapse rolls, Core 5 bots, the economy event
 // schedule, and the V2 cyclical market). It lives in its own pure module so
 // gameplay-domain code (game/marketDomain.js) can stay free of database
-// imports. collapseScheduleService re-exports it; existing callers are
-// unaffected. Math.random() is never an acceptable substitute.
+// imports. Math.random() is never an acceptable substitute.
 
 const crypto = require('crypto');
 

@@ -122,11 +122,12 @@ describe('Core 6: leaderboard and results APIs', () => {
         userId: 1, apocalypseId: cycle.apocalypse_id, coinId: coin.coin_id, quantity: 10, now: new Date()
       });
 
-      // The coin collapses publicly (executed Core 3 row + £0 live price;
-      // executed_at is stamped at its scheduled time per the Core 3 CHECK).
+      // A persisted dynamic collapse execution makes the coin publicly dead
+      // and its authoritative live price exactly £0.
       await db.query('UPDATE coins SET current_price = 0 WHERE coin_id = $1', [coin.coin_id]);
       await db.query(
-        'UPDATE coin_collapse_schedule SET executed_at = scheduled_at WHERE cycle_id = $1 AND coin_id = $2',
+        `INSERT INTO apocalypse_coin_collapses (cycle_id, coin_id, collapse_rank, collapsed_at)
+         VALUES ($1, $2, 0, now())`,
         [cycle.cycle_id, coin.coin_id]
       );
 

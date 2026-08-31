@@ -3,17 +3,18 @@
 // The normal market writer (models/market-simulator.js:updateAllPrices) must
 // stamp every price_history row with the already-reconciled authoritative
 // cycle id and source='MARKET_TICK'. The collapse writer
-// (game/collapseScheduleService.js:executeDueCollapses) must stamp its £0
-// transition rows with the caller's authoritative cycle id and
-// source='COLLAPSE'. Legacy rows with NULL cycle_id/source stay valid and
-// remain readable through the unchanged public price-history API contract.
+// (game/dynamicCollapseService.js — the single death authority, SIM-13/14)
+// must stamp its £0 transition rows with the caller's authoritative cycle id
+// and source='COLLAPSE'. Legacy rows with NULL cycle_id/source stay valid
+// and remain readable through the unchanged public price-history API
+// contract.
 
 const request = require('supertest');
 const app = require('../app');
 const db = require('../db/connection');
 const marketSimulator = require('../models/market-simulator');
 const gameCycleService = require('../game/gameCycleService');
-const collapseScheduleService = require('../game/collapseScheduleService');
+const dynamicCollapseService = require('../game/dynamicCollapseService');
 const { assertDisposableTestDatabase } = require('./helpers/testDatabaseGuard');
 
 jest.setTimeout(30000);
@@ -58,20 +59,16 @@ describe('price_history provenance: collapse writer', () => {
     assertDisposableTestDatabase();
   });
 
-  test('the £0 transition row carries the schedule cycle id and source COLLAPSE', async () => {
+  test('every £0 transition row carries the cycle id and source COLLAPSE at the death instant', async () => {
     const cycle = await gameCycleService.reconcileCycle({ now: new Date('2026-08-20T10:07:00.000Z') });
-    const { rows: scheduled } = await db.query(
-      'SELECT coin_id, scheduled_at FROM coin_collapse_schedule WHERE cycle_id = $1 AND collapse_rank = 0',
-      [cycle.cycle_id]
-    );
-    const dueAt = new Date(scheduled[0].scheduled_at);
+    const deathAt = new Date('2026-08-20T10:21:00.000Z');
 
     const client = await db.getClient();
     let executed;
     try {
       await client.query('BEGIN');
       await client.query('SELECT pg_advisory_xact_lock(727001)');
-      executed = await collapseScheduleService.executeDueCollapses(client, cycle.cycle_id, dueAt);
+      executed = await dynamicCollapseService.executeRemainingCollapses(client, cycle, deathAt);
       await client.query('COMMIT');
     } catch (error) {
       try { await client.query('ROLLBACK'); } catch (_) {}
@@ -80,16 +77,17 @@ describe('price_history provenance: collapse writer', () => {
     }
     client.release();
 
-    expect(executed).toHaveLength(1);
+    const { rows: coinCount } = await db.query('SELECT count(*)::int AS n FROM coins WHERE retired = FALSE');
+    expect(executed).toHaveLength(coinCount[0].n);
     const { rows: history } = await db.query(
-      'SELECT coin_id, cycle_id, price, created_at, source FROM price_history WHERE coin_id = $1',
-      [scheduled[0].coin_id]
+      `SELECT coin_id, cycle_id, price, created_at, source FROM price_history WHERE source = 'COLLAPSE'`
     );
-    expect(history).toHaveLength(1);
-    expect(history[0].cycle_id).toBe(cycle.cycle_id);
-    expect(history[0].source).toBe('COLLAPSE');
-    expect(parseFloat(history[0].price)).toBe(0);
-    expect(new Date(history[0].created_at).getTime()).toBe(dueAt.getTime());
+    expect(history).toHaveLength(coinCount[0].n);
+    for (const row of history) {
+      expect(row.cycle_id).toBe(cycle.cycle_id);
+      expect(parseFloat(row.price)).toBe(0);
+      expect(new Date(row.created_at).getTime()).toBe(deathAt.getTime());
+    }
   });
 });
 

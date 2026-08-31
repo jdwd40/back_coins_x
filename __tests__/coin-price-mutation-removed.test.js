@@ -15,7 +15,7 @@ const app = require('../app');
 const db = require('../db/connection');
 const jwt = require('jsonwebtoken');
 const { reconcileCycle } = require('../game/gameCycleService');
-const collapseSchedule = require('../game/collapseScheduleService');
+const dynamicCollapseService = require('../game/dynamicCollapseService');
 
 function playerToken(userId) {
   return jwt.sign({ user_id: userId }, process.env.JWT_SECRET);
@@ -51,40 +51,33 @@ describe('PATCH /api/coins/:coin_id/price is removed (no manual price mutation)'
   });
 
   test('a coin collapsed in the active cycle cannot be revived through the API', async () => {
-    // Drive a real Core 1/3 collapse to execution: cycle created with the
-    // window already inside the collapse schedule, then every due collapse
-    // executed inside the lifecycle transaction.
+    // Drive a real Core 1/dynamic-collapse death to execution: cycle
+    // created, then the market crashed and reconciled until the engine
+    // kills a coin inside the lifecycle transaction.
     const start = new Date(Date.now() - 25 * 60 * 1000);
-    await reconcileCycle({ now: start, durationMs: 30 * 60 * 1000, generateSeed: () => 'm1-collapse-seed' });
-    const { rows } = await db.query(
-      `SELECT coin_id FROM coin_collapse_schedule cs
-       JOIN apocalypse_cycles ac ON ac.cycle_id = cs.cycle_id
-       WHERE ac.status = 'ACTIVE'
-       ORDER BY cs.collapse_rank
-       LIMIT 1`
-    );
-    const victim = rows[0].coin_id;
-    const client = await db.getClient();
-    try {
-      await client.query('BEGIN');
-      // Execute exactly this coin's collapse the way Core 3 does.
-      await client.query('UPDATE coins SET current_price = 0 WHERE coin_id = $1', [victim]);
-      await client.query(
-        `UPDATE coin_collapse_schedule cs SET executed_at = now()
-         FROM apocalypse_cycles ac
-         WHERE ac.cycle_id = cs.cycle_id AND ac.status = 'ACTIVE'
-           AND cs.coin_id = $1 AND cs.executed_at IS NULL`,
-        [victim]
+    const durationMs = 30 * 60 * 1000;
+    const cycle = await reconcileCycle({ now: start, durationMs, generateSeed: () => 'm1-collapse-seed' });
+    await db.query('UPDATE coins SET current_price = GREATEST(0.0001, current_price * 0.0001)');
+    // Fractions of the PERSISTED window (creation may have aligned the
+    // start to a half-hour boundary).
+    const startMs = new Date(cycle.start_time).getTime();
+    const endMs = new Date(cycle.end_time).getTime();
+    const at = (fraction) => new Date(startMs + (endMs - startMs) * fraction);
+    await reconcileCycle({ now: at(0.56) });
+    await reconcileCycle({ now: at(0.71) });
+    await reconcileCycle({ now: at(0.72) });
+    let victim = null;
+    for (let p = 0.73; p < 1 && victim === null; p += 0.02) {
+      await reconcileCycle({ now: at(p) });
+      const { rows } = await db.query(
+        'SELECT coin_id FROM apocalypse_coin_collapses WHERE cycle_id = $1 ORDER BY collapse_rank LIMIT 1',
+        [cycle.cycle_id]
       );
-      await client.query('COMMIT');
-    } catch (err) {
-      await client.query('ROLLBACK');
-      throw err;
-    } finally {
-      client.release();
+      if (rows.length > 0) victim = rows[0].coin_id;
     }
+    expect(victim).not.toBeNull();
     expect(await livePrice(victim)).toBe(0);
-    expect(await collapseSchedule.isCoinCollapsed(victim)).toBe(true);
+    expect(await dynamicCollapseService.isCoinCollapsed(victim)).toBe(true);
 
     // Revival attempt via the removed endpoint — anonymous and authenticated.
     await request(app).patch(`/api/coins/${victim}/price`).send({ price: 500 }).expect(404);

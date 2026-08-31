@@ -12,16 +12,17 @@
 //     still-ACTIVE cycle before the freeze, or mutates nothing after it.
 //
 //   settleSettlingCycle — its own advisory-locked transaction. A durable
-//     SETTLING cycle is settled to completion: Core 3 is reconciled through
-//     exactly cycle end (the final scheduled coin reaches £0 before any
-//     value or result is read), every participant is finalized through the
-//     single Core 4 finalization path, the immutable ranked snapshot is
-//     written to apocalypse_results exactly once per participant, and only
-//     then is the cycle marked COMPLETED with settled_at stamped. A failure
-//     anywhere rolls the whole transaction back, leaving the cycle
-//     observably SETTLING; the next call resumes and converges to exactly
-//     one result set (ON CONFLICT DO NOTHING + the completeness guard make
-//     replays no-ops, never duplicates).
+//     SETTLING cycle is settled to completion: the dynamic collapse
+//     engine's final safety rule runs through exactly cycle end (every
+//     remaining coin reaches £0 before any value or result is read), every
+//     participant is finalized through the single Core 4 finalization
+//     path, the immutable ranked snapshot is written to apocalypse_results
+//     exactly once per participant, and only then is the cycle marked
+//     COMPLETED with settled_at stamped. A failure anywhere rolls the
+//     whole transaction back, leaving the cycle observably SETTLING; the
+//     next call resumes and converges to exactly one result set
+//     (ON CONFLICT DO NOTHING + the completeness guard make replays
+//     no-ops, never duplicates).
 //
 // Successor creation is deliberately NOT here: gameCycleService creates the
 // successor only after this module reports the predecessor COMPLETED, so a
@@ -32,7 +33,10 @@
 // advisory lock key locally, exactly like gameRoundService.
 
 const db = require('../db/connection');
-const collapseSchedule = require('./collapseScheduleService');
+// SIM-13/14: the dynamic collapse engine is the SINGLE coin-death
+// authority. Settlement's end-of-cycle reconciliation is its final safety
+// rule: every remaining coin is forced to exactly £0 at cycle end.
+const dynamicCollapseService = require('./dynamicCollapseService');
 const gameRoundService = require('./gameRoundService');
 
 // Must match gameCycleService's GAME_CYCLE_ADVISORY_LOCK_KEY. Re-declared
@@ -127,17 +131,12 @@ async function settleSettlingCycle() {
       return null;
     }
 
-    // 0. Recovery: a cycle that reached SETTLING without its Core 3 schedule
-    //    (e.g. created before Core 3 existed) has it created now — observing
-    //    and reusing any existing rows, never rerolling, and never resetting
-    //    live prices mid-cycle.
-    await collapseSchedule.createScheduleForCycle(client, cycle);
-
-    // 1. Core 3 reconciliation through EXACTLY cycle end: every scheduled
-    //    collapse — including the final one at end_time — executes at its
-    //    scheduled instant, so the last coin reaches £0 before any value or
-    //    result is read. Idempotent: only unexecuted rows are ever touched.
-    await collapseSchedule.executeDueCollapses(client, cycle.cycle_id, new Date(cycle.end_time));
+    // 1. Dynamic collapse reconciliation through EXACTLY cycle end (SIM-13
+    //    final safety rule): every surviving coin — however healthy its
+    //    risk looked — is forced to exactly £0 at the cycle's end_time, so
+    //    the last coin reaches £0 before any value or result is read.
+    //    Idempotent: only not-yet-dead coins are ever touched.
+    await dynamicCollapseService.executeRemainingCollapses(client, cycle, new Date(cycle.end_time));
 
     // 2. Final monotonic peak lift. After the final collapse every holding
     //    is worth exactly £0, so live wealth equals current cash; lifting

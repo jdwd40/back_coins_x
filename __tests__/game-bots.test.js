@@ -447,21 +447,18 @@ describe('Core 5: deterministic decisions from public state only', () => {
     const { rows: botUser } = await db.query('SELECT user_id FROM users WHERE username = $1', [bot.username]);
     const participant = await gameRoundService.joinRound({ userId: botUser[0].user_id, now });
 
-    // A scheduled-but-unexecuted collapse is FUTURE information: the shaped
-    // state must show that coin as alive and must not leak schedule fields.
-    const { rows: scheduled } = await db.query(
-      `SELECT coin_id FROM coin_collapse_schedule WHERE cycle_id = $1 AND executed_at IS NULL ORDER BY collapse_rank LIMIT 1`,
+    // SIM-14: the dynamic authority records NO future plan. A fresh healthy
+    // cycle has no death records, and the shaped state must contain only
+    // public alive-coin data (never latent timing/order fields).
+    const { rows: deaths } = await db.query(
+      `SELECT coin_id FROM apocalypse_coin_collapses WHERE cycle_id = $1`,
       [cycle.cycle_id]
     );
+    expect(deaths).toHaveLength(0);
     const state = await botService.buildPublicMarketState({ cycle, participant, now });
     expect(state.coins.length).toBeGreaterThan(0);
     for (const coin of state.coins) {
       expect(Object.keys(coin).sort()).toEqual([...botService.BOT_COIN_KEYS].sort());
-    }
-    if (scheduled.length > 0) {
-      const futureDoomed = state.coins.find((c) => c.coinId === scheduled[0].coin_id);
-      expect(futureDoomed.collapsed).toBe(false);
-      expect(futureDoomed.phase).not.toBe('DEAD');
     }
     expect(Object.keys(state).sort()).toEqual([...botService.BOT_MARKET_STATE_KEYS].sort());
     expect(Object.keys(state.power).sort()).toEqual([...botService.BOT_POWER_KEYS].sort());

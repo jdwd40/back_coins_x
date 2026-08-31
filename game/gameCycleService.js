@@ -1,6 +1,11 @@
 const crypto = require('crypto');
 const db = require('../db/connection');
-const collapseSchedule = require('./collapseScheduleService');
+// SIM-13/14: the dynamic collapse engine is the SINGLE coin-death
+// authority. The retired fixed scheduled-collapse controller
+// (collapseScheduleService) no longer exists — no normal path can call
+// both controllers. Baseline restoration still happens exactly once per
+// new-cycle boundary; death records live in apocalypse_coin_collapses.
+const dynamicCollapseService = require('./dynamicCollapseService');
 // Core 6: settlement phases (freeze/settle). gameSettlementService owns the
 // Core 4 participant finalization hook now (it requires gameRoundService);
 // neither it nor gameRoundService requires this module at the top level
@@ -151,11 +156,12 @@ async function insertCycle(client, { startTime, durationMs, seed }) {
 // reconcile loop decides whether it is live or needs freezing. A brand-new
 // database gets the aligned initial cycle; a database whose latest cycle is
 // COMPLETED gets exactly one chained successor starting at the predecessor's
-// end. Recovery of a pre-existing active cycle's collapse schedule happens
-// here without resetting live prices, and a live cycle's due collapses are
-// executed at `now`. Everything runs inside the same advisory-locked Core 1
-// transaction shape as before, so concurrent processes can never create
-// overlapping active cycles (the partial unique index is the backstop).
+// end. Recovery of a pre-existing active cycle observes persisted state
+// without resetting live prices, and a live cycle's dynamic collapse
+// evaluation runs at `now`. Everything runs inside the same advisory-locked
+// Core 1 transaction shape as before, so concurrent processes can never
+// create overlapping active cycles (the partial unique index is the
+// backstop).
 async function ensureActiveCycle({ now, durationMs, generateSeed }) {
   const client = await db.getClient();
   try {
@@ -178,9 +184,12 @@ async function ensureActiveCycle({ now, durationMs, generateSeed }) {
       );
       const startTime = prev[0] ? new Date(prev[0].end_time) : alignStartTime(now, durationMs);
       active = await insertCycle(client, { startTime, durationMs, seed: generateSeed() });
-      // New cycle boundary: restore the persisted baseline, then create this
-      // cycle's schedule once — atomically with the cycle insert.
-      await collapseSchedule.startCycle(client, active);
+      // New cycle boundary: restore the persisted baseline exactly once —
+      // atomically with the cycle insert, so a previous cycle's £0 can
+      // never leak forward. There is no collapse schedule to create: the
+      // dynamic engine (SIM-13/14) writes death records only at the moment
+      // of death, so no future timing/order is ever persisted.
+      await dynamicCollapseService.restoreBaselinePrices(client);
       // Issue #17: every registered human and configured bot starts this
       // Apocalypse with exactly the authoritative starting cash — no JOIN
       // step, no human online required. Set-based and idempotent.
@@ -204,9 +213,9 @@ async function ensureActiveCycle({ now, durationMs, generateSeed }) {
       const openingState = await marketStateEngine.ensureMarketState(client, active, new Date(nowMs));
       await marketPhaseEngine.ensureMarketPhaseCoverage(client, active, new Date(nowMs), { lifecycleState: openingState.lifecycle_state });
     } else {
-      // Recovery path: a pre-existing active cycle gets its schedule created
-      // if (and only if) it is missing. No baseline reset mid-cycle.
-      await collapseSchedule.createScheduleForCycle(client, active);
+      // Recovery path: a pre-existing active cycle is simply observed — no
+      // baseline reset mid-cycle, and no collapse schedule to recover (the
+      // dynamic engine persists deaths only at the moment of death).
       // Issue #17: ensure the live cycle's participant set is complete —
       // covers users registered mid-cycle and cycles created before
       // automatic participation existed. ON CONFLICT DO NOTHING makes this
@@ -220,15 +229,17 @@ async function ensureActiveCycle({ now, durationMs, generateSeed }) {
       // market-phase chain to cover `now` — deterministic continuation,
       // observing persisted rows, never rerolling, never overlapping.
       await coinEventEngine.ensureCoinEventCoverage(client, active, new Date(nowMs));
-      // While the cycle is live, reconcile its persisted due collapse rows,
-      // then advance the durable market state AFTER them so the market
-      // index reflects just-executed collapses (Wave 2). An expired
-      // cycle's collapses run at exactly cycle end during settlement, not
+      // While the cycle is live, run the dynamic collapse evaluation
+      // (SIM-13/14: market-reactive deaths from the persisted authorities,
+      // inside this advisory-locked transaction), then advance the durable
+      // market state AFTER it so the market index reflects just-executed
+      // deaths (Wave 2). An expired cycle's remaining deaths execute at
+      // exactly cycle end during settlement (the final safety rule), not
       // here; an expired cycle's market state is no longer evaluated, but
       // its persisted lifecycle state still informs any trailing draws.
       let lifecycleState = 'GROWTH';
       if (new Date(active.end_time).getTime() > nowMs) {
-        await collapseSchedule.executeDueCollapses(client, active.cycle_id, new Date(nowMs));
+        await dynamicCollapseService.evaluateAndExecuteCollapses(client, active, new Date(nowMs));
         const marketState = await marketStateEngine.ensureMarketState(client, active, new Date(nowMs));
         lifecycleState = marketState.lifecycle_state;
       } else {
@@ -264,9 +275,10 @@ const MAX_LIFECYCLE_PASSES = 10000;
 // advisory-locked transaction:
 //   1. FREEZE: an expired ACTIVE cycle commits to durable SETTLING first.
 //      From that commit, all trades against the cycle are rejected.
-//   2. SETTLE: a durable SETTLING cycle is settled to completion — Core 3
-//      collapses reconciled through exactly cycle end (the final coin
-//      reaches £0 before any value/result), Core 4 participants finalized,
+//   2. SETTLE: a durable SETTLING cycle is settled to completion — every
+//      remaining coin forced to exactly £0 at cycle end (the dynamic
+//      collapse engine's final safety rule), Core 4 participants
+//      finalized,
 //      the immutable ranked apocalypse_results snapshot written exactly
 //      once, then the predecessor marked COMPLETED. A settlement failure
 //      leaves SETTLING committed (observable via settlement_started_at with
@@ -315,9 +327,10 @@ function deriveProgress({ startTime, endTime, durationMs, now }) {
 // rolling over as needed) and return the public state contract.
 //
 // Milestone 1: the cycle seed is deliberately NOT part of the public
-// contract. It deterministically drives the Core 3 collapse schedule and
-// Core 5 bot randomness, so publishing it would let anyone precompute exactly
-// which coin collapses when. The seed stays persisted and internal-only.
+// contract. It deterministically drives the dynamic collapse rolls (SIM-13)
+// and Core 5 bot randomness, so publishing it would let anyone precompute
+// each coin's per-bucket death rolls. The seed stays persisted and
+// internal-only.
 async function getGameState({ now = new Date(), durationMs, generateSeed } = {}) {
   const cycle = await reconcileCycle({ now, durationMs, generateSeed });
   const { remainingMs, apocalypsePercent } = deriveProgress({

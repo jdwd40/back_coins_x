@@ -30,14 +30,18 @@ async function getCycle(apocalypseId) {
   return rows[0];
 }
 
+// Cheapest PURCHASABLE coin: the random per-run cycle seed lets the dynamic
+// engine legitimately collapse a coin at the cycle-start bucket evaluation,
+// and a £0 (or retired) coin always sorts first but can never be bought —
+// every caller of this helper goes on to BUY the selected coin.
 async function cheapestCoin() {
-  const { rows } = await db.query('SELECT coin_id, symbol, current_price FROM coins ORDER BY current_price ASC, coin_id ASC LIMIT 1');
+  const { rows } = await db.query('SELECT coin_id, symbol, current_price FROM coins WHERE current_price > 0 AND retired = FALSE ORDER BY current_price ASC, coin_id ASC LIMIT 1');
   return rows[0];
 }
 
 async function tableCounts() {
   const out = {};
-  for (const t of ['apocalypse_cycles', 'apocalypse_participants', 'apocalypse_holdings', 'apocalypse_transactions', 'apocalypse_results', 'coin_collapse_schedule']) {
+  for (const t of ['apocalypse_cycles', 'apocalypse_participants', 'apocalypse_holdings', 'apocalypse_transactions', 'apocalypse_results', 'apocalypse_coin_collapses']) {
     const { rows } = await db.query(`SELECT count(*)::int AS n FROM ${t}`);
     out[t] = rows[0].n;
   }
@@ -131,19 +135,24 @@ describe('Core 6: end-of-round settlement', () => {
     expect(settled).toBeTruthy();
     expect(settled.cycle_id).toBe(cycle.cycle_id);
 
-    // Every scheduled collapse executed, the final one exactly at cycle end.
-    const { rows: schedule } = await db.query(
-      'SELECT coin_id, scheduled_at, executed_at FROM coin_collapse_schedule WHERE cycle_id = $1 ORDER BY collapse_rank',
+    // SIM-13 final safety rule: every coin carries exactly one durable
+    // death record, and every coin not already dead dynamically was forced
+    // to £0 at exactly cycle end.
+    const { rows: deathRecords } = await db.query(
+      'SELECT coin_id, collapsed_at FROM apocalypse_coin_collapses WHERE cycle_id = $1 ORDER BY collapse_rank',
       [cycle.cycle_id]
     );
     const { rows: coinCount } = await db.query('SELECT count(*)::int AS n FROM coins');
-    expect(schedule).toHaveLength(coinCount[0].n);
-    for (const row of schedule) {
-      expect(row.executed_at).not.toBeNull();
-      expect(new Date(row.executed_at).getTime()).toBe(END.getTime());
+    expect(deathRecords).toHaveLength(coinCount[0].n);
+    for (const row of deathRecords) {
+      const collapsedAtMs = new Date(row.collapsed_at).getTime();
+      expect(collapsedAtMs).toBeLessThanOrEqual(END.getTime());
+      expect(collapsedAtMs).toBeGreaterThan(T0.getTime());
     }
-    const last = schedule[schedule.length - 1];
-    expect(new Date(last.scheduled_at).getTime()).toBe(END.getTime());
+    // In an undamaged market nothing dies dynamically, so every death
+    // lands at exactly cycle end.
+    const dynamicDeaths = deathRecords.filter((r) => new Date(r.collapsed_at).getTime() < END.getTime());
+    expect(dynamicDeaths).toEqual([]);
 
     // Every coin reached exactly £0 (successor not created yet — no baseline
     // restore has run).
@@ -412,7 +421,19 @@ describe('Core 6: end-of-round settlement', () => {
   test('successor chains exactly at predecessor end; multi-cycle downtime preserves full history', async () => {
     const cycle1 = await startCycle();
     await gameRoundService.joinRound({ userId: 1, now: T0 });
-    const coin = await cheapestCoin();
+    const { rows: liveCoins } = await db.query(
+      `SELECT c.coin_id, c.current_price
+       FROM coins c
+       WHERE c.retired = FALSE AND c.current_price > 0
+         AND NOT EXISTS (
+           SELECT 1 FROM apocalypse_coin_collapses cc
+           WHERE cc.cycle_id = $1 AND cc.coin_id = c.coin_id
+         )
+       ORDER BY c.current_price, c.coin_id LIMIT 1`,
+      [cycle1.cycle_id]
+    );
+    const coin = liveCoins[0];
+    expect(coin).toBeTruthy();
     await gameRoundService.buyRoundTrade({
       userId: 1, apocalypseId: cycle1.apocalypse_id, coinId: coin.coin_id, quantity: 4, now: T0
     });
@@ -449,14 +470,17 @@ describe('Core 6: end-of-round settlement', () => {
     const { rows: secondCycleResults } = await db.query('SELECT count(*)::int AS n FROM apocalypse_results WHERE cycle_id = $1', [cycles[1].cycle_id]);
     expect(secondCycleResults[0].n).toBe(2); // untouched middle cycle: both users
 
-    // The collapse schedules of completed cycles are preserved (no reroll,
-    // no deletion).
-    const { rows: schedules } = await db.query(
-      'SELECT cycle_id, count(*)::int AS n FROM coin_collapse_schedule GROUP BY cycle_id ORDER BY cycle_id'
+    // The death records of completed cycles are preserved (no reroll, no
+    // deletion): every coin of each completed cycle died exactly once.
+    const { rows: deathRecords } = await db.query(
+      'SELECT cycle_id, count(*)::int AS n FROM apocalypse_coin_collapses GROUP BY cycle_id ORDER BY cycle_id'
     );
-    expect(schedules).toHaveLength(3);
     const { rows: coinCount } = await db.query('SELECT count(*)::int AS n FROM coins');
-    for (const s of schedules) expect(s.n).toBe(coinCount[0].n);
+    for (const s of deathRecords) {
+      if (s.cycle_id === cycles[2].cycle_id) continue; // the live cycle's dynamic deaths are not pinned here
+      expect(s.n).toBe(coinCount[0].n);
+    }
+    expect(deathRecords.filter((s) => s.cycle_id !== cycles[2].cycle_id)).toHaveLength(2);
   });
 
   test('Core 4 isolation holds through settlement: legacy funds, portfolios and transactions untouched', async () => {
@@ -478,22 +502,29 @@ describe('Core 6: end-of-round settlement', () => {
     expect(legacy[0].tx).toBe(0);
   });
 
-  test('settlement never rerolls the schedule or rewrites history timestamps', async () => {
+  test('settlement never duplicates death records or rewrites death timestamps', async () => {
     const cycle = await startCycle();
+    await reconcileCycle({ now: AFTER_END, durationMs: CYCLE_MS });
+
     const { rows: before } = await db.query(
-      'SELECT coin_id, collapse_rank, scheduled_at, baseline_price FROM coin_collapse_schedule WHERE cycle_id = $1 ORDER BY collapse_rank',
+      'SELECT coin_id, collapse_rank, collapsed_at FROM apocalypse_coin_collapses WHERE cycle_id = $1 ORDER BY collapse_rank',
       [cycle.cycle_id]
     );
+    const { rows: coinCount } = await db.query('SELECT count(*)::int AS n FROM coins');
+    expect(before).toHaveLength(coinCount[0].n);
 
-    await reconcileCycle({ now: AFTER_END, durationMs: CYCLE_MS });
+    // Replays and the successor boundary must not touch the predecessor's
+    // death records.
+    await settlementService.freezeExpiredActiveCycle({ nowMs: AFTER_END.getTime() });
+    await settlementService.settleSettlingCycle();
     await reconcileCycle({ now: new Date(AFTER_END.getTime() + 1000), durationMs: CYCLE_MS });
 
     const { rows: after } = await db.query(
-      'SELECT coin_id, collapse_rank, scheduled_at, baseline_price FROM coin_collapse_schedule WHERE cycle_id = $1 ORDER BY collapse_rank',
+      'SELECT coin_id, collapse_rank, collapsed_at FROM apocalypse_coin_collapses WHERE cycle_id = $1 ORDER BY collapse_rank',
       [cycle.cycle_id]
     );
-    expect(after.map((r) => [r.coin_id, r.collapse_rank, new Date(r.scheduled_at).getTime(), parseFloat(r.baseline_price)]))
-      .toEqual(before.map((r) => [r.coin_id, r.collapse_rank, new Date(r.scheduled_at).getTime(), parseFloat(r.baseline_price)]));
+    expect(after.map((r) => [r.coin_id, r.collapse_rank, new Date(r.collapsed_at).getTime()]))
+      .toEqual(before.map((r) => [r.coin_id, r.collapse_rank, new Date(r.collapsed_at).getTime()]));
 
     // Exactly one £0 history transition per coin from the final collapse.
     const { rows: zeroRows } = await db.query(

@@ -48,7 +48,7 @@
 // advisory lock key is re-declared locally.
 
 const db = require('../db/connection');
-const { createSeededRandom } = require('./collapseScheduleService');
+const { createSeededRandom } = require('./seededRandom');
 const gameRoundService = require('./gameRoundService');
 const { EVENT_DESCRIPTIONS, resolveEconomyConfig, scaleEconomyAmount } = require('./economyConfig');
 

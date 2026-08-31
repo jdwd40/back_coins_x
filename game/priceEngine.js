@@ -17,9 +17,10 @@
 //                         bounded noise). Preserved verbatim; the new forces
 //                         compose on top of it, never replace it.
 //   * normalModifier(t) — lifecycle pressure + current market-phase modifier
-//                         + capped net coin-event modifier (SIM-08). All
-//                         three inputs are supplied by the caller from the
-//                         persisted Wave 1/2 authorities (or the headless
+//                         + capped net coin-event modifier + bounded
+//                         buy/sell trading pressure (SIM-08, SIM-11). All
+//                         inputs are supplied by the caller from the
+//                         persisted Wave 1/2/4 authorities (or the headless
 //                         environment's pure equivalents); the sum is
 //                         hard-clamped to +/-NORMAL_MODIFIER_LIMIT so
 //                         stacking can never run away.
@@ -60,8 +61,9 @@
 // Every per-episode multiplier is strictly positive (magnitude < 1,
 // strength >= 0), so the factor can never produce a zero, negative, NaN or
 // Infinity price; the domain floor (MIN_POSITIVE_PRICE) is the final guard.
-// Coin DEATH (exact £0) remains the exclusive authority of the scheduled
-// collapse executor until Wave 4 — nothing here zeroes a coin.
+// Coin DEATH (exact £0) is the exclusive authority of the dynamic collapse
+// engine (game/dynamicCollapseService.js, SIM-13/14) — nothing here zeroes
+// a coin.
 //
 // Hidden-internals policy: computeUnifiedPrice returns its internal factor
 // breakdown for server-side diagnostics and tests ONLY. Public responses
@@ -151,11 +153,15 @@ function computeLifecyclePressure({ lifecycleState, cycleProgress, config = reso
 // The composed, bounded normal modifier. phaseModifier and eventModifier
 // come from the persisted Wave 1 authorities (or their pure headless
 // equivalents); the event modifier is already stack-capped by the coin
-// event engine. The total is hard-clamped to +/-NORMAL_MODIFIER_LIMIT.
-function computeNormalModifier({ lifecycleState, cycleProgress, phaseModifier = 0, eventModifier = 0, config = resolveSimulationConfig() }) {
+// event engine. pressureModifier is the bounded, decayed buy-minus-sell
+// trading pressure (SIM-11) derived from the persisted round ledger (or a
+// headless trade tape) — already side-clamped by the trade-pressure domain.
+// The total is hard-clamped to +/-NORMAL_MODIFIER_LIMIT.
+function computeNormalModifier({ lifecycleState, cycleProgress, phaseModifier = 0, eventModifier = 0, pressureModifier = 0, config = resolveSimulationConfig() }) {
   assertFiniteNumber('phaseModifier', phaseModifier);
   assertFiniteNumber('eventModifier', eventModifier);
-  const total = computeLifecyclePressure({ lifecycleState, cycleProgress, config }) + phaseModifier + eventModifier;
+  assertFiniteNumber('pressureModifier', pressureModifier);
+  const total = computeLifecyclePressure({ lifecycleState, cycleProgress, config }) + phaseModifier + eventModifier + pressureModifier;
   return Math.max(-NORMAL_MODIFIER_LIMIT, Math.min(NORMAL_MODIFIER_LIMIT, total));
 }
 
@@ -316,6 +322,7 @@ function evaluateCrashRallyFactor({ seed, coinId, roundStartMs, nowMs, lifecycle
 //   cycleProgress   elapsed cycle fraction in [0, 1] (default 0; callers clamp)
 //   phaseModifier   current market-phase modifier (default 0)
 //   eventModifier   capped net coin-event modifier for this coin (default 0)
+//   pressureModifier bounded decayed buy-minus-sell pressure (default 0)
 //   config          resolved simulation config (default: game-design defaults)
 // Returns the unrounded exact price plus the internal factor breakdown
 // (internal only — see the header's hidden-internals policy). The price is
@@ -331,6 +338,7 @@ function computeUnifiedPrice({
   cycleProgress = 0,
   phaseModifier = 0,
   eventModifier = 0,
+  pressureModifier = 0,
   config = resolveSimulationConfig()
 }) {
   assertFiniteNumber('cycleProgress', cycleProgress);
@@ -343,7 +351,7 @@ function computeUnifiedPrice({
   }).price;
 
   const normalModifier = computeNormalModifier({
-    lifecycleState, cycleProgress, phaseModifier, eventModifier, config
+    lifecycleState, cycleProgress, phaseModifier, eventModifier, pressureModifier, config
   });
   const { factor: crashRallyFactor, activeEpisode, activatedCount } = evaluateCrashRallyFactor({
     seed, coinId, roundStartMs, nowMs, lifecycleState, config

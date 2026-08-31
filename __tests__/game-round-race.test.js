@@ -174,18 +174,21 @@ describe('Core 4: genuine multi-process races', () => {
        VALUES ('APOC-0001', 'race4-predecessor-seed', $1, $2, 1800000, 'ACTIVE')`,
       [predecessorStart, predecessorEnd]
     );
-    // Join before expiry (a fixed pre-barrier now keeps the predecessor
-    // live). Joining this late in the cycle executes every due collapse, so
-    // the trade below must target the LAST-ranked coin: the only coin still
-    // alive until the exact cycle end.
+    // Dynamic deaths have no pre-assigned final survivor. Choose a real
+    // currently-live coin after the join/reconcile and race a trade against
+    // the end-of-cycle settlement safety rule.
     const joinNow = new Date(barrierMs - 60 * 1000);
     const participant = await joinRound({ userId: 1, now: joinNow });
     expect(participant.apocalypseId).toBe('APOC-0001');
     const { rows: lastCoin } = await db.query(
-      `SELECT cs.coin_id, c.current_price
-       FROM coin_collapse_schedule cs JOIN coins c ON c.coin_id = cs.coin_id
-       WHERE cs.cycle_id = $1 AND cs.executed_at IS NULL
-       ORDER BY cs.collapse_rank DESC LIMIT 1`,
+      `SELECT c.coin_id, c.current_price
+       FROM coins c
+       WHERE c.retired = FALSE AND c.current_price > 0
+         AND NOT EXISTS (
+           SELECT 1 FROM apocalypse_coin_collapses cc
+           WHERE cc.cycle_id = $1 AND cc.coin_id = c.coin_id
+         )
+       ORDER BY c.coin_id LIMIT 1`,
       [participant.cycleId]
     );
     const coin = lastCoin[0];

@@ -170,18 +170,24 @@ describe('Core 3: tracked production migration 008', () => {
     expect(verification.problems.join(' ')).toMatch(/zero-priced coins have no executed collapse/);
   });
 
-  test('verification catches a collapsed coin revived to a non-zero price', async () => {
+  test('verification catches a dynamically collapsed coin revived to a non-zero price', async () => {
     const { reconcileCycle } = require('../game/gameCycleService');
-    const start = new Date('2026-08-20T10:00:00.000Z');
-    const windowStart = new Date(start.getTime() + 30 * 60 * 1000 * 0.70);
+    const settlementService = require('../game/gameSettlementService');
     const cycle = await reconcileCycle({ now: new Date('2026-08-20T10:07:00.000Z') });
-    await reconcileCycle({ now: windowStart }); // rank 0 collapses
-    await db.query(
-      `UPDATE coins SET current_price = 10
-       WHERE coin_id = (SELECT coin_id FROM coin_collapse_schedule WHERE cycle_id = $1 AND collapse_rank = 0)`,
+    // The dynamic engine is the single authority. Its final safety rule gives
+    // us a real persisted death record for every active coin at cycle end.
+    const cycleEnd = new Date(cycle.end_time);
+    await settlementService.freezeExpiredActiveCycle({ nowMs: cycleEnd.getTime() + 1 });
+    await settlementService.settleSettlingCycle();
+    const { rows: death } = await db.query(
+      'SELECT coin_id FROM apocalypse_coin_collapses WHERE cycle_id = $1 ORDER BY collapse_rank LIMIT 1',
       [cycle.cycle_id]
     );
+    await db.query('UPDATE coins SET current_price = 10 WHERE coin_id = $1', [death[0].coin_id]);
 
+    // Completed cycles do not share a live coin catalogue with the successor,
+    // so restore it to SETTLING solely to exercise the verifier invariant.
+    await db.query("UPDATE apocalypse_cycles SET status = 'SETTLING' WHERE cycle_id = $1", [cycle.cycle_id]);
     const verification = await verifyGameSchema();
     expect(verification.ok).toBe(false);
     expect(verification.problems.join(' ')).toMatch(/collapsed coins in the ACTIVE\/SETTLING cycle have a non-zero live price/);

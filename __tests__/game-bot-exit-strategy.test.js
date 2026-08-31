@@ -105,6 +105,15 @@ describe('issue #20: centralized exit/exposure configuration', () => {
     expect(p.reckless.maxInvestedFraction).toBeGreaterThan(p.conservative.maxInvestedFraction);
   });
 
+  test('SIM-12 profile fields make panic/crash-dip/contrarian reactions explicitly distinct', () => {
+    const p = botConfig.BOT_PERSONALITY_PROFILES;
+    expect(p.conservative.panicSellThreshold).toBeGreaterThan(p.momentum.panicSellThreshold);
+    expect(p.momentum.panicSellThreshold).toBeGreaterThan(p.reckless.panicSellThreshold);
+    expect(p.dip_buyer.panicSellThreshold).toBeUndefined();
+    expect(p.dip_buyer.crashDipBuyThreshold).toBeLessThan(0);
+    expect(p.reckless.contrarianProbability).toBeGreaterThan(p.conservative.contrarianProbability);
+  });
+
   test('malformed profiles are rejected at validation time', () => {
     expect(() => botConfig.validateBotPersonalityProfiles({})).toThrow(/missing a profile/);
     const broken = JSON.parse(JSON.stringify(botConfig.BOT_PERSONALITY_PROFILES));
@@ -125,6 +134,40 @@ describe('issue #20: centralized exit/exposure configuration', () => {
     delete process.env.GAME_BOT_MAX_COIN_EXPOSURE_FRACTION;
     expect(botConfig.resolveBotConfig().maxCoinExposureFraction)
       .toBe(botConfig.DEFAULT_BOT_MAX_COIN_EXPOSURE_FRACTION);
+  });
+});
+
+describe('SIM-12: public-state-only differentiated reactions', () => {
+  test('conservative panic-sells a held public crash while Dip Buyer treats the same crash as an entry', () => {
+    const crashCoin = v2Coin({
+      currentPrice: 18, history: [20, 19, 18], phase: 'FALL', momentum: 'DOWN',
+      collapseRisk: 'STABLE', recentChangePct: -10
+    });
+    const conservative = decide('conservative', shapedState({
+      coins: [crashCoin], holdings: [v2Holding({ quantity: 4 })]
+    }));
+    expect(conservative).toEqual({ type: 'SELL', coinId: 1, quantity: 4 });
+
+    const dipBuyer = decide('dip_buyer', shapedState({ coins: [crashCoin], holdings: [] }));
+    expect(dipBuyer.type).toBe('BUY');
+    expect(dipBuyer.coinId).toBe(1);
+    expect(dipBuyer.quantity).toBeGreaterThan(0);
+  });
+
+  test('a seeded contrarian draw can turn an otherwise-HOLD conservative decision into a guarded public FALL buy', () => {
+    const random = jest.fn()
+      .mockReturnValueOnce(1) // fail Conservative's normal activity gate
+      .mockReturnValueOnce(0); // pass its small contrarian probability
+    const action = decide('conservative', shapedState({
+      coins: [v2Coin({
+        currentPrice: 10, history: [12, 11, 10], phase: 'FALL', momentum: 'DOWN',
+        collapseRisk: 'STABLE', recentChangePct: -16.67
+      })],
+      holdings: []
+    }), random);
+    expect(action.type).toBe('BUY');
+    expect(action.coinId).toBe(1);
+    expect(random).toHaveBeenCalledTimes(2);
   });
 });
 

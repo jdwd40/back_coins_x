@@ -82,10 +82,13 @@ describe('V2-3 escalation study: instrumentation', () => {
     expect(result.collapseLosses.length).toBeGreaterThan(0);
     for (const loss of result.collapseLosses) {
       expect(loss.valueLost).toBeGreaterThan(0);
-      expect(loss.apocalypsePercent).toBeGreaterThanOrEqual(70);
+      // Dynamic collapse is market-reactive rather than a fixed 70% window;
+      // each recorded loss remains a valid in-round public death.
+      expect(loss.apocalypsePercent).toBeGreaterThanOrEqual(0);
+      expect(loss.apocalypsePercent).toBeLessThanOrEqual(100);
       expect(Number.isInteger(loss.coinId)).toBe(true);
     }
-    // Every recorded loss sits at or after that coin's scheduled collapse.
+    // Every recorded loss sits at or after that coin's dynamic death instant.
     for (const loss of result.collapseLosses) {
       expect(loss.t).toBeGreaterThanOrEqual(env.collapseAtMs.get(loss.coinId));
     }

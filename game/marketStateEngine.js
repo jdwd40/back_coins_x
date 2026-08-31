@@ -6,7 +6,7 @@
 // current value of all SURVIVING coins — the raw sum of the persisted
 // coins.current_price over the active catalogue (retired coins excluded,
 // migration 014) minus the cycle's executed collapses as recorded by the
-// Core 3 collapse authority (coin_collapse_schedule.executed_at; death is
+// dynamic collapse authority (apocalypse_coin_collapses; death is
 // never inferred from a zero price). The index is therefore deterministic
 // from canonical persisted coin state in every process. This module never
 // writes coin prices: it is a measurement, never a second price writer.
@@ -230,17 +230,17 @@ async function getCycleMarketState(queryable = db, cycleId) {
 
 // The canonical surviving coin state for the index: persisted current
 // prices of the active catalogue (retired coins excluded, migration 014)
-// minus this cycle's executed collapses, read from the Core 3 collapse
-// authority (the persisted schedule's execution state — never inferred
-// from a zero price). Canonical coin_id order.
+// minus this cycle's persisted deaths, read from the dynamic collapse
+// authority (apocalypse_coin_collapses — never inferred from a zero
+// price). Canonical coin_id order.
 async function getSurvivingCoins(client, cycleId) {
   const { rows } = await client.query(
     `SELECT c.coin_id, c.current_price
      FROM coins c
      WHERE c.retired = FALSE
        AND NOT EXISTS (
-         SELECT 1 FROM coin_collapse_schedule cs
-         WHERE cs.cycle_id = $1 AND cs.coin_id = c.coin_id AND cs.executed_at IS NOT NULL
+         SELECT 1 FROM apocalypse_coin_collapses cc
+         WHERE cc.cycle_id = $1 AND cc.coin_id = c.coin_id
        )
      ORDER BY c.coin_id`,
     [cycleId]

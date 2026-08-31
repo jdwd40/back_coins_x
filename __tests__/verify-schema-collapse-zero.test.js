@@ -25,9 +25,9 @@ async function insertCycle(status) {
 
 async function executeCollapse(cycleId, coinId) {
   await db.query(
-    `INSERT INTO coin_collapse_schedule
-       (cycle_id, coin_id, collapse_rank, scheduled_at, baseline_price, executed_at)
-     VALUES ($1, $2, 0, now() - interval '1 minute', 1, now())`,
+    `INSERT INTO apocalypse_coin_collapses
+       (cycle_id, coin_id, collapse_rank, collapsed_at)
+     VALUES ($1, $2, 0, now())`,
     [cycleId, coinId]
   );
 }

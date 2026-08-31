@@ -15,12 +15,18 @@
 //     (non-retired extra rows are player-facing and flagged; retired legacy
 //     rows are preserved history, not catalogue), and live symbol
 //     uniqueness.
-//   * public.coin_collapse_schedule (Core 3): columns, PK, both FKs, both
-//     UNIQUE constraints (cycle/coin and cycle/rank), all CHECK constraints,
-//     the partial due-reconciliation index, and live-data invariants (no
-//     executed collapse with a non-zero live price in the ACTIVE cycle, no
-//     zero-priced coin without an executed collapse in the ACTIVE cycle, no
-//     execution before its scheduled time).
+//   * public.coin_collapse_schedule (legacy Core 3, retired in Wave 4):
+//     columns, PK, both FKs, both UNIQUE constraints (cycle/coin and
+//     cycle/rank), all CHECK constraints, the partial due-reconciliation
+//     index, and the historical-data invariant (no execution before its
+//     scheduled time). The table is preserved data only — no runtime path
+//     writes or reads it now.
+//   * public.apocalypse_coin_collapses (SIM-13/14): the dynamic collapse
+//     death record — columns, PK, both FKs, both UNIQUE constraints
+//     (cycle/coin and cycle/rank), CHECK constraints, and live-data
+//     invariants (no collapsed coin with a non-zero live price in the
+//     ACTIVE/SETTLING cycle, no zero-priced coin without a persisted death
+//     record, no duplicate deaths or ranks).
 //   * Core 4 round state: apocalypse_participants, apocalypse_holdings and
 //     apocalypse_transactions — columns, PKs, FKs (including the composite
 //     participant FKs), uniqueness, CHECK constraints, lookup indexes, and
@@ -446,11 +452,10 @@ async function verifyCollapseSchedule(q, problems) {
     }
   }
 
-  // Live-data invariants (only when the columns exist to evaluate them).
-  // These join apocalypse_cycles; when that table is absent its own shape
-  // problems above are the report, so the joined invariants are skipped
-  // rather than crashing.
-  const cyclesPresent = await q(`SELECT to_regclass('public.apocalypse_cycles') AS reg`);
+  // Live-data invariant for the legacy table only (preserved historical
+  // rows must remain self-consistent). The ACTIVE/SETTLING death
+  // invariants moved to verifyDynamicCollapses with the SIM-13/14 runtime
+  // death authority.
   if (byName.has('executed_at') && byName.has('scheduled_at')) {
     const early = await q(
       `SELECT count(*)::int AS n FROM coin_collapse_schedule
@@ -458,34 +463,103 @@ async function verifyCollapseSchedule(q, problems) {
     );
     if (early.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${early.rows[0].n} collapses executed before their scheduled time`);
   }
-  if (byName.has('executed_at') && cyclesPresent.rows[0].reg) {
-    // Milestone 1: the authoritative live window is ACTIVE **or SETTLING**.
-    // A coin collapsed at the end of a round stays £0 through settlement (the
-    // freeze window has no ACTIVE cycle), matching the runtime death rule in
-    // collapseScheduleService.getCollapsedCoinIds/isCoinCollapsed.
-    // A collapsed coin in the live window must be exactly £0 (never revived).
-    const revived = await q(
-      `SELECT count(*)::int AS n
-       FROM coin_collapse_schedule cs
-       JOIN apocalypse_cycles ac ON ac.cycle_id = cs.cycle_id
-       JOIN coins c ON c.coin_id = cs.coin_id
-       WHERE ac.status IN ('ACTIVE', 'SETTLING') AND cs.executed_at IS NOT NULL AND c.current_price <> 0`
-    );
-    if (revived.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${revived.rows[0].n} collapsed coins in the ACTIVE/SETTLING cycle have a non-zero live price`);
+}
 
-    // A zero live price must be backed by an executed collapse in the
-    // ACTIVE or SETTLING cycle — death is never inferred from price alone,
-    // and a mid-settlement £0 (no ACTIVE cycle exists then) is legitimate.
-    const unexplained = await q(
-      `SELECT count(*)::int AS n FROM coins c
-       WHERE c.current_price = 0 AND NOT EXISTS (
-         SELECT 1 FROM coin_collapse_schedule cs
-         JOIN apocalypse_cycles ac ON ac.cycle_id = cs.cycle_id
-         WHERE ac.status IN ('ACTIVE', 'SETTLING') AND cs.coin_id = c.coin_id AND cs.executed_at IS NOT NULL
-       )`
-    );
-    if (unexplained.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${unexplained.rows[0].n} zero-priced coins have no executed collapse row in the ACTIVE/SETTLING cycle`);
-  }
+// --- Wave 4 (SIM-13/14): the dynamic collapse death record ---------------
+// apocalypse_coin_collapses: exactly one row per (cycle, coin), written
+// only at the moment of death by the dynamic collapse engine. A row's
+// existence IS the death record — there are no future-dated rows. The
+// ACTIVE/SETTLING zero-price invariants live here (the runtime death rule
+// in dynamicCollapseService.getCollapsedCoinIds/isCoinCollapsed).
+
+const EXPECTED_COIN_COLLAPSE_COLUMNS = [
+  ['collapse_id', 'integer', 'NO'],
+  ['cycle_id', 'integer', 'NO'],
+  ['coin_id', 'integer', 'NO'],
+  ['collapse_rank', 'integer', 'NO'],
+  ['collapsed_at', 'timestamp with time zone', 'NO'],
+  ['created_at', 'timestamp with time zone', 'NO']
+];
+
+async function verifyDynamicCollapses(q, problems) {
+  await verifyCore4Table(q, problems, 'apocalypse_coin_collapses', 'collapse_id', EXPECTED_COIN_COLLAPSE_COLUMNS, {
+    uniques: ['^UNIQUE \\(cycle_id, coin_id\\)', '^UNIQUE \\(cycle_id, collapse_rank\\)'],
+    fks: [
+      { target: 'apocalypse_cycles', pattern: '^FOREIGN KEY \\(cycle_id\\)' },
+      { target: 'coins', pattern: '^FOREIGN KEY \\(coin_id\\)' }
+    ],
+    checks: [
+      { label: 'collapse_rank >= 0', pattern: 'collapse_rank >= \\(??0' }
+    ],
+    nowDefaults: ['created_at']
+  });
+
+  // Live-data death invariants (only when the table exists AND carries the
+  // columns the invariants read — an incompatible stub table must produce
+  // shape problems above, not a crash here).
+  const reg = await q(`SELECT to_regclass('public.apocalypse_coin_collapses') AS r`);
+  if (!reg.rows[0].r) return;
+  const cols = await q(
+    `SELECT count(*)::int AS n FROM information_schema.columns
+     WHERE table_schema = 'public' AND table_name = 'apocalypse_coin_collapses'
+       AND column_name = ANY('{cycle_id,coin_id,collapse_rank,collapsed_at}')`
+  );
+  if (cols.rows[0].n !== 4) return;
+  const cyclesPresent = await q(`SELECT to_regclass('public.apocalypse_cycles') AS reg`);
+  if (!cyclesPresent.rows[0].reg) return;
+  // A malformed pre-Core-1 stub table can have the right name but no
+  // lifecycle columns. Its own shape errors are already reported; never let
+  // the dynamic-death data checks turn that into a verifier crash.
+  const cycleStatusColumn = await q(
+    `SELECT 1 FROM information_schema.columns
+     WHERE table_schema = 'public' AND table_name = 'apocalypse_cycles'
+       AND column_name = 'status'`
+  );
+  if (cycleStatusColumn.rowCount === 0) return;
+
+  // One death per (cycle, coin) and per (cycle, rank) — the UNIQUE
+  // constraints enforce this; the checks catch any historical anomaly.
+  const duplicateDeaths = await q(
+    `SELECT count(*)::int AS n FROM (
+       SELECT cycle_id, coin_id FROM apocalypse_coin_collapses
+       GROUP BY cycle_id, coin_id HAVING count(*) > 1
+     ) d`
+  );
+  if (duplicateDeaths.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${duplicateDeaths.rows[0].n} coins with more than one death record in a cycle`);
+  const duplicateRanks = await q(
+    `SELECT count(*)::int AS n FROM (
+       SELECT cycle_id, collapse_rank FROM apocalypse_coin_collapses
+       GROUP BY cycle_id, collapse_rank HAVING count(*) > 1
+     ) d`
+  );
+  if (duplicateRanks.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${duplicateRanks.rows[0].n} duplicated collapse execution ranks within a cycle`);
+
+  // Milestone 1: the authoritative live window is ACTIVE **or SETTLING**.
+  // A coin collapsed at the end of a round stays £0 through settlement (the
+  // freeze window has no ACTIVE cycle), matching the runtime death rule in
+  // dynamicCollapseService.getCollapsedCoinIds/isCoinCollapsed.
+  // A collapsed coin in the live window must be exactly £0 (never revived).
+  const revived = await q(
+    `SELECT count(*)::int AS n
+     FROM apocalypse_coin_collapses cc
+     JOIN apocalypse_cycles ac ON ac.cycle_id = cc.cycle_id
+     JOIN coins c ON c.coin_id = cc.coin_id
+     WHERE ac.status IN ('ACTIVE', 'SETTLING') AND c.current_price <> 0`
+  );
+  if (revived.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${revived.rows[0].n} collapsed coins in the ACTIVE/SETTLING cycle have a non-zero live price`);
+
+  // A zero live price must be backed by a persisted death record in the
+  // ACTIVE or SETTLING cycle — death is never inferred from price alone,
+  // and a mid-settlement £0 (no ACTIVE cycle exists then) is legitimate.
+  const unexplained = await q(
+    `SELECT count(*)::int AS n FROM coins c
+     WHERE c.current_price = 0 AND NOT EXISTS (
+       SELECT 1 FROM apocalypse_coin_collapses cc
+       JOIN apocalypse_cycles ac ON ac.cycle_id = cc.cycle_id
+       WHERE ac.status IN ('ACTIVE', 'SETTLING') AND cc.coin_id = c.coin_id
+     )`
+  );
+  if (unexplained.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${unexplained.rows[0].n} zero-priced coins have no executed collapse row in the ACTIVE/SETTLING cycle`);
 }
 
 // --- Core 4: round state (participants / holdings / round transactions) ---
@@ -1480,6 +1554,7 @@ async function verifyGameSchema({ query } = {}) {
   await verifyPriceHistoryProvenance(q, problems);
   await verifyCoinEventsAndMarketPhases(q, problems);
   await verifyMarketState(q, problems);
+  await verifyDynamicCollapses(q, problems);
 
   return { ok: problems.length === 0, problems };
 }
@@ -1487,7 +1562,7 @@ if (require.main === module) {
   verifyGameSchema()
     .then(async ({ ok, problems }) => {
       if (ok) {
-        console.log('game schema verification PASSED (apocalypse_cycles [SETTLING lifecycle + settlement observability], coins.cycle_baseline_price, canonical coin catalogue [migrations 013 + 014 retirement], coin_collapse_schedule, apocalypse_participants, apocalypse_holdings, apocalypse_transactions, users.is_bot, apocalypse_bots, apocalypse_bot_ticks, apocalypse_cash_events, apocalypse_economy_ticks, apocalypse_economy_events, apocalypse_results [immutable], apocalypse_coin_events [0-5 active cap], apocalypse_market_phases [one primary phase], apocalypse_market_state [one row per cycle, monotonic peak])');
+        console.log('game schema verification PASSED (apocalypse_cycles [SETTLING lifecycle + settlement observability], coins.cycle_baseline_price, canonical coin catalogue [migrations 013 + 014 retirement], coin_collapse_schedule [legacy], apocalypse_coin_collapses [dynamic death record], apocalypse_participants, apocalypse_holdings, apocalypse_transactions, users.is_bot, apocalypse_bots, apocalypse_bot_ticks, apocalypse_cash_events, apocalypse_economy_ticks, apocalypse_economy_events, apocalypse_results [immutable], apocalypse_coin_events [0-5 active cap], apocalypse_market_phases [one primary phase], apocalypse_market_state [one row per cycle, monotonic peak])');
         await db.end();
         return;
       }

@@ -14,7 +14,7 @@ const jwt = require('jsonwebtoken');
 const app = require('../app');
 const db = require('../db/connection');
 const { verifyGameSchema } = require('../db/verify-game-schema');
-const { createScheduleForCycle } = require('../game/collapseScheduleService');
+const settlementService = require('../game/gameSettlementService');
 const { buildPublicMarketState } = require('../game/botService');
 const { reconcileCycle } = require('../game/gameCycleService');
 const { joinRound, buyRoundTrade } = require('../game/gameRoundService');
@@ -79,27 +79,25 @@ describe('coin retirement (migration 014)', () => {
     expect(rows[0].n).toBe(0);
   });
 
-  test('a new cycle collapse schedule covers only the active catalogue', async () => {
+  test('the dynamic collapse engine only ever kills the active catalogue', async () => {
     await insertRetiredCoin();
-    const client = await db.getClient();
-    try {
-      await client.query('BEGIN');
-      await client.query(
-        `INSERT INTO apocalypse_cycles (apocalypse_id, seed, start_time, end_time, duration_ms, status)
-         VALUES ('APOC-9001', 'retirement-schedule-seed', now(), now() + interval '7 days', $1, 'ACTIVE')`,
-        [LONG_DURATION_MS]
-      );
-      const { rows: cycleRows } = await client.query(
-        `SELECT cycle_id, seed, start_time, end_time FROM apocalypse_cycles WHERE apocalypse_id = 'APOC-9001'`
-      );
-      const schedule = await createScheduleForCycle(client, cycleRows[0]);
-      await client.query('COMMIT');
+    // Run a real cycle to settlement: the final safety rule forces every
+    // ACTIVE-catalogue coin to £0, but a retired coin is preserved history —
+    // never given a death record and never repriced.
+    const T0 = new Date('2026-08-24T10:00:00.000Z');
+    const CYCLE_MS = 10 * 60 * 1000;
+    const cycle = await reconcileCycle({ now: T0, durationMs: CYCLE_MS, generateSeed: () => 'retirement-collapse-seed' });
+    await settlementService.freezeExpiredActiveCycle({ nowMs: T0.getTime() + CYCLE_MS + 1000 });
+    await settlementService.settleSettlingCycle();
 
-      expect(schedule).toHaveLength(10);
-      expect(schedule.some((r) => r.coin_id === 100)).toBe(false);
-    } finally {
-      client.release();
-    }
+    const { rows: deaths } = await db.query(
+      'SELECT coin_id FROM apocalypse_coin_collapses WHERE cycle_id = $1',
+      [cycle.cycle_id]
+    );
+    expect(deaths).toHaveLength(10);
+    expect(deaths.some((r) => r.coin_id === 100)).toBe(false);
+    const { rows: retired } = await db.query('SELECT current_price FROM coins WHERE coin_id = 100');
+    expect(parseFloat(retired[0].current_price)).toBe(50.00);
   });
 
   test('bot public market state excludes retired coins', async () => {

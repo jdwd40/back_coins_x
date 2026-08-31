@@ -179,13 +179,17 @@ describe('V2-3 collapse risk: no leakage through the public endpoint', () => {
 
   test('a collapsed coin reports risk DEAD at exactly £0 and stays visibly dead', async () => {
     const cycle = await reconcileCycle({ now: new Date('2026-08-20T10:07:00.000Z') });
-    const windowStartMs = new Date(cycle.start_time).getTime() + Number(cycle.duration_ms) * 0.70;
-    await reconcileCycle({ now: new Date(windowStartMs) });
-    const { rows: deadRows } = await db.query(
-      'SELECT coin_id FROM coin_collapse_schedule WHERE cycle_id = $1 AND executed_at IS NOT NULL',
-      [cycle.cycle_id]
+    // Persist an actual dynamic death record and its authoritative £0 price;
+    // the old fixed schedule no longer controls a coin's state.
+    const { rows: live } = await db.query('SELECT coin_id FROM coins WHERE retired = FALSE ORDER BY coin_id LIMIT 1');
+    const doomedId = live[0].coin_id;
+    await db.query(
+      `INSERT INTO apocalypse_coin_collapses (cycle_id, coin_id, collapse_rank, collapsed_at)
+       VALUES ($1, $2, 0, $3)`,
+      [cycle.cycle_id, doomedId, new Date(cycle.start_time)]
     );
-    expect(deadRows.length).toBeGreaterThan(0);
+    await db.query('UPDATE coins SET current_price = 0 WHERE coin_id = $1', [doomedId]);
+    const deadRows = [{ coin_id: doomedId }];
 
     const cycleService = require('../game/gameCycleService');
     const spy = jest.spyOn(cycleService, 'reconcileCycle').mockResolvedValue(cycle);

@@ -14,7 +14,7 @@ const db = require('../db/connection');
 const marketDomain = require('./marketDomain');
 const collapseRiskDomain = require('./collapseRiskDomain');
 const { getApocalypseVolatility } = require('./apocalypseVolatility');
-const collapseScheduleService = require('./collapseScheduleService');
+const dynamicCollapseService = require('./dynamicCollapseService');
 const priceEngine = require('./priceEngine');
 const { loadPricingContext } = require('./pricingContext');
 
@@ -63,14 +63,16 @@ function computeLiveCoinSignal({ seed, coin, nowMs, amplitude, apocalypsePercent
     nowMs,
     cycleProgress: cycleProgressAt(nowMs),
     phaseModifier: pricingContext.phaseModifierAt(nowMs),
-    eventModifier: pricingContext.eventModifierFor(coinId, nowMs)
+    eventModifier: pricingContext.eventModifierFor(coinId, nowMs),
+    pressureModifier: pricingContext.pressureModifierFor(coinId, nowMs)
   });
   const pastPrice = priceEngine.unifiedPriceAt({
     ...shared,
     nowMs: lookbackMs,
     cycleProgress: cycleProgressAt(lookbackMs),
     phaseModifier: pricingContext.phaseModifierAt(lookbackMs),
-    eventModifier: pricingContext.eventModifierFor(coinId, lookbackMs)
+    eventModifier: pricingContext.eventModifierFor(coinId, lookbackMs),
+    pressureModifier: pricingContext.pressureModifierFor(coinId, lookbackMs)
   });
   const recentChangePct = pastPrice > 0
     ? Math.round(((currentPrice - pastPrice) / pastPrice) * 10000) / 100
@@ -115,11 +117,11 @@ async function getPublicMarketSignals({ now = new Date() } = {}) {
   });
   const amplitude = getApocalypseVolatility(apocalypsePercent);
 
-  const collapsedCoinIds = await collapseScheduleService.getCollapsedCoinIds();
+  const collapsedCoinIds = await dynamicCollapseService.getCollapsedCoinIds();
 
-  // SIM-08: the persisted Wave 1/2 pricing context feeding the unified
-  // signal path. Internal only — never serialised publicly.
-  const pricingContext = await loadPricingContext(db, cycle);
+  // SIM-08/SIM-11: the persisted Wave 1/2/4 pricing context feeding the
+  // unified signal path. Internal only — never serialised publicly.
+  const pricingContext = await loadPricingContext(db, cycle, { nowMs });
   const cycleDurationMs = Number(cycle.duration_ms);
 
   const { rows: coins } = await db.query(

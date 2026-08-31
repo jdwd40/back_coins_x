@@ -9,9 +9,10 @@
 // random walk, no Math.random(), no in-memory volatility/event state:
 // prices are a pure function of the persisted apocalypse cycle (seed +
 // window), each coin's persisted cycle_baseline_price, its gameplay-roster
-// archetype, the persisted Wave 1/2 phase/event/lifecycle authorities
-// (loaded per batch via game/pricingContext.js) and authoritative time, so
-// restarts reproduce identical prices from the database alone.
+// archetype, the persisted Wave 1/2/4 phase/event/lifecycle/round-ledger
+// authorities (loaded per batch via game/pricingContext.js) and
+// authoritative time, so restarts reproduce identical prices from the
+// database alone.
 //
 // Core 2: the apocalypse volatility factor is resolved ONCE per batch from
 // authoritative Core 1 progress and passed to the domain as the amplitude
@@ -24,7 +25,7 @@ const db = require('../db/connection');
 const logger = require('../utils/logger');
 const gameCycleService = require('../game/gameCycleService');
 const { getApocalypseVolatility } = require('../game/apocalypseVolatility');
-const collapseScheduleService = require('../game/collapseScheduleService');
+const dynamicCollapseService = require('../game/dynamicCollapseService');
 const gameRoundService = require('../game/gameRoundService');
 const marketDomain = require('../game/marketDomain');
 const priceEngine = require('../game/priceEngine');
@@ -76,7 +77,8 @@ class MarketSimulator {
       lifecycleState: marketContext.pricingContext.lifecycleState,
       cycleProgress: marketContext.cycleProgress,
       phaseModifier: marketContext.pricingContext.phaseModifierAt(marketContext.nowMs),
-      eventModifier: marketContext.pricingContext.eventModifierFor(coin.coin_id, marketContext.nowMs)
+      eventModifier: marketContext.pricingContext.eventModifierFor(coin.coin_id, marketContext.nowMs),
+      pressureModifier: marketContext.pricingContext.pressureModifierFor(coin.coin_id, marketContext.nowMs)
     });
   }
 
@@ -172,18 +174,20 @@ class MarketSimulator {
       // by every coin calculation in this batch.
       const amplitude = getApocalypseVolatility(apocalypsePercent);
 
-      // Core 3: the reconcileCycle() call above has already reconciled any
-      // due collapses (they execute inside the Core 1 lifecycle transaction,
-      // before this batch calculates prices). Read the persisted execution
-      // state of the live cycle — never inferred from current_price === 0,
-      // never held in memory — so collapsed coins are excluded.
-      const collapsedCoinIds = await collapseScheduleService.getCollapsedCoinIds();
+      // Core 3 (SIM-13/14): the reconcileCycle() call above has already
+      // run the dynamic collapse evaluation (deaths execute inside the
+      // Core 1 lifecycle transaction, before this batch calculates
+      // prices). Read the persisted death records of the live cycle —
+      // never inferred from current_price === 0, never held in memory — so
+      // collapsed coins are excluded.
+      const collapsedCoinIds = await dynamicCollapseService.getCollapsedCoinIds();
 
-      // SIM-08: the persisted Wave 1/2 pricing context (hidden lifecycle
-      // state, primary market phase chain, coin-event streams) for this
-      // batch, read from the same reconciled authorities the cycle service
-      // just extended. Internal only — never serialised publicly.
-      const pricingContext = await loadPricingContext(db, cycle);
+      // SIM-08/SIM-11: the persisted Wave 1/2/4 pricing context (hidden
+      // lifecycle state, primary market phase chain, coin-event streams,
+      // bounded round-ledger trading pressure) for this batch, read from
+      // the same reconciled authorities the cycle service just extended.
+      // Internal only — never serialised publicly.
+      const pricingContext = await loadPricingContext(db, cycle, { nowMs: batchNowMs });
 
       const marketContext = {
         seed: cycle.seed,
@@ -260,7 +264,8 @@ class MarketSimulator {
           lifecycleState: marketContext.pricingContext.lifecycleState,
           cycleProgress: Math.min(1, Math.max(0, (lookbackMs - marketContext.roundStartMs) / marketContext.cycleDurationMs)),
           phaseModifier: marketContext.pricingContext.phaseModifierAt(lookbackMs),
-          eventModifier: marketContext.pricingContext.eventModifierFor(coin.coin_id, lookbackMs)
+          eventModifier: marketContext.pricingContext.eventModifierFor(coin.coin_id, lookbackMs),
+          pressureModifier: marketContext.pricingContext.pressureModifierFor(coin.coin_id, lookbackMs)
         });
         changePctSum += ((newPrice - previousPrice) / previousPrice) * 100;
         changePctCount += 1;
