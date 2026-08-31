@@ -2,17 +2,17 @@
 
 ## Current Execution
 
-- **Current wave:** Wave 3 — Unified Price, Crashes, and Rallies (complete)
-- **Current ticket:** SIM-11
-- **Status:** READY FOR WAVE 4 — Wave 3 implementation, review, and gates complete
+- **Current wave:** Wave 4 — Trading Pressure, Bot Reactions, and Dynamic Collapse (complete)
+- **Current ticket:** SIM-15
+- **Status:** READY FOR WAVE 5 — Wave 4 implementation, strict review, and regression gates complete
 - **Current branch:** Backend `v2-legacy-cleanup-20260825`; frontend `gameplay-overhaul-20260830`
-- **Latest successful commit:** Backend `30957801806304646c95575e87e1be627b328d24`; frontend `67b59a6a6eec138eaa874b4e567543bc2858aae3`
-- **Last pushed commit:** Backend `30957801806304646c95575e87e1be627b328d24` on `v2-legacy-cleanup-20260825`; frontend remote `f06b5a903b5a4fa6b7ea04385ce37f4059e829ef`
+- **Latest successful commit:** Backend `f0b9575cd54ebbb9fee8f4ece11e9b86fb0aa984`; frontend `67b59a6a6eec138eaa874b4e567543bc2858aae3`
+- **Last pushed commit:** Backend `f0b9575cd54ebbb9fee8f4ece11e9b86fb0aa984` on `v2-legacy-cleanup-20260825`; frontend remote `f06b5a903b5a4fa6b7ea04385ce37f4059e829ef`
 - **Last deployed commit:** Not checked
-- **Database migration status:** Local disposable test DB migrations 020 and 021 applied and verified; production not checked or applied
-- **Review status:** Fresh strict Wave 3 review passed; no unresolved P0/P1 findings
+- **Database migration status:** Local disposable test DB migration 022 applied and schema verification passed; production not checked or applied
+- **Review status:** Wave 4 strict review passed; no unresolved significant findings. Runtime source has no old scheduled-collapse controller references or legacy schedule writes.
 - **Blocking issue:** None
-- **Next action:** Read state and plan Wave 4 only: SIM-11 bounded trading pressure, SIM-12 bot reactions, and SIM-13/SIM-14 dynamic-collapse replacement and old-scheduler retirement.
+- **Next action:** Plan Wave 5 API/frontend contract extension without changing the hidden lifecycle/collapse internals or existing buy/sell/auth contracts.
 
 ## Startup Safety Check
 
@@ -31,16 +31,16 @@
 
 - **Baseline backend:** `npm test` — 80 suites passed, 1 suite failed; 759 tests passed, 1 failed due to the recorded 5-second timeout in `__tests__/game-public-state-no-seed.test.js`; total 760 tests. Treat as baseline unless changed/worsened by this overhaul.
 - **Baseline frontend:** `npm run test:ui` passed; `npm run test:unit` passed 216 tests; `npm run lint` passed with 0 errors and 6 existing warnings; `npm run build` passed with standard bundle-size/Browserslist warnings.
-- **Latest targeted tests:** Wave 3 focused suites — 2 suites, 24 tests passed; affected regression suites — 13 suites, 152 tests passed; changed/new-file Node syntax checks and `git diff --check` passed. ESLint is not configured in this backend (`npx eslint` installed ESLint 10 and stopped because no `eslint.config.*` exists); no source change was made for that tooling mismatch.
-- **Latest full tests:** Backend `npm test` — 92 suites, 940 passed, 1 failed; the one failure is the same recorded 5-second timeout in `__tests__/game-public-state-no-seed.test.js`, confirmed against the pre-Wave-3 baseline commit and unchanged in failure mode.
+- **Latest targeted tests:** Wave 4 focused correction suites — 2 suites, 45 tests passed; `__tests__/v2-power-trades.test.js` — 1 suite, 22 tests passed; schema verifier passed; changed/new-file syntax checks passed for 48 files; `git diff --check` passed.
+- **Latest full tests:** Backend `npm test` after all Wave 4 corrections — 94 passed / 95 total suites and 976 passed / 977 total tests; the sole failure is the known 5-second timeout in `__tests__/game-public-state-no-seed.test.js`; no Wave 4 failures.
 
 ## Current Wave Audit Notes
 
 - Current backend already contains an older V2 deterministic market domain (`game/marketDomain.js`) and headless simulator (`simulation/`).
 - Current live price writer is `models/market-simulator.js`, which calls `marketDomain.evaluateMarketPoint()` and persists `coins.current_price` plus price history.
-- Current scheduled collapse authority is `game/collapseScheduleService.js`, persisted in `coin_collapse_schedule`, reconciled by `game/gameCycleService.js` and settlement.
-- Current cycle authority/recovery is `game/gameCycleService.js`; bots use `game/botWorker.js`/`game/botService.js`; price history is written by the market writer and collapse executor; settlement uses `game/gameSettlementService.js`.
-- The current repository therefore requires an explicit migration design to avoid running a new dynamic collapse engine alongside the existing schedule.
+- Current dynamic collapse authority is `game/dynamicCollapseService.js`, persisted in `apocalypse_coin_collapses`; the legacy `coin_collapse_schedule` table is preserved historical data only and is not read or written by runtime code.
+- Current cycle authority/recovery is `game/gameCycleService.js`; bots use `game/botWorker.js`/`game/botService.js`; price history is written by the market writer and dynamic collapse executor; settlement uses `game/gameSettlementService.js`.
+- Wave 4 replaces the old fixed scheduled-collapse runtime with the market-reactive dynamic engine, keeps the single advisory lock, and applies the final exact-£0 settlement safety rule.
 - Wave 1 adds separate deterministic coin-event and market-phase engines, additive migration 020, disposable-schema wiring/verification, and Core 1 lifecycle integration. It does not alter the existing price writer, scheduled collapse authority, trade rules, portfolios, transaction history, price history, settlement, or public API shapes.
 - Coin events use rolling seeded persistence, 0–5 active-per-coin cap, 1–15 minute durations, separate flavour/name and signed modifier fields, expiry by timestamp, and no portfolio/trade/price-history coupling.
 - Market phases use all six required phase types, lifecycle-weighted deterministic selection with GROWTH wired until Wave 2, one contiguous persisted primary chain, and restart/idempotency coverage.
@@ -60,13 +60,13 @@
 - SIM-08 Integrate unified normal price calculation
 - SIM-09 Implement crash engine
 - SIM-10 Implement rally and lower-high behaviour
-
-## Remaining Tickets
-
 - SIM-11 Add bounded buy/sell pressure
 - SIM-12 Adapt bot reactions to panic and dip buying
 - SIM-13 Implement dynamic coin collapse pressure
 - SIM-14 Retire/disable old scheduled collapse logic
+
+## Remaining Tickets
+
 - SIM-15 Extend game-state API with player-facing events/phases
 - SIM-16 Add market-phase frontend UI
 - SIM-17 Add active coin-event frontend UI
