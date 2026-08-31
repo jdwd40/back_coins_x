@@ -328,11 +328,14 @@ describe('Core 6: end-of-round settlement', () => {
       [cycle.cycle_id]
     );
 
-    // Replay every phase: none of them may change anything.
+    // Replay every phase: none of them may change anything. The reconciles
+    // stay pinned to the AFTER_END boundary — advancing the clock would enter
+    // the successor's active window and simulate new gameplay (where the
+    // dynamic-collapse engine may legitimately act), not replay the settlement.
     expect(await settlementService.freezeExpiredActiveCycle({ nowMs: AFTER_END.getTime() })).toBeNull();
     expect(await settlementService.settleSettlingCycle()).toBeNull();
     await reconcileCycle({ now: AFTER_END, durationMs: CYCLE_MS });
-    await reconcileCycle({ now: new Date(AFTER_END.getTime() + 60000), durationMs: CYCLE_MS });
+    await reconcileCycle({ now: AFTER_END, durationMs: CYCLE_MS });
 
     expect(await tableCounts()).toEqual(settledState);
     const { rows: again } = await db.query(

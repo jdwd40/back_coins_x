@@ -7,6 +7,14 @@
 // line on stdout. Because every spawned worker is held until the same barrier,
 // their reconcile calls genuinely collide on the database advisory lock
 // instead of drifting in over time.
+//
+// Optional env RACE_WORKER_CYCLE_SEED: when set (non-empty), a cycle this
+// worker creates is seeded with that explicit value instead of a random
+// one. Fixture-only control (the value travels with the test process env,
+// never production config): it lets a race test pin a documented
+// deterministic seed whose collapse rolls are known-safe for the scenario
+// under test. Creation semantics are unchanged — the seed is still chosen
+// by the server-side generator at insert time, only its value is pinned.
 
 const path = require('path');
 const { assertDisposableTestDatabase } = require('./testDatabaseGuard');
@@ -27,8 +35,22 @@ if (!Number.isFinite(barrierMs) || !Number.isFinite(nowMs)) {
 }
 
 const delay = Math.max(0, barrierMs - Date.now());
+
+// Fixture-only explicit cycle seed (see header). Validated here so a
+// misconfigured harness fails loudly instead of falling back to a random
+// seed and silently reintroducing nondeterminism.
+const explicitSeed = process.env.RACE_WORKER_CYCLE_SEED;
+if (explicitSeed !== undefined && explicitSeed.length === 0) {
+  console.error('raceWorker: RACE_WORKER_CYCLE_SEED must be non-empty when set');
+  process.exit(2);
+}
+const reconcileOptions = { now: new Date(nowMs) };
+if (explicitSeed !== undefined) {
+  reconcileOptions.generateSeed = () => explicitSeed;
+}
+
 setTimeout(() => {
-  reconcileCycle({ now: new Date(nowMs) })
+  reconcileCycle(reconcileOptions)
     .then(async (cycle) => {
       process.stdout.write(JSON.stringify(cycle) + '\n');
       await db.end();

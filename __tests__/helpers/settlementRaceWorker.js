@@ -3,7 +3,17 @@
 //
 // Usage: node __tests__/helpers/settlementRaceWorker.js <mode> <barrierEpochMs> <payloadJson>
 //   mode: buy | sell | freeze | settle | reconcile
-//   payloadJson: { userId, apocalypseId, coinId, quantity, nowMs }
+//   payloadJson: { userId, apocalypseId, coinId, quantity, nowMs, cycleSeed }
+//
+// Fixture-only `cycleSeed` (reconcile mode): when present, a cycle this
+// worker creates is seeded with that explicit value via the existing
+// reconcileCycle `generateSeed` injection point instead of an uncontrolled
+// generated one. It lets a race test pin a documented deterministic seed
+// whose collapse rolls are known-safe for the scenario under test (see
+// __tests__/helpers/findCollapseRaceSeed.js). Creation semantics are
+// unchanged — the seed is still chosen server-side at insert time, only
+// its value is pinned. Validated here so a misconfigured harness fails
+// loudly instead of silently reintroducing nondeterminism.
 //
 // The worker sleeps until the shared barrier instant, then executes exactly
 // one operation and prints a single JSON line on stdout:
@@ -36,6 +46,18 @@ if (!['buy', 'sell', 'freeze', 'settle', 'reconcile'].includes(mode) || !Number.
   console.error('settlementRaceWorker: mode (buy|sell|freeze|settle|reconcile) and barrier epoch ms are required');
   process.exit(2);
 }
+if (payload.cycleSeed !== undefined && (typeof payload.cycleSeed !== 'string' || payload.cycleSeed.length === 0)) {
+  console.error('settlementRaceWorker: cycleSeed must be a non-empty string when set');
+  process.exit(2);
+}
+
+function reconcileOptions() {
+  const options = { now, durationMs: payload.durationMs };
+  if (payload.cycleSeed !== undefined) {
+    options.generateSeed = () => payload.cycleSeed;
+  }
+  return options;
+}
 
 function run() {
   switch (mode) {
@@ -60,7 +82,7 @@ function run() {
     case 'settle':
       return settlementService.settleSettlingCycle();
     case 'reconcile':
-      return reconcileCycle({ now, durationMs: payload.durationMs });
+      return reconcileCycle(reconcileOptions());
     default:
       throw new Error(`unknown mode ${mode}`);
   }

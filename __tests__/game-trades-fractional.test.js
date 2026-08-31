@@ -23,6 +23,23 @@ const { joinRound } = require('../game/gameRoundService');
 // keeps every coin alive for the whole test regardless of when it runs.
 const LONG_DURATION_MS = 7 * 24 * 60 * 60 * 1000;
 
+// Documented deterministic cycle seed for this fixture, found and
+// re-verifiable via `NODE_ENV=test node __tests__/helpers/findCollapseRaceSeed.js`.
+// reconcileCycle now runs the dynamic collapse engine at creation, so an
+// uncontrolled generated seed can land a rare opening-bucket roll under a
+// coin's pre-decline-capped risk and kill coin 1 before the first trade
+// (observed: the 8-decimal dust buy rejected 400 as collapsed). With this
+// seed every seeded per-(coin, bucket) collapse roll for every coin in the
+// disposable seed set is >= the preDeclineRiskCap at every evaluation bucket
+// of a fresh cycle, so no coin can die during these tests while the market
+// is in its opening GROWTH state. The 7-day fixture cycle starts exactly at
+// `now` (custom durations are not boundary-aligned) and each test finishes
+// in seconds, so only the first bucket or two are ever evaluated — well
+// inside the verified 64-bucket margin. Dynamic-collapse semantics, risk
+// caps and evaluation itself are unchanged — only the fixture's seed source
+// is pinned.
+const FRACTIONAL_TRADE_SAFE_SEED = 'collapse-race-safe-seed-34';
+
 function tokenFor(userId) {
   return jwt.sign({ user_id: userId }, process.env.JWT_SECRET, { expiresIn: '1h' });
 }
@@ -55,7 +72,11 @@ async function sellLedgerCount(participantId) {
 // expected totals are exact: £2,500.00 per coin mirrors the issue's worked
 // example (0.004 of a £2,500 coin costs £10.00).
 async function setupJoinedRound({ coinPrice = 2500 } = {}) {
-  const cycle = await reconcileCycle({ now: new Date(), durationMs: LONG_DURATION_MS });
+  const cycle = await reconcileCycle({
+    now: new Date(),
+    durationMs: LONG_DURATION_MS,
+    generateSeed: () => FRACTIONAL_TRADE_SAFE_SEED
+  });
   const participant = await joinRound({ userId: 1, now: new Date() });
   await db.query('UPDATE coins SET current_price = $1 WHERE coin_id = 1', [coinPrice]);
   return { cycle, participant, coinId: 1 };

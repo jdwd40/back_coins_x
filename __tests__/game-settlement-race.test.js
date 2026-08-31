@@ -20,6 +20,24 @@ const RACE_WORKER = path.join(__dirname, 'helpers', 'settlementRaceWorker.js');
 
 const CYCLE_MS = 10 * 60 * 1000;
 
+// Documented deterministic cycle seed for the duplicate-settlement fixture,
+// found and re-verifiable via
+// `NODE_ENV=test node __tests__/helpers/findCollapseRaceSeed.js`.
+// The reconcile workers below settle the predecessor at the barrier and
+// continue at logical `barrier + 5000ms` — inside the successor's active
+// window — where they legitimately evaluate dynamic collapse at the
+// successor's start bucket with the market in its opening GROWTH state
+// (risk capped at config dynamicCollapse.preDeclineRiskCap). An
+// uncontrolled generated successor seed can land a rare roll under that
+// cap and kill a coin, which the global zero-history assertion (written to
+// validate the PREDECESSOR settlement) would then count as a duplicate.
+// With this seed every per-(coin, bucket) collapse roll for every seeded
+// coin is >= the cap at every evaluation bucket of a fresh cycle, so the
+// successor cannot produce a death during the settlement-race assertion.
+// Dynamic-collapse semantics, risk caps and evaluation itself are all
+// unchanged — only the fixture's successor seed source is pinned.
+const SETTLEMENT_RACE_SAFE_SEED = 'collapse-race-safe-seed-34';
+
 jest.setTimeout(45000);
 
 function spawnWorker(mode, barrierMs, payload) {
@@ -127,9 +145,12 @@ describe('Core 6: genuine multi-process settlement races', () => {
     const cycle = await setupExpiringCycle(barrierMs, [1, 2]);
 
     // Four processes reconcile the same expired cycle at the same instant.
+    // The pinned cycleSeed only controls the successor's collapse rolls
+    // (see SETTLEMENT_RACE_SAFE_SEED above); the barrier, the advisory-lock
+    // race and the predecessor settlement are untouched.
     const workers = await Promise.all(
       Array.from({ length: 4 }, () =>
-        spawnWorker('reconcile', barrierMs, { nowMs: barrierMs + 5000, durationMs: CYCLE_MS }))
+        spawnWorker('reconcile', barrierMs, { nowMs: barrierMs + 5000, durationMs: CYCLE_MS, cycleSeed: SETTLEMENT_RACE_SAFE_SEED }))
     );
     const results = parseResults(workers);
     for (const r of results) expect(r.ok).toBe(true);

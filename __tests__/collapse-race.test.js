@@ -13,18 +13,35 @@ const path = require('path');
 const { spawn } = require('child_process');
 const db = require('../db/connection');
 const { assertDisposableTestDatabase } = require('./helpers/testDatabaseGuard');
+const { DEFAULT_GAME_CYCLE_DURATION_MS } = require('../game/gameCycleService');
 
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 const RACE_WORKER = path.join(__dirname, 'helpers', 'raceWorker.js');
 const WORKER_COUNT = 6;
 
+// Documented deterministic cycle seed for this fixture, found and
+// re-verifiable via `NODE_ENV=test node __tests__/helpers/findCollapseRaceSeed.js`.
+// The dynamic collapse engine legitimately evaluates the exact cycle-start
+// bucket at cold start, so an uncontrolled generated seed can land a rare
+// early roll under a coin's pre-decline-capped risk and kill coins during
+// the exactly-once cold-start verification. With this seed every seeded
+// per-(coin, bucket) collapse roll for every coin in the disposable seed
+// set is >= the preDeclineRiskCap at every evaluation bucket of a fresh
+// cycle, so no start-bucket death is possible under any racing interleaving
+// while the market is in its opening GROWTH state. Dynamic-collapse
+// semantics, risk caps and evaluation itself are all unchanged — only the
+// fixture's seed source is pinned.
+const COLLAPSE_RACE_SAFE_SEED = 'collapse-race-safe-seed-34';
+
 jest.setTimeout(30000);
 
-function spawnRaceWorkers(barrierMs, nowMs) {
+function spawnRaceWorkers(barrierMs, nowMs, { cycleSeed } = {}) {
   return Array.from({ length: WORKER_COUNT }, () => new Promise((resolve, reject) => {
+    const env = { ...process.env, NODE_ENV: 'test' };
+    if (cycleSeed !== undefined) env.RACE_WORKER_CYCLE_SEED = cycleSeed;
     const child = spawn(process.execPath, [RACE_WORKER, String(barrierMs), String(nowMs)], {
       cwd: PROJECT_ROOT,
-      env: { ...process.env, NODE_ENV: 'test' }
+      env
     });
     let stdout = '';
     let stderr = '';
@@ -55,8 +72,19 @@ describe('SIM-13/14: genuine multi-process collapse races (dynamic collapse)', (
   });
 
   test('cold start: simultaneous processes create exactly one cycle and persist no future collapse plan', async () => {
+    // The wall-clock barrier genuinely synchronises the six processes; the
+    // effective-now is pinned to one second after the NEXT aligned cycle
+    // boundary so the cold start is evaluated exactly at the cycle-start
+    // bucket (bucket zero, opening GROWTH market state) no matter where in
+    // the half-hour window the test fires. Without this, a barrier landing
+    // late in the aligned window would let the racing reconciles advance
+    // the hidden lifecycle past the pre-decline risk cap before evaluating,
+    // and even a start-safe seed could see deaths. The scenario under test
+    // — a healthy market at the very start of the cycle — is unchanged.
     const barrierMs = Date.now() + 1500;
-    const results = parseResults(await Promise.all(spawnRaceWorkers(barrierMs, barrierMs)));
+    const cycleStartMs = Math.ceil(barrierMs / DEFAULT_GAME_CYCLE_DURATION_MS) * DEFAULT_GAME_CYCLE_DURATION_MS;
+    const nowMs = cycleStartMs + 1000;
+    const results = parseResults(await Promise.all(spawnRaceWorkers(barrierMs, nowMs, { cycleSeed: COLLAPSE_RACE_SAFE_SEED })));
 
     // Every process converged on the same single cycle.
     expect(new Set(results.map((r) => r.cycle_id)).size).toBe(1);
@@ -91,7 +119,7 @@ describe('SIM-13/14: genuine multi-process collapse races (dynamic collapse)', (
       [predecessorStart, predecessorEnd]
     );
 
-    const results = parseResults(await Promise.all(spawnRaceWorkers(barrierMs, barrierMs)));
+    const results = parseResults(await Promise.all(spawnRaceWorkers(barrierMs, barrierMs, { cycleSeed: COLLAPSE_RACE_SAFE_SEED })));
 
     // Every caller converged on the same successor cycle.
     expect(new Set(results.map((r) => r.cycle_id)).size).toBe(1);
