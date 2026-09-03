@@ -6,6 +6,7 @@ const path = require('path');
 const { spawn } = require('child_process');
 const db = require('../db/connection');
 const gameCycleWorker = require('../game/gameCycleWorker');
+const persistentReplacementWorker = require('../game/persistentReplacementWorker');
 const { assertDisposableTestDatabase } = require('./helpers/testDatabaseGuard');
 
 const PROJECT_ROOT = path.resolve(__dirname, '..');
@@ -15,6 +16,7 @@ jest.setTimeout(30000);
 describe('Core 1: server lifecycle', () => {
   afterEach(() => {
     gameCycleWorker.stop();
+    persistentReplacementWorker.stop();
   });
 
   test('importing server.js starts no listener, worker, or timer', () => {
@@ -25,6 +27,7 @@ describe('Core 1: server lifecycle', () => {
       expect(serverModule.shutdown).toBeInstanceOf(Function);
     });
     expect(gameCycleWorker.isRunning()).toBe(false);
+    expect(persistentReplacementWorker.isRunning()).toBe(false);
     jest.dontMock('../models/market-simulator');
   });
 
@@ -35,9 +38,11 @@ describe('Core 1: server lifecycle', () => {
     const server = await serverModule.startServer(0);
     expect(server.listening).toBe(true);
 
-    // Simulate a running production worker; shutdown must stop it.
+    // Simulate running production workers; shutdown must stop them.
     gameCycleWorker.start();
+    persistentReplacementWorker.start();
     expect(gameCycleWorker.isRunning()).toBe(true);
+    expect(persistentReplacementWorker.isRunning()).toBe(true);
 
     // Observe pool draining without actually ending the suite-shared pool
     // (jest.setup.js reseeds via the same pool before later tests).
@@ -49,6 +54,7 @@ describe('Core 1: server lifecycle', () => {
 
     await first;
     expect(gameCycleWorker.isRunning()).toBe(false);
+    expect(persistentReplacementWorker.isRunning()).toBe(false);
     expect(server.listening).toBe(false);
     expect(endSpy).toHaveBeenCalledTimes(1); // drained exactly once
   });

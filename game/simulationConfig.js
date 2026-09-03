@@ -368,6 +368,15 @@ const DEFAULT_SIMULATION_CONFIG = {
       // not secularly drift (master plan §22/§23).
       typicalDrawdown: { ZIP: 0.35, MOON: 0.40, BULL: 0.40, HODL: 0.45, DEGEN: 0.61, RUG: 0.72 },
       typicalLogCommittedDamage: { ZIP: -0.12, MOON: -0.05, BULL: -0.06, HODL: 0.05, DEGEN: 0.0, RUG: 0.06 }
+    },
+    // Stage 9 S9-01: authoritative living→DEAD decision. Death fires when
+    // the persistent collapse-risk SCORE (condition-driven; same domain as
+    // the public coarse CRITICAL band) meets or exceeds riskThreshold.
+    // The threshold sits ABOVE the public CRITICAL lower bound (4.5) so a
+    // CRITICAL signal alone is never death — death is rarer and deliberate.
+    // Touching the living positive safety floor (§27) NEVER kills a coin.
+    death: {
+      riskThreshold: 6.0
     }
   },
 
@@ -798,7 +807,8 @@ function validatePersistent(name, persistent) {
   requireExactKeys(name, persistent, [
     'restoringForcePerCycle', 'referenceConditionRatePerDay', 'maxReferenceLogMovePerDay',
     'crashDamageHalfLifeMs', 'baseCrashProbability', 'baseRallyProbability',
-    'recoveryStrength', 'peakReferenceHalfLifeMs', 'normalModifierLimit', 'condition'
+    'recoveryStrength', 'peakReferenceHalfLifeMs', 'normalModifierLimit', 'condition',
+    'death'
   ]);
 
   // §23: the restoring force must be weak (a cycle closes only a small
@@ -891,6 +901,18 @@ function validatePersistent(name, persistent) {
     if (Math.abs(condition.typicalLogCommittedDamage[id]) > 2) {
       failConfig(`${name}.condition.typicalLogCommittedDamage.${id} must be a log-space level in [-2, 2]; received ${condition.typicalLogCommittedDamage[id]}`);
     }
+  }
+
+  // Stage 9 S9-01: death-risk threshold. Must sit strictly above the public
+  // CRITICAL band (collapseRiskDomain.RISK_THRESHOLDS.CRITICAL = 4.5) so the
+  // public CRITICAL signal is never alone sufficient to kill.
+  requireExactKeys(`${name}.death`, persistent.death, ['riskThreshold']);
+  requireFiniteNumber(`${name}.death.riskThreshold`, persistent.death.riskThreshold);
+  if (persistent.death.riskThreshold <= 4.5) {
+    failConfig(`${name}.death.riskThreshold must exceed the public CRITICAL band (4.5) so CRITICAL alone is not death; received ${persistent.death.riskThreshold}`);
+  }
+  if (persistent.death.riskThreshold > 20) {
+    failConfig(`${name}.death.riskThreshold ${persistent.death.riskThreshold} is unrealistically high (risk scores rarely exceed ~12)`);
   }
 }
 
