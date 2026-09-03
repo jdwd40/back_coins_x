@@ -28,11 +28,17 @@ const VALID_ARCHETYPE_IDS = Object.freeze(Object.keys(MARKET_ARCHETYPES));
 const HOUR_MS = 60 * 60 * 1000;
 
 // Historical identities that MUST never be reused as replacements.
-//   * coin_ids 1..10 — the live canonical catalogue (migrations 013/014)
-//   * coin_ids 11..13 — retired legacy seed-only coins (migration 014)
-const HISTORICAL_RESERVED_COIN_IDS = Object.freeze([
-  1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13
-]);
+// Live canonical ids are derived from GAMEPLAY_ROSTER (currently 1..10).
+// Retired legacy seed-only coins (migration 014) are not on that roster
+// and remain reserved explicitly. Caller-supplied historicalIds are
+// ADDITIVE to this baseline — they never replace it.
+const LEGACY_RETIRED_COIN_IDS = Object.freeze([11, 12, 13]);
+const HISTORICAL_RESERVED_COIN_IDS = Object.freeze(
+  Array.from(new Set([
+    ...GAMEPLAY_ROSTER.keys(),
+    ...LEGACY_RETIRED_COIN_IDS
+  ])).sort((a, b) => a - b)
+);
 
 // Authored replacement definitions. coin_ids start at 101 so they never
 // collide with historical 1..13 and leave room for any intervening ids.
@@ -295,15 +301,34 @@ function getHistoricalReservedCoinIds() {
   return HISTORICAL_RESERVED_COIN_IDS.slice();
 }
 
-// Fail loudly when a coin_id collides with any historical/live identity.
-function assertIdentityUnused(coinId, historicalIds = HISTORICAL_RESERVED_COIN_IDS) {
+// Canonical permanent reserved IDs UNION caller-supplied additional IDs.
+// additionalHistoricalIds never replaces the baseline; omit/null/undefined
+// means the permanent set alone. Array and Set both work.
+function resolveReservedCoinIds(additionalHistoricalIds) {
+  const reserved = new Set(HISTORICAL_RESERVED_COIN_IDS);
+  if (additionalHistoricalIds == null) {
+    return reserved;
+  }
+  const extras = additionalHistoricalIds instanceof Set
+    ? additionalHistoricalIds
+    : Array.from(additionalHistoricalIds);
+  for (const raw of extras) {
+    const n = Number(raw);
+    if (Number.isInteger(n) && n > 0) {
+      reserved.add(n);
+    }
+  }
+  return reserved;
+}
+
+// Fail loudly when a coin_id collides with the permanent baseline OR any
+// additional historical/runtime identities the caller supplied.
+function assertIdentityUnused(coinId, additionalHistoricalIds) {
   const id = Number(coinId);
   if (!Number.isInteger(id) || id <= 0) {
     throw new ReplacementIdentityError(`coinId must be a positive integer; received ${String(coinId)}`);
   }
-  const reserved = historicalIds instanceof Set
-    ? historicalIds
-    : new Set(Array.from(historicalIds, Number));
+  const reserved = resolveReservedCoinIds(additionalHistoricalIds);
   if (reserved.has(id)) {
     throw new ReplacementIdentityError(
       `coin_id ${id} collides with a historical or live identity; dead and live coin_ids are never reused`
@@ -314,7 +339,7 @@ function assertIdentityUnused(coinId, historicalIds = HISTORICAL_RESERVED_COIN_I
 
 // Validate one authored replacement definition. Returns a frozen copy.
 function validateReplacementDefinition(definition, {
-  historicalIds = HISTORICAL_RESERVED_COIN_IDS,
+  historicalIds,
   path = 'replacement'
 } = {}) {
   if (!isPlainObject(definition)) {
@@ -372,7 +397,7 @@ function validateReplacementDefinition(definition, {
   });
 }
 
-function validateReplacementConfig(config, { historicalIds = HISTORICAL_RESERVED_COIN_IDS } = {}) {
+function validateReplacementConfig(config, { historicalIds } = {}) {
   if (!isPlainObject(config)) {
     failConfig(`config must be an object; received ${Array.isArray(config) ? 'array' : typeof config}`);
   }
@@ -499,8 +524,10 @@ module.exports = {
   DEFAULT_REPLACEMENT_CONFIG,
   ReplacementConfigError,
   ReplacementIdentityError,
+  LEGACY_RETIRED_COIN_IDS,
   getHistoricalReservedCoinIds,
   getLiveGameplayCoinIds,
+  resolveReservedCoinIds,
   assertIdentityUnused,
   validateReplacementDefinition,
   validateReplacementConfig,

@@ -18,8 +18,10 @@ const {
   DEFAULT_REPLACEMENT_CONFIG,
   ReplacementConfigError,
   ReplacementIdentityError,
+  LEGACY_RETIRED_COIN_IDS,
   getHistoricalReservedCoinIds,
   getLiveGameplayCoinIds,
+  resolveReservedCoinIds,
   assertIdentityUnused,
   validateReplacementDefinition,
   validateReplacementConfig,
@@ -79,6 +81,14 @@ describe('replacement pool authored defaults', () => {
       expect(HISTORICAL_RESERVED_COIN_IDS).toContain(liveId);
     }
     expect(getLiveGameplayCoinIds()).toEqual([...GAMEPLAY_ROSTER.keys()].sort((a, b) => a - b));
+    // Live canonical portion is derived from GAMEPLAY_ROSTER, not duplicated.
+    for (const liveId of GAMEPLAY_ROSTER.keys()) {
+      expect(HISTORICAL_RESERVED_COIN_IDS).toContain(liveId);
+    }
+    for (const retiredId of LEGACY_RETIRED_COIN_IDS) {
+      expect(GAMEPLAY_ROSTER.has(retiredId)).toBe(false);
+      expect(HISTORICAL_RESERVED_COIN_IDS).toContain(retiredId);
+    }
   });
 });
 
@@ -207,6 +217,78 @@ describe('identity reservation rules', () => {
       expect(reserved.has(entry.coinId)).toBe(false);
       expect(entry.coinId).toBeGreaterThan(13);
     }
+  });
+});
+
+describe('caller-supplied historical IDs are additive to the permanent baseline', () => {
+  test('canonical coin_id 1 is still rejected when additional historical IDs are [999]', () => {
+    expect(() => assertIdentityUnused(1, [999])).toThrow(ReplacementIdentityError);
+    expect(() => assertIdentityUnused(1, [999])).toThrow(/never reused/i);
+  });
+
+  test('additional historical coin_id 999 is rejected alongside the baseline', () => {
+    expect(() => assertIdentityUnused(999, [999])).toThrow(ReplacementIdentityError);
+  });
+
+  test('a genuinely fresh ID is accepted when additional historical IDs are supplied', () => {
+    expect(assertIdentityUnused(101, [999])).toBe(101);
+    expect(assertIdentityUnused(250, [999])).toBe(250);
+  });
+
+  test('the same additive reservation works with a Set', () => {
+    const extra = new Set([999]);
+    expect(() => assertIdentityUnused(1, extra)).toThrow(ReplacementIdentityError);
+    expect(() => assertIdentityUnused(13, extra)).toThrow(ReplacementIdentityError);
+    expect(() => assertIdentityUnused(999, extra)).toThrow(ReplacementIdentityError);
+    expect(assertIdentityUnused(101, extra)).toBe(101);
+    const reserved = resolveReservedCoinIds(extra);
+    expect(reserved.has(1)).toBe(true);
+    expect(reserved.has(13)).toBe(true);
+    expect(reserved.has(999)).toBe(true);
+    expect(reserved.has(101)).toBe(false);
+  });
+
+  test('validateReplacementDefinition cannot bypass the permanent set via custom historical IDs', () => {
+    expect(() => validateReplacementDefinition(
+      baseDefinition({ coinId: 1, symbol: 'BYP' }),
+      { historicalIds: [999] }
+    )).toThrow(ReplacementIdentityError);
+
+    expect(() => validateReplacementDefinition(
+      baseDefinition({ coinId: 999, symbol: 'EXR' }),
+      { historicalIds: [999] }
+    )).toThrow(ReplacementIdentityError);
+
+    expect(() => validateReplacementDefinition(
+      baseDefinition({ coinId: 250, symbol: 'FRS' }),
+      { historicalIds: [999] }
+    )).not.toThrow();
+  });
+
+  test('validateReplacementConfig cannot bypass the permanent set via custom historical IDs', () => {
+    const cfg = {
+      replacementDelayMs: 1000,
+      targetActiveCount: 1,
+      roster: [baseDefinition({ coinId: 1, symbol: 'CFG' })]
+    };
+    expect(() => validateReplacementConfig(cfg, { historicalIds: [999] }))
+      .toThrow(ReplacementIdentityError);
+
+    const extraOnly = {
+      replacementDelayMs: 1000,
+      targetActiveCount: 1,
+      roster: [baseDefinition({ coinId: 999, symbol: 'XTR' })]
+    };
+    expect(() => validateReplacementConfig(extraOnly, { historicalIds: [999] }))
+      .toThrow(ReplacementIdentityError);
+
+    const fresh = {
+      replacementDelayMs: 1000,
+      targetActiveCount: 1,
+      roster: [baseDefinition({ coinId: 250, symbol: 'OK1' })]
+    };
+    expect(() => validateReplacementConfig(fresh, { historicalIds: [999] }))
+      .not.toThrow();
   });
 });
 
