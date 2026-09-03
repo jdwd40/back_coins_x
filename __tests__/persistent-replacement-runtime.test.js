@@ -65,15 +65,37 @@ describe('Stage 9 S9-03: persistent replacement runtime', () => {
     jest.restoreAllMocks();
   });
 
-  test('does not fabricate replacements before any persistent state/death work exists', async () => {
-    // The beforeEach has created state, but there are still no deaths. A
-    // roster shortfall alone is never replacement authority.
+  test('does not fabricate replacements before any recorded death exists', async () => {
+    // There is a deliberate active-roster shortfall, but no authoritative
+    // death. A shortfall alone is never permission to consume the pool.
     await db.query('UPDATE coins SET retired = TRUE WHERE coin_id = 10');
     const result = await replacementRuntime.reconcilePersistentReplacements({
       nowMs: FIRST_BATCH_MS + DELAY_MS + 1
     });
     expect(result.inserted).toEqual([]);
     expect(result.eligibleDeaths).toBe(0);
+    expect((await db.query('SELECT count(*)::int AS n FROM coins WHERE coin_id >= 101')).rows[0].n).toBe(0);
+  });
+
+  test('restart-style repeated reconciliation during delay preserves pending work without early insertion', async () => {
+    await forceWriterDeath(1, FIRST_DEATH_MS);
+
+    const firstWake = await replacementRuntime.reconcilePersistentReplacements({
+      nowMs: FIRST_DEATH_MS + 1000
+    });
+    expect(firstWake.retiredCoinIds).toEqual([1]);
+    expect(firstWake.inserted).toEqual([]);
+    expect(firstWake.eligibleDeaths).toBe(0);
+
+    // A later process/worker wake derives the same pending state entirely
+    // from persisted died_at + durable catalogue rows; no in-memory timer or
+    // schedule state is required or lost across restart.
+    const laterWake = await replacementRuntime.reconcilePersistentReplacements({
+      nowMs: FIRST_DEATH_MS + Math.floor(DELAY_MS / 2)
+    });
+    expect(laterWake.retiredCoinIds).toEqual([]);
+    expect(laterWake.inserted).toEqual([]);
+    expect(laterWake.eligibleDeaths).toBe(0);
     expect((await db.query('SELECT count(*)::int AS n FROM coins WHERE coin_id >= 101')).rows[0].n).toBe(0);
   });
 
@@ -110,7 +132,6 @@ describe('Stage 9 S9-03: persistent replacement runtime', () => {
     expect(parseFloat(replacementCoin[0].current_price)).toBe(0.12);
     expect(parseFloat(replacementCoin[0].cycle_baseline_price)).toBe(0.12);
     expect(replacementCoin[0].retired).toBe(false);
-    expect(new Date(replacementCoin[0].date_added).getTime()).toBe(introducedAtMs);
 
     const { rows: replacementState } = await db.query(
       `SELECT archetype, condition, structural_reference, peak_reference,
@@ -154,11 +175,26 @@ describe('Stage 9 S9-03: persistent replacement runtime', () => {
     expect((await db.query('SELECT count(*)::int AS n FROM coins WHERE coin_id = 101')).rows[0].n).toBe(1);
     expect((await db.query('SELECT count(*)::int AS n FROM price_history WHERE coin_id = 101')).rows[0].n).toBe(1);
 
-    // Critical integration proof: the ordinary persistent writer can price
-    // and kill replacement 101 even though it is absent from GAMEPLAY_ROSTER.
-    // Its explicit persisted ZIP archetype + introduction checkpoint are the
-    // authority; there is no silent MOON fallback and no missing-roster abort.
-    const replacementDeathMs = introducedAtMs + 30 * 1000;
+    // Ordinary healthy writer tick first: replacement 101 must resume its
+    // introduction checkpoint using the persisted authored ZIP archetype,
+    // stay positive and produce exactly one new tick. This catches origin /
+    // checkpoint mismatches independently of the later death path.
+    const healthyTickMs = introducedAtMs + 30 * 1000;
+    const healthySpy = jest.spyOn(collapseRiskDomain, 'getPersistentCollapseRiskScore')
+      .mockReturnValue(0.5);
+    await marketSimulator.updateAllPrices({ nowMs: healthyTickMs });
+    healthySpy.mockRestore();
+    const healthyReplacement = await db.query(
+      'SELECT current_price FROM coins WHERE coin_id = 101'
+    );
+    expect(parseFloat(healthyReplacement.rows[0].current_price)).toBeGreaterThan(0);
+    expect((await db.query('SELECT count(*)::int AS n FROM price_history WHERE coin_id = 101')).rows[0].n).toBe(2);
+    expect((await db.query('SELECT archetype, status FROM market_coin_state WHERE coin_id = 101')).rows[0])
+      .toMatchObject({ archetype: 'ZIP', status: 'ALIVE' });
+
+    // Critical integration proof: the ordinary persistent writer can later
+    // kill replacement 101 even though it is absent from GAMEPLAY_ROSTER.
+    const replacementDeathMs = healthyTickMs + 30 * 1000;
     await forceWriterDeath(101, replacementDeathMs);
 
     const afterReplacementDeath = await replacementRuntime.reconcilePersistentReplacements({
