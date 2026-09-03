@@ -24,8 +24,12 @@
 //     modules — retained for the old read/compatibility surface until
 //     proven unreachable (Stage 13), never consulted by this writer.
 //   * Death is the persistent per-coin status (market_coin_state): a DEAD
-//     coin stays exactly £0 and is never priced again. The cycle-scoped
-//     apocalypse_coin_collapses records are legacy history, not inputs.
+//     coin stays exactly £0 and is never priced again. Living→DEAD is an
+//     EXPLICIT Stage 9 transition (game/persistentCoinDeath.js) decided
+//     AFTER living pricing/condition advance when collapse risk crosses
+//     the configured threshold — never because the living floor was hit.
+//     The cycle-scoped apocalypse_coin_collapses records are legacy
+//     history, not inputs.
 //   * Every batch is atomic: new prices + price_history + per-coin market
 //     state + pricing checkpoints + the Director cursor + market_history +
 //     old-economy peak reconciliation commit together or roll back
@@ -61,6 +65,7 @@ const pricingCheckpointModel = require('./pricingCheckpoint.model');
 const coinStateModel = require('./marketCoinState.model');
 const directorStateModel = require('./marketDirectorState.model');
 const { resolveSimulationConfig } = require('../game/simulationConfig');
+const persistentCoinDeath = require('../game/persistentCoinDeath');
 
 // Time range options for price history
 const TIME_RANGES = {
@@ -393,6 +398,63 @@ class MarketSimulator {
           config
         });
 
+        // Freeze the resumable accumulator for this batch (living or death).
+        const freshCheckpoint = persistentPricing.extractPersistentCheckpoint({
+          seed: world.seed,
+          coinId: coin.coin_id,
+          archetypeId: coinState.archetype,
+          originMs: world.epochStartedAtMs,
+          nowMs: batchNowMs,
+          reference: coinState.structuralReference,
+          environment: directorProvider,
+          stored: storedCheckpoint,
+          config
+        });
+
+        const nextState = {
+          ...coinState,
+          condition: nextCondition,
+          structuralReference: nextReference,
+          peakReference: nextPeak
+        };
+
+        // Stage 9 S9-01: authoritative death decision AFTER living pricing
+        // and condition/reference/peak advance. The living floor may have
+        // clamped newPrice; that alone MUST NOT kill. Death fires only when
+        // the condition-driven collapse-risk score crosses the configured
+        // threshold, via the named decide/apply path.
+        const recentChangePctForRisk = windowOpen > 0
+          ? ((newPrice - windowOpen) / windowOpen) * 100
+          : 0;
+        const deathDecision = persistentCoinDeath.decideAuthoritativePersistentDeath({
+          seed: world.seed,
+          coinId: coin.coin_id,
+          archetypeId: coinState.archetype,
+          condition: nextCondition,
+          phase: detail.phase,
+          recentChangePct: recentChangePctForRisk,
+          nowMs: batchNowMs,
+          config
+        });
+
+        if (deathDecision.shouldDie) {
+          await persistentCoinDeath.applyAuthoritativePersistentDeath(client, {
+            coinId: coin.coin_id,
+            worldId: world.worldId,
+            diedAt: batchNowMs,
+            nextState,
+            checkpoint: freshCheckpoint,
+            batchInstant
+          });
+          coinStates.set(coin.coin_id, {
+            ...nextState,
+            status: 'DEAD',
+            diedAt: new Date(batchNowMs).toISOString()
+          });
+          // Dead coins contribute £0 and are excluded from the live trend.
+          continue;
+        }
+
         await client.query(
           'UPDATE coins SET current_price = $1 WHERE coin_id = $2',
           [newPrice, coin.coin_id]
@@ -405,30 +467,11 @@ class MarketSimulator {
            VALUES ($1, NULL, $2, $3, 'MARKET_TICK')`,
           [coin.coin_id, newPrice, batchInstant]
         );
-        // Freeze and persist the fresh resumable accumulator in the SAME
-        // transaction — price, history, coin state and checkpoint commit
-        // together or roll back together.
-        const freshCheckpoint = persistentPricing.extractPersistentCheckpoint({
-          seed: world.seed,
-          coinId: coin.coin_id,
-          archetypeId: coinState.archetype,
-          originMs: world.epochStartedAtMs,
-          nowMs: batchNowMs,
-          reference: coinState.structuralReference,
-          environment: directorProvider,
-          stored: storedCheckpoint,
-          config
-        });
         await pricingCheckpointModel.upsertCheckpoint(client, freshCheckpoint);
         // The committed per-coin market state advances in the same
         // transaction (the update path never touches status/died_at — death
-        // transitions go exclusively through the Stage 9 authority).
-        await coinStateModel.upsertCoinState(client, {
-          ...coinState,
-          condition: nextCondition,
-          structuralReference: nextReference,
-          peakReference: nextPeak
-        });
+        // transitions go exclusively through applyAuthoritativePersistentDeath).
+        await coinStateModel.upsertCoinState(client, nextState);
         totalMarketValue += newPrice;
 
         // Coarse recent movement for the market_history trend from
