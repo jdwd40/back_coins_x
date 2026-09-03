@@ -1,9 +1,20 @@
 const marketSimulator = require('../models/market-simulator');
 const db = require('../db/connection');
 const seed = require('../db/seed');
+const persistentWorld = require('../game/persistentWorld');
 
 // Increase timeout for market simulator tests
 jest.setTimeout(10000);
+
+// Stage 4: the writer is persistent-authoritative, so the persistent world
+// must be provisioned explicitly (epoch just before now) before any batch
+// can write — the writer never fabricates a world mid-batch.
+async function provisionTestWorld() {
+  await persistentWorld.provisionWorld(db, {
+    seed: 'market-simulator-suite-world',
+    epochStartedAt: new Date(Date.now() - 60 * 1000)
+  });
+}
 
 describe('Market Simulator', () => {
   // Run once before all tests
@@ -17,6 +28,7 @@ describe('Market Simulator', () => {
     marketSimulator.stop();
     // Reseed database
     await seed();
+    await provisionTestWorld();
   });
 
   // Run after each test

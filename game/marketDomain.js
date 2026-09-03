@@ -262,17 +262,56 @@ function getCoinStartOffsetFraction(seed, coinId) {
 //   B_{k+1} = A_{k+1} * (1 - endDiscount_k)
 const MAX_TIMELINE_CYCLES = 10000;
 
-function locateMarketCycle({ seed, coinId, archetypeId, roundStartMs, nowMs }) {
+// Persistent-market Stage 1: validate a resumable domain accumulator. A
+// checkpoint positions the walk INSIDE one located market cycle: the cycle
+// index (into the seeded buildMarketCycle stream), that cycle's absolute
+// start instant, and its exact anchor/boundary doubles. Validation is loud
+// — a structurally corrupt checkpoint can never silently re-anchor a coin.
+function assertDomainCheckpoint(checkpoint) {
+  if (!checkpoint || typeof checkpoint !== 'object' || Array.isArray(checkpoint)) {
+    throw new Error('market domain checkpoint must be an object');
+  }
+  if (!Number.isInteger(checkpoint.cycleIndex) || checkpoint.cycleIndex < 0) {
+    throw new Error(`market domain checkpoint cycleIndex must be a non-negative integer; received ${String(checkpoint.cycleIndex)}`);
+  }
+  assertFiniteNumber('checkpoint cycleStartMs', checkpoint.cycleStartMs);
+  assertFiniteNumber('checkpoint anchor', checkpoint.anchor);
+  assertFiniteNumber('checkpoint boundary', checkpoint.boundary);
+  if (checkpoint.anchor <= 0 || checkpoint.boundary <= 0) {
+    throw new Error(`market domain checkpoint anchor/boundary must be positive; received anchor=${String(checkpoint.anchor)} boundary=${String(checkpoint.boundary)}`);
+  }
+}
+
+function locateMarketCycle({ seed, coinId, archetypeId, roundStartMs, nowMs, checkpoint = null }) {
   assertFiniteNumber('roundStartMs', roundStartMs);
   assertFiniteNumber('nowMs', nowMs);
 
-  const first = buildMarketCycle({ seed, coinId, archetypeId, index: 0 });
-  const offsetMs = getCoinStartOffsetFraction(seed, coinId) * first.durationMs;
+  let cycle;
+  let startMs;
+  let anchor;
+  let boundary;
 
-  let cycle = first;
-  let startMs = roundStartMs - offsetMs;
-  let anchor = 1;
-  let boundary = 1;
+  if (checkpoint) {
+    // Resume from the persisted accumulator instead of walking from the
+    // origin. The stored doubles round-trip exactly (PostgreSQL float8 =
+    // IEEE 754 binary64), so the forward walk reproduces the identical
+    // floating-point sequence the origin walk would compute.
+    assertDomainCheckpoint(checkpoint);
+    if (nowMs < checkpoint.cycleStartMs) {
+      throw new Error(`market domain checkpoint is from the future for nowMs=${nowMs} (cycleStartMs=${checkpoint.cycleStartMs}); refusing to resume`);
+    }
+    cycle = buildMarketCycle({ seed, coinId, archetypeId, index: checkpoint.cycleIndex });
+    startMs = checkpoint.cycleStartMs;
+    anchor = checkpoint.anchor;
+    boundary = checkpoint.boundary;
+  } else {
+    const first = buildMarketCycle({ seed, coinId, archetypeId, index: 0 });
+    const offsetMs = getCoinStartOffsetFraction(seed, coinId) * first.durationMs;
+    cycle = first;
+    startMs = roundStartMs - offsetMs;
+    anchor = 1;
+    boundary = 1;
+  }
 
   for (let i = 0; i < MAX_TIMELINE_CYCLES; i++) {
     const endMs = startMs + cycle.durationMs;
@@ -287,6 +326,23 @@ function locateMarketCycle({ seed, coinId, archetypeId, roundStartMs, nowMs }) {
     boundary = nextBoundary;
   }
   throw new Error('market domain timeline failed to converge');
+}
+
+// Persistent-market Stage 1: freeze the resumable domain accumulator at
+// nowMs — the located market cycle containing nowMs, its absolute start
+// instant and its exact anchor/boundary doubles. Resuming from this
+// accumulator (locateMarketCycle with checkpoint) reproduces the identical
+// floating-point sequence a walk from the origin would compute, so a
+// checkpointed continuation is bit-identical to the stateless engine.
+function extractDomainCheckpoint({ seed, coinId, roundStartMs, nowMs, checkpoint = null }) {
+  const archetypeId = resolveArchetypeId(coinId);
+  const location = locateMarketCycle({ seed, coinId, archetypeId, roundStartMs, nowMs, checkpoint });
+  return {
+    cycleIndex: location.cycle.index,
+    cycleStartMs: location.startMs,
+    anchor: location.anchor,
+    boundary: location.boundary
+  };
 }
 
 // Ease a segment position x in [0,1]. Falling segments ease in (slow start,
@@ -364,14 +420,14 @@ function resolveAmplitude(amplitude) {
 // Returns the exact internal price point, including the internal phase and
 // anchor — callers that expose anything publicly MUST go through
 // getPublicCoinSignal instead.
-function evaluateMarketPoint({ seed, coinId, baselinePrice, roundStartMs, nowMs, amplitude = 1 }) {
+function evaluateMarketPoint({ seed, coinId, baselinePrice, roundStartMs, nowMs, amplitude = 1, checkpoint = null }) {
   assertFiniteNumber('baselinePrice', baselinePrice);
   if (baselinePrice <= 0) {
     throw new Error(`market domain baselinePrice must be positive; received ${baselinePrice}`);
   }
   const amp = resolveAmplitude(amplitude);
   const archetypeId = resolveArchetypeId(coinId);
-  const location = locateMarketCycle({ seed, coinId, archetypeId, roundStartMs, nowMs });
+  const location = locateMarketCycle({ seed, coinId, archetypeId, roundStartMs, nowMs, checkpoint });
   const point = evaluateCyclePoint({ location, nowMs });
 
   // Amplitude scales the DEVIATION from the continuous anchor path (dip
@@ -480,7 +536,9 @@ module.exports = {
   getArchetype,
   buildMarketCycle,
   getCoinStartOffsetFraction,
+  assertDomainCheckpoint,
   locateMarketCycle,
+  extractDomainCheckpoint,
   evaluateMarketPoint,
   roundGamePrice,
   priceAt,

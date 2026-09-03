@@ -18,6 +18,8 @@
     "simulate:v2-3": "node simulation/run.js --mode v2-3",
     "simulate:bots": "node simulation/run.js --mode bots",
     "simulate:multi-cycle": "node simulation/run.js --mode multi-cycle",
+    "simulate:checkpoint-horizon": "node simulation/checkpointHorizon.js",
+    "simulate:persistent-horizon": "node simulation/persistentHorizon.js",
     "clear-price-history": "node clear-price-history.js"
   },
   "keywords": [],

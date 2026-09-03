@@ -1538,6 +1538,404 @@ async function verifyMarketState(q, problems) {
   if (duplicates.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${duplicates.rows[0].n} cycles with more than one market-state row`);
 }
 
+// --- Persistent-market Stage 1: per-coin pricing checkpoints -------------
+// market_price_checkpoints: exactly one row per (coin_id, seed) — the latest
+// resumable pricing accumulator for one coin on one deterministic market
+// timeline. Accumulator doubles are float8 (IEEE 754 binary64, exact
+// node-pg round-trip), millisecond positions are bigint, and the CHECK
+// constraints make structurally impossible accumulator state unwritable.
+
+const EXPECTED_PRICE_CHECKPOINT_COLUMNS = [
+  ['coin_id', 'integer', 'NO'],
+  ['seed', 'text', 'NO'],
+  ['checkpoint_ms', 'bigint', 'NO'],
+  ['domain_cycle_index', 'integer', 'NO'],
+  ['domain_cycle_start_ms', 'double precision', 'NO'],
+  ['domain_anchor', 'double precision', 'NO'],
+  ['domain_boundary', 'double precision', 'NO'],
+  ['crash_episode_index', 'integer', 'NO'],
+  ['crash_cursor_ms', 'double precision', 'NO'],
+  ['crash_factor', 'double precision', 'NO'],
+  ['activation_context', 'text', 'NO'],
+  ['created_at', 'timestamp with time zone', 'NO'],
+  ['updated_at', 'timestamp with time zone', 'NO']
+];
+
+async function verifyPricingCheckpoints(q, problems) {
+  const table = 'market_price_checkpoints';
+  const present = await q(`SELECT to_regclass('public.${table}') AS reg`);
+  if (!present.rows[0].reg) {
+    problems.push(`table public.${table} does not exist`);
+    return;
+  }
+
+  const cols = await q(
+    `SELECT column_name, data_type, is_nullable, column_default
+     FROM information_schema.columns
+     WHERE table_schema = 'public' AND table_name = '${table}'`
+  );
+  const byName = new Map(cols.rows.map((r) => [r.column_name, r]));
+  for (const [name, dtype, nullable] of EXPECTED_PRICE_CHECKPOINT_COLUMNS) {
+    const col = byName.get(name);
+    if (!col) {
+      problems.push(`missing column: ${table}.${name}`);
+    } else {
+      if (col.data_type !== dtype) problems.push(`column ${table}.${name}: type ${col.data_type}, expected ${dtype}`);
+      if (col.is_nullable !== nullable) problems.push(`column ${table}.${name}: nullable=${col.is_nullable}, expected ${nullable}`);
+    }
+  }
+  for (const name of ['created_at', 'updated_at']) {
+    const col = byName.get(name);
+    if (col && !(col.column_default || '').startsWith('now()')) {
+      problems.push(`column ${table}.${name}: missing default now()`);
+    }
+  }
+
+  // Composite PRIMARY KEY (coin_id, seed) — one accumulator per coin per
+  // timeline, the idempotency backstop for batch replay.
+  const pk = await q(
+    `SELECT kcu.column_name FROM information_schema.table_constraints tc
+     JOIN information_schema.key_column_usage kcu
+       ON tc.constraint_name = kcu.constraint_name
+      AND tc.table_schema = kcu.table_schema
+      AND tc.table_name = kcu.table_name
+     WHERE tc.table_schema = 'public' AND tc.table_name = '${table}'
+       AND tc.constraint_type = 'PRIMARY KEY'
+     ORDER BY kcu.ordinal_position`
+  );
+  const pkCols = pk.rows.map((r) => r.column_name);
+  if (pkCols.length !== 2 || pkCols[0] !== 'coin_id' || pkCols[1] !== 'seed') {
+    problems.push(`missing PRIMARY KEY on ${table}(coin_id, seed)`);
+  }
+
+  const constraints = await q(
+    `SELECT conname, contype, pg_get_constraintdef(oid) AS def, confrelid::regclass::text AS target
+     FROM pg_constraint WHERE conrelid = 'public.${table}'::regclass`
+  );
+  if (!constraints.rows.some((r) => r.contype === 'f' && r.target === 'coins' && /^FOREIGN KEY \(coin_id\)/i.test(r.def))) {
+    problems.push(`missing FOREIGN KEY on ${table} -> coins (coin_id)`);
+  }
+  const expectedCheckNames = [
+    'market_price_checkpoints_time_nonneg',
+    'market_price_checkpoints_cycle_index_nonneg',
+    'market_price_checkpoints_anchor_positive',
+    'market_price_checkpoints_boundary_positive',
+    'market_price_checkpoints_episode_index_positive',
+    'market_price_checkpoints_factor_positive'
+  ];
+  for (const name of expectedCheckNames) {
+    if (!constraints.rows.some((r) => r.contype === 'c' && r.conname === name)) {
+      problems.push(`missing CHECK constraint on ${table}: ${name}`);
+    }
+  }
+}
+
+// --- Persistent-market Stage 2: world identity + per-coin market state ---
+// market_worlds: the explicit persistent-world identity (one ACTIVE world
+// at most, enforced by the partial unique index). market_coin_state: the
+// separate per-coin persistent state (bidirectional bounded condition,
+// positive structural reference, positive decaying peak reference,
+// explicit permanent timestamped death).
+
+async function verifyPersistentWorld(q, problems) {
+  // market_worlds shape.
+  const worldsReg = await q(`SELECT to_regclass('public.market_worlds') AS reg`);
+  if (!worldsReg.rows[0].reg) {
+    problems.push('table public.market_worlds does not exist');
+  } else {
+    const cols = await q(
+      `SELECT column_name, data_type, is_nullable, column_default
+       FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'market_worlds'`
+    );
+    const byName = new Map(cols.rows.map((r) => [r.column_name, r]));
+    for (const [name, dtype, nullable] of [
+      ['world_id', 'integer', 'NO'],
+      ['version', 'integer', 'NO'],
+      ['seed', 'text', 'NO'],
+      ['epoch_started_at', 'timestamp with time zone', 'NO'],
+      ['active', 'boolean', 'NO'],
+      ['created_at', 'timestamp with time zone', 'NO']
+    ]) {
+      const col = byName.get(name);
+      if (!col) {
+        problems.push(`missing column: market_worlds.${name}`);
+      } else {
+        if (col.data_type !== dtype) problems.push(`column market_worlds.${name}: type ${col.data_type}, expected ${dtype}`);
+        if (col.is_nullable !== nullable) problems.push(`column market_worlds.${name}: nullable=${col.is_nullable}, expected ${nullable}`);
+      }
+    }
+    const idCol = byName.get('world_id');
+    if (idCol && !(idCol.column_default || '').startsWith('nextval(')) {
+      problems.push('column market_worlds.world_id: missing sequence default (nextval)');
+    }
+    const createdCol = byName.get('created_at');
+    if (createdCol && !(createdCol.column_default || '').startsWith('now()')) {
+      problems.push('column market_worlds.created_at: missing default now()');
+    }
+    // Exactly one ACTIVE world at most — the partial unique index.
+    const idx = await q(
+      `SELECT c.relname, i.indisunique, pg_get_indexdef(i.indexrelid) AS def
+         FROM pg_class c
+         JOIN pg_index i ON i.indexrelid = c.oid
+        WHERE c.relname = 'market_worlds_single_active'
+          AND i.indrelid = 'public.market_worlds'::regclass`
+    );
+    if (idx.rowCount === 0 || !idx.rows[0].indisunique || !/WHERE active/i.test(idx.rows[0].def || '')) {
+      problems.push('missing partial unique index market_worlds_single_active (one ACTIVE world at most)');
+    }
+    // Live-data invariant: never more than one active world.
+    const active = await q(`SELECT count(*)::int AS n FROM market_worlds WHERE active`);
+    if (active.rows[0].n > 1) problems.push(`INVARIANT VIOLATION: ${active.rows[0].n} active market worlds (single-economy invariant broken)`);
+  }
+
+  // market_coin_state shape + constraints.
+  const stateReg = await q(`SELECT to_regclass('public.market_coin_state') AS reg`);
+  if (!stateReg.rows[0].reg) {
+    problems.push('table public.market_coin_state does not exist');
+    return;
+  }
+  const cols = await q(
+    `SELECT column_name, data_type, is_nullable
+     FROM information_schema.columns
+     WHERE table_schema = 'public' AND table_name = 'market_coin_state'`
+  );
+  const byName = new Map(cols.rows.map((r) => [r.column_name, r]));
+  for (const [name, dtype, nullable] of [
+    ['coin_id', 'integer', 'NO'],
+    ['world_id', 'integer', 'NO'],
+    ['archetype', 'text', 'NO'],
+    ['condition', 'double precision', 'NO'],
+    ['structural_reference', 'double precision', 'NO'],
+    ['peak_reference', 'double precision', 'NO'],
+    ['status', 'text', 'NO'],
+    ['died_at', 'timestamp with time zone', 'YES'],
+    ['created_at', 'timestamp with time zone', 'NO'],
+    ['updated_at', 'timestamp with time zone', 'NO']
+  ]) {
+    const col = byName.get(name);
+    if (!col) {
+      problems.push(`missing column: market_coin_state.${name}`);
+    } else {
+      if (col.data_type !== dtype) problems.push(`column market_coin_state.${name}: type ${col.data_type}, expected ${dtype}`);
+      if (col.is_nullable !== nullable) problems.push(`column market_coin_state.${name}: nullable=${col.is_nullable}, expected ${nullable}`);
+    }
+  }
+  const constraints = await q(
+    `SELECT conname, contype, pg_get_constraintdef(oid) AS def, confrelid::regclass::text AS target
+     FROM pg_constraint WHERE conrelid = 'public.market_coin_state'::regclass`
+  );
+  for (const name of [
+    'market_coin_state_condition_bounded',
+    'market_coin_state_structural_positive',
+    'market_coin_state_peak_positive',
+    'market_coin_state_status_known',
+    'market_coin_state_death_consistent'
+  ]) {
+    if (!constraints.rows.some((r) => r.contype === 'c' && r.conname === name)) {
+      problems.push(`missing CHECK constraint on market_coin_state: ${name}`);
+    }
+  }
+  for (const { target, column } of [
+    { target: 'coins', column: 'coin_id' },
+    { target: 'market_worlds', column: 'world_id' }
+  ]) {
+    if (!constraints.rows.some((r) => r.contype === 'f' && r.target === target && new RegExp(`^FOREIGN KEY \\(${column}\\)`, 'i').test(r.def))) {
+      problems.push(`missing FOREIGN KEY on market_coin_state -> ${target} (${column})`);
+    }
+  }
+  // Live-data invariants: death is always explicit and timestamped (the
+  // CHECK enforces it structurally; the query guards historical anomalies).
+  const deadWithoutTime = await q(
+    `SELECT count(*)::int AS n FROM market_coin_state WHERE status = 'DEAD' AND died_at IS NULL`
+  );
+  if (deadWithoutTime.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${deadWithoutTime.rows[0].n} DEAD coin states without died_at`);
+}
+
+// --- Persistent-market Stage 3: world-level Market Director state ---
+// market_director_state: exactly one authoritative Director cursor per
+// world (current public regime, regime timing, bounded intensity, monotone
+// chain index).
+
+async function verifyMarketDirectorState(q, problems) {
+  const reg = await q(`SELECT to_regclass('public.market_director_state') AS reg`);
+  if (!reg.rows[0].reg) {
+    problems.push('table public.market_director_state does not exist');
+    return;
+  }
+  const cols = await q(
+    `SELECT column_name, data_type, is_nullable
+     FROM information_schema.columns
+     WHERE table_schema = 'public' AND table_name = 'market_director_state'`
+  );
+  const byName = new Map(cols.rows.map((r) => [r.column_name, r]));
+  for (const [name, dtype, nullable] of [
+    ['world_id', 'integer', 'NO'],
+    ['regime', 'text', 'NO'],
+    ['regime_started_at', 'timestamp with time zone', 'NO'],
+    ['intensity', 'double precision', 'NO'],
+    ['regime_index', 'integer', 'NO'],
+    ['created_at', 'timestamp with time zone', 'NO'],
+    ['updated_at', 'timestamp with time zone', 'NO']
+  ]) {
+    const col = byName.get(name);
+    if (!col) {
+      problems.push(`missing column: market_director_state.${name}`);
+    } else {
+      if (col.data_type !== dtype) problems.push(`column market_director_state.${name}: type ${col.data_type}, expected ${dtype}`);
+      if (col.is_nullable !== nullable) problems.push(`column market_director_state.${name}: nullable=${col.is_nullable}, expected ${nullable}`);
+    }
+  }
+  const constraints = await q(
+    `SELECT conname, contype, pg_get_constraintdef(oid) AS def, confrelid::regclass::text AS target
+     FROM pg_constraint WHERE conrelid = 'public.market_director_state'::regclass`
+  );
+  for (const name of [
+    'market_director_state_regime_known',
+    'market_director_state_intensity_bounded',
+    'market_director_state_regime_index_nonneg'
+  ]) {
+    if (!constraints.rows.some((r) => r.contype === 'c' && r.conname === name)) {
+      problems.push(`missing CHECK constraint on market_director_state: ${name}`);
+    }
+  }
+  if (!constraints.rows.some((r) => r.contype === 'f' && r.target === 'market_worlds' && /^FOREIGN KEY \(world_id\)/i.test(r.def))) {
+    problems.push('missing FOREIGN KEY on market_director_state -> market_worlds (world_id)');
+  }
+  const pk = await q(
+    `SELECT count(*)::int AS n FROM information_schema.table_constraints
+     WHERE table_schema = 'public' AND table_name = 'market_director_state' AND constraint_type = 'PRIMARY KEY'`
+  );
+  if (pk.rows[0].n !== 1) problems.push('missing primary key on market_director_state (world_id)');
+}
+
+// ---------------------------------------------------------------------------
+// Persistent economy (migration 026): persistent_accounts / _holdings /
+// _transactions — the ONE writable persistent gameplay economy.
+// ---------------------------------------------------------------------------
+async function verifyPersistentEconomyTable(q, problems, table, expected, requiredConstraints) {
+  const reg = await q(`SELECT to_regclass('public.${table}') AS reg`);
+  if (!reg.rows[0].reg) {
+    problems.push(`table public.${table} does not exist`);
+    return;
+  }
+  const cols = await q(
+    `SELECT column_name, data_type, is_nullable
+     FROM information_schema.columns
+     WHERE table_schema = 'public' AND table_name = '${table}'`
+  );
+  const byName = new Map(cols.rows.map((r) => [r.column_name, r]));
+  for (const [name, dtype, nullable] of expected) {
+    const col = byName.get(name);
+    if (!col) {
+      problems.push(`missing column: ${table}.${name}`);
+    } else {
+      if (col.data_type !== dtype) problems.push(`column ${table}.${name}: type ${col.data_type}, expected ${dtype}`);
+      if (col.is_nullable !== nullable) problems.push(`column ${table}.${name}: nullable=${col.is_nullable}, expected ${nullable}`);
+    }
+  }
+  const constraints = await q(
+    `SELECT conname, contype, pg_get_constraintdef(oid) AS def, confrelid::regclass::text AS target
+     FROM pg_constraint WHERE conrelid = 'public.${table}'::regclass`
+  );
+  for (const check of requiredConstraints) {
+    if (!constraints.rows.some((r) => check(r))) {
+      problems.push(`missing constraint on ${table}: ${check.describe}`);
+    }
+  }
+}
+
+async function verifyPersistentEconomy(q, problems) {
+  const TS = 'timestamp with time zone';
+  await verifyPersistentEconomyTable(q, problems, 'persistent_accounts', [
+    ['account_id', 'integer', 'NO'],
+    ['world_id', 'integer', 'NO'],
+    ['user_id', 'integer', 'NO'],
+    ['starting_cash', 'numeric', 'NO'],
+    ['cash', 'numeric', 'NO'],
+    ['debt', 'numeric', 'NO'],
+    ['provisioned_at', TS, 'NO'],
+    ['created_at', TS, 'NO'],
+    ['updated_at', TS, 'NO']
+  ], [
+    Object.assign((r) => r.contype === 'p', { describe: 'primary key (account_id)' }),
+    Object.assign((r) => r.contype === 'u' && /UNIQUE \(world_id, user_id\)/i.test(r.def), { describe: 'UNIQUE (world_id, user_id)' }),
+    Object.assign((r) => r.contype === 'c' && /cash >= \(?0/.test(r.def), { describe: 'CHECK cash >= 0' }),
+    Object.assign((r) => r.contype === 'c' && /debt >= \(?0/.test(r.def), { describe: 'CHECK debt >= 0' }),
+    Object.assign((r) => r.contype === 'f' && r.target === 'market_worlds', { describe: 'FOREIGN KEY -> market_worlds' }),
+    Object.assign((r) => r.contype === 'f' && r.target === 'users', { describe: 'FOREIGN KEY -> users' })
+  ]);
+  await verifyPersistentEconomyTable(q, problems, 'persistent_holdings', [
+    ['holding_id', 'integer', 'NO'],
+    ['account_id', 'integer', 'NO'],
+    ['world_id', 'integer', 'NO'],
+    ['user_id', 'integer', 'NO'],
+    ['coin_id', 'integer', 'NO'],
+    ['quantity', 'numeric', 'NO'],
+    ['cost_basis', 'numeric', 'NO'],
+    ['created_at', TS, 'NO'],
+    ['updated_at', TS, 'NO']
+  ], [
+    Object.assign((r) => r.contype === 'p', { describe: 'primary key (holding_id)' }),
+    Object.assign((r) => r.contype === 'u' && /UNIQUE \(account_id, coin_id\)/i.test(r.def), { describe: 'UNIQUE (account_id, coin_id)' }),
+    Object.assign((r) => r.contype === 'c' && /quantity >= \(?0/.test(r.def), { describe: 'CHECK quantity >= 0' }),
+    Object.assign((r) => r.contype === 'f' && r.target === 'persistent_accounts', { describe: 'FOREIGN KEY -> persistent_accounts' }),
+    Object.assign((r) => r.contype === 'f' && r.target === 'coins', { describe: 'FOREIGN KEY -> coins' })
+  ]);
+  await verifyPersistentEconomyTable(q, problems, 'persistent_transactions', [
+    ['persistent_transaction_id', 'integer', 'NO'],
+    ['account_id', 'integer', 'NO'],
+    ['world_id', 'integer', 'NO'],
+    ['user_id', 'integer', 'NO'],
+    ['coin_id', 'integer', 'NO'],
+    ['type', 'character varying', 'NO'],
+    ['quantity', 'numeric', 'NO'],
+    ['price', 'numeric', 'NO'],
+    ['total_amount', 'numeric', 'NO'],
+    ['created_at', TS, 'NO']
+  ], [
+    Object.assign((r) => r.contype === 'p', { describe: 'primary key (persistent_transaction_id)' }),
+    Object.assign((r) => r.contype === 'c' && /\(type\)::text = ANY/.test(r.def), { describe: "CHECK type IN ('BUY','SELL')" }),
+    Object.assign((r) => r.contype === 'c' && /quantity > \(?0/.test(r.def), { describe: 'CHECK quantity > 0' }),
+    Object.assign((r) => r.contype === 'f' && r.target === 'persistent_accounts', { describe: 'FOREIGN KEY -> persistent_accounts' })
+  ]);
+}
+
+// Persistent bot debt (migration 027): the append-only loan ledger behind
+// persistent_accounts.debt.
+async function verifyPersistentLoans(q, problems) {
+  const TS = 'timestamp with time zone';
+  await verifyPersistentEconomyTable(q, problems, 'persistent_loans', [
+    ['persistent_loan_id', 'integer', 'NO'],
+    ['account_id', 'integer', 'NO'],
+    ['world_id', 'integer', 'NO'],
+    ['user_id', 'integer', 'NO'],
+    ['type', 'character varying', 'NO'],
+    ['amount', 'numeric', 'NO'],
+    ['debt_after', 'numeric', 'NO'],
+    ['created_at', TS, 'NO']
+  ], [
+    Object.assign((r) => r.contype === 'p', { describe: 'primary key (persistent_loan_id)' }),
+    Object.assign((r) => r.contype === 'c' && /ISSUE/.test(r.def) && /REPAYMENT/.test(r.def), { describe: "CHECK type IN ('ISSUE','REPAYMENT')" }),
+    Object.assign((r) => r.contype === 'c' && /amount > \(?0/.test(r.def), { describe: 'CHECK amount > 0' }),
+    Object.assign((r) => r.contype === 'c' && /debt_after >= \(?0/.test(r.def), { describe: 'CHECK debt_after >= 0' }),
+    Object.assign((r) => r.contype === 'f' && r.target === 'persistent_accounts', { describe: 'FOREIGN KEY -> persistent_accounts' })
+  ]);
+}
+
+// Persistent bot ticks (migration 028): world-scoped tick identity — the
+// duplicate-tick authority for runPersistentBotTick.
+async function verifyPersistentBotTicks(q, problems) {
+  await verifyPersistentEconomyTable(q, problems, 'persistent_bot_ticks', [
+    ['world_id', 'integer', 'NO'],
+    ['tick_id', 'bigint', 'NO'],
+    ['created_at', 'timestamp with time zone', 'NO']
+  ], [
+    Object.assign((r) => r.contype === 'p' && /PRIMARY KEY \(world_id, tick_id\)/i.test(r.def), { describe: 'primary key (world_id, tick_id)' }),
+    Object.assign((r) => r.contype === 'f' && r.target === 'market_worlds', { describe: 'FOREIGN KEY -> market_worlds' })
+  ]);
+}
+
 async function verifyGameSchema({ query } = {}) {
   const q = query || ((...args) => db.query(...args));
   const problems = [];
@@ -1555,6 +1953,12 @@ async function verifyGameSchema({ query } = {}) {
   await verifyCoinEventsAndMarketPhases(q, problems);
   await verifyMarketState(q, problems);
   await verifyDynamicCollapses(q, problems);
+  await verifyPricingCheckpoints(q, problems);
+  await verifyPersistentWorld(q, problems);
+  await verifyMarketDirectorState(q, problems);
+  await verifyPersistentEconomy(q, problems);
+  await verifyPersistentLoans(q, problems);
+  await verifyPersistentBotTicks(q, problems);
 
   return { ok: problems.length === 0, problems };
 }
@@ -1562,7 +1966,7 @@ if (require.main === module) {
   verifyGameSchema()
     .then(async ({ ok, problems }) => {
       if (ok) {
-        console.log('game schema verification PASSED (apocalypse_cycles [SETTLING lifecycle + settlement observability], coins.cycle_baseline_price, canonical coin catalogue [migrations 013 + 014 retirement], coin_collapse_schedule [legacy], apocalypse_coin_collapses [dynamic death record], apocalypse_participants, apocalypse_holdings, apocalypse_transactions, users.is_bot, apocalypse_bots, apocalypse_bot_ticks, apocalypse_cash_events, apocalypse_economy_ticks, apocalypse_economy_events, apocalypse_results [immutable], apocalypse_coin_events [0-5 active cap], apocalypse_market_phases [one primary phase], apocalypse_market_state [one row per cycle, monotonic peak])');
+        console.log('game schema verification PASSED (apocalypse_cycles [SETTLING lifecycle + settlement observability], coins.cycle_baseline_price, canonical coin catalogue [migrations 013 + 014 retirement], coin_collapse_schedule [legacy], apocalypse_coin_collapses [dynamic death record], apocalypse_participants, apocalypse_holdings, apocalypse_transactions, users.is_bot, apocalypse_bots, apocalypse_bot_ticks, apocalypse_cash_events, apocalypse_economy_ticks, apocalypse_economy_events, apocalypse_results [immutable], apocalypse_coin_events [0-5 active cap], apocalypse_market_phases [one primary phase], apocalypse_market_state [one row per cycle, monotonic peak], market_price_checkpoints [per-coin resumable pricing accumulator, exact float8/bigint round-trip], market_worlds [single active persistent world], market_coin_state [bidirectional condition, decaying reference, explicit timestamped death], market_director_state [one Director cursor per world, bounded intensity], persistent_accounts/holdings/transactions [one world-scoped persistent economy, exactly-once starting cash], persistent_accounts.debt + persistent_loans [bot-only interest-free loan ledger, debt persistence], persistent_bot_ticks [world-scoped bot tick identity])');
         await db.end();
         return;
       }

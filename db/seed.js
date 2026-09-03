@@ -41,6 +41,15 @@ const seed = async (shouldEnd = false) => {
       DROP TABLE IF EXISTS "apocalypse_holdings" CASCADE;
       DROP TABLE IF EXISTS "apocalypse_participants" CASCADE;
       DROP TABLE IF EXISTS "coin_collapse_schedule" CASCADE;
+      DROP TABLE IF EXISTS "market_price_checkpoints" CASCADE;
+      DROP TABLE IF EXISTS "persistent_bot_ticks" CASCADE;
+      DROP TABLE IF EXISTS "persistent_loans" CASCADE;
+      DROP TABLE IF EXISTS "persistent_transactions" CASCADE;
+      DROP TABLE IF EXISTS "persistent_holdings" CASCADE;
+      DROP TABLE IF EXISTS "persistent_accounts" CASCADE;
+      DROP TABLE IF EXISTS "market_director_state" CASCADE;
+      DROP TABLE IF EXISTS "market_coin_state" CASCADE;
+      DROP TABLE IF EXISTS "market_worlds" CASCADE;
       DROP TABLE IF EXISTS "apocalypse_cycles" CASCADE;
       DROP TABLE IF EXISTS "schema_migrations" CASCADE;
       DROP SEQUENCE IF EXISTS users_user_id_seq CASCADE;
@@ -298,6 +307,60 @@ const seed = async (shouldEnd = false) => {
       'utf8'
     );
     await db.query(dynamicCollapseMigration);
+
+    console.log('📦 Applying pricing-checkpoint migration (db/migrations/023_create_market_price_checkpoints.sql)...');
+    // Persistent-market Stage 1 durable per-coin pricing-checkpoint DDL,
+    // sourced from the production migration only.
+    const pricingCheckpointMigration = require('fs').readFileSync(
+      require('path').join(__dirname, 'migrations', '023_create_market_price_checkpoints.sql'),
+      'utf8'
+    );
+    await db.query(pricingCheckpointMigration);
+
+    console.log('📦 Applying persistent-world migration (db/migrations/024_create_persistent_world.sql)...');
+    // Persistent-market Stage 2 world identity + per-coin market state DDL,
+    // sourced from the production migration only.
+    const persistentWorldMigration = require('fs').readFileSync(
+      require('path').join(__dirname, 'migrations', '024_create_persistent_world.sql'),
+      'utf8'
+    );
+    await db.query(persistentWorldMigration);
+
+    console.log('📦 Applying market-director migration (db/migrations/025_create_market_director_state.sql)...');
+    // Persistent-market Stage 3 world-level Market Director state DDL,
+    // sourced from the production migration only.
+    const marketDirectorMigration = require('fs').readFileSync(
+      require('path').join(__dirname, 'migrations', '025_create_market_director_state.sql'),
+      'utf8'
+    );
+    await db.query(marketDirectorMigration);
+
+    console.log('📦 Applying persistent-economy migration (db/migrations/026_create_persistent_economy.sql)...');
+    // Persistent-market Stage 5 economy DDL (accounts/holdings/ledger),
+    // sourced from the production migration only.
+    const persistentEconomyMigration = require('fs').readFileSync(
+      require('path').join(__dirname, 'migrations', '026_create_persistent_economy.sql'),
+      'utf8'
+    );
+    await db.query(persistentEconomyMigration);
+
+    console.log('📦 Applying persistent-bot-debt migration (db/migrations/027_create_persistent_bot_debt.sql)...');
+    // Persistent-market Stage 8 bot debt DDL (accounts.debt + loans ledger),
+    // sourced from the production migration only.
+    const persistentBotDebtMigration = require('fs').readFileSync(
+      require('path').join(__dirname, 'migrations', '027_create_persistent_bot_debt.sql'),
+      'utf8'
+    );
+    await db.query(persistentBotDebtMigration);
+
+    console.log('📦 Applying persistent-bot-ticks migration (db/migrations/028_create_persistent_bot_ticks.sql)...');
+    // Persistent-market Stage 8 bot tick identity DDL, sourced from the
+    // production migration only.
+    const persistentBotTicksMigration = require('fs').readFileSync(
+      require('path').join(__dirname, 'migrations', '028_create_persistent_bot_ticks.sql'),
+      'utf8'
+    );
+    await db.query(persistentBotTicksMigration);
 
     console.log('📦 Inserting coins data...');
     // Insert coins data

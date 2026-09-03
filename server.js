@@ -4,6 +4,7 @@ const logger = require('./utils/logger');
 const gameCycleWorker = require('./game/gameCycleWorker');
 const botWorker = require('./game/botWorker');
 const economyWorker = require('./game/economyWorker');
+const persistentBotWorker = require('./game/persistentBotWorker');
 const marketSimulator = require('./models/market-simulator');
 
 // Top-level production JWT check (executes on require, before any listen or startServer).
@@ -58,6 +59,10 @@ const startServer = async (port = PORT) => {
         gameCycleWorker.start();
         botWorker.start();
         economyWorker.start();
+        // Persistent-market Stage 8: the persistent roster bots trade THE
+        // persistent economy. A tick before world provisioning is a loud
+        // logged skip, never a crash (the worker never fabricates a world).
+        persistentBotWorker.start();
       }
       console.log('Express server started successfully');
       console.log(`Server is running on port ${port}`);
@@ -108,6 +113,11 @@ const shutdown = (signal = 'unknown') => {
       botWorker.stop();
     } catch (err) {
       console.error('[LIFECYCLE] Error stopping bot worker:', err.message);
+    }
+    try {
+      persistentBotWorker.stop();
+    } catch (err) {
+      console.error('[LIFECYCLE] Error stopping persistent bot worker:', err.message);
     }
     try {
       economyWorker.stop();

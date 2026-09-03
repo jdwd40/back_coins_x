@@ -36,10 +36,13 @@ describe('simulation config defaults', () => {
     expect(resolveSimulationConfig(null)).toBe(DEFAULT_SIMULATION_CONFIG);
   });
 
-  test('top-level shape is exactly the six sections', () => {
+  test('top-level shape is exactly the eight sections', () => {
+    // Persistent-market Stage 2 added the `persistent` section (the
+    // persistent-safe pricing coefficients, master plan §21-27); Stage 3
+    // added the `director` section (the Market Director, master plan §8).
     expect(Object.keys(DEFAULT_SIMULATION_CONFIG).sort()).toEqual([
-      'coinEvents', 'crashRally', 'dynamicCollapse', 'lifecycle',
-      'marketPhases', 'tradingPressure'
+      'coinEvents', 'crashRally', 'director', 'dynamicCollapse', 'lifecycle',
+      'marketPhases', 'persistent', 'tradingPressure'
     ]);
   });
 

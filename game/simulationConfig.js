@@ -279,6 +279,176 @@ const DEFAULT_SIMULATION_CONFIG = {
     preDeclineRiskCap: 0.003,
     // Hard cap on per-evaluation collapse probability regardless of inputs.
     maxRiskPerEvaluation: 0.10
+  },
+
+  // Persistent-market Stage 2 (master plan §21-27): the persistent-safe
+  // pricing coefficients. The persistent path has NO apocalypse percentage,
+  // NO one-way lifecycle escalation and NO Apocalypse volatility
+  // progression — these coefficients replace them. All are validated
+  // tunables, never magic numbers; Stage 2/3 simulations measure the
+  // balance they produce before any threshold is adopted.
+  persistent: {
+    // §23: the weak log-space restoring force — the fraction of the gap
+    // between a coin's log anchor and its log structural reference closed
+    // per completed market cycle. Weak enough that trends, booms and
+    // crashes matter (the anchor moves freely within a cycle); strong
+    // enough that log-neutral randomness cannot produce permanent
+    // infinity/zero drift (the stationary log dispersion is bounded by
+    // roughly driftStd / sqrt(2 x restoringForcePerCycle)). Measured over
+    // 365-day neutral simulations: per-coin prices hold a bounded,
+    // behaviourally varied band around their references.
+    restoringForcePerCycle: 0.005,
+    // §23: the structural reference evolves SLOWLY with the coin's committed
+    // condition and the environment's structural bias. The reference log level
+    // moves at most referenceConditionRatePerDay x condition + environment
+    // structural bias per day, hard-bounded by maxReferenceLogMovePerDay.
+    referenceConditionRatePerDay: 0.05,
+    maxReferenceLogMovePerDay: 0.2,
+    // §24: committed historical crash damage decays toward neutral with
+    // this half-life (log-space leaky integrator). Ordinary old crashes
+    // never multiply forever; only ongoing negative conditions sustain
+    // damage.
+    crashDamageHalfLifeMs: 2 * 24 * 60 * 60 * 1000,
+    // Persistent crash/rally base probabilities. The persistent path has
+    // no lifecycle gating: activation is committed under the environment
+    // that exists when the episode is evaluated (master plan §25 —
+    // historical semantics), scaled by the environment's crash-probability
+    // modifier. Measured neutral balance: ~8 activations/coin/day with
+    // rallies the norm, so committed damage fluctuates around a shallow
+    // band instead of ratcheting down (the Stage 1 floor-collapse mode is
+    // structurally absent).
+    baseCrashProbability: 0.03,
+    baseRallyProbability: 0.92,
+    // Rally recovery strength as a fraction of the value the crash
+    // removed, before the environment recovery modifier. The mean exceeds
+    // 1 so a healthy rally typically reaches a new high; the no-rally
+    // minority supplies the lasting damage.
+    recoveryStrength: { min: 0.9, max: 1.3 },
+    // §26: the decaying/rolling peak reference half-life. A boom long ago must not
+    // permanently make a healthy coin appear catastrophically drawn down.
+    peakReferenceHalfLifeMs: 30 * 24 * 60 * 60 * 1000,
+    // Hard clamp on the composed persistent normal modifier (coin events + bounded
+    // trading pressure). The lifecycle pressure term does not exist in the
+    // persistent path.
+    normalModifierLimit: 0.15,
+    // §11: bidirectional coin-condition dynamics. Condition lives in
+    // [-1, 1] (migration 024): the authoritative state moves toward a
+    // target derived from committed observable behaviour at a bounded
+    // rate, with a weak mean reversion toward neutral.
+    condition: {
+      // Max |condition| change per day (rate bound on the move toward
+      // the target).
+      maxChangePerDay: 0.3,
+      // The recent log-return is measured over this public window.
+      recentReturnWindowMs: 6 * 60 * 60 * 1000,
+      // tanh scaling: a log return of this magnitude over the window is
+      // a strong signal (~0.76 of full weight).
+      recentReturnScale: 0.10,
+      recentReturnWeight: 0.6,
+      // Weight of the drawdown from the DECAYING peak reference
+      // (fraction, subtracted).
+      drawdownWeight: 1.0,
+      // Weight of the committed decaying crash damage (log space,
+      // negative or zero).
+      crashDamageWeight: 1.5,
+      // Weight of the stack-capped net coin-event modifier.
+      eventWeight: 4.0,
+      // Environment contribution scale: structuralBias is mapped through
+      // tanh(bias / environmentBiasScale).
+      environmentBiasScale: 0.05,
+      environmentWeight: 0.4,
+      // Weak mean reversion toward neutral condition per day.
+      meanReversionPerDay: 0.05,
+      // Neutral-environment typical levels, MEASURED over the Stage 2
+      // neutral simulation (90-day horizon, default coefficients). The
+      // drawdown and damage terms act on the EXCESS over these typicals,
+      // so condition reflects whether a coin is doing unusually badly or
+      // unusually well FOR ITS ARCHETYPE — the neutral environment then
+      // holds condition near zero mean and the structural reference does
+      // not secularly drift (master plan §22/§23).
+      typicalDrawdown: { ZIP: 0.35, MOON: 0.40, BULL: 0.40, HODL: 0.45, DEGEN: 0.61, RUG: 0.72 },
+      typicalLogCommittedDamage: { ZIP: -0.12, MOON: -0.05, BULL: -0.06, HODL: 0.05, DEGEN: 0.0, RUG: 0.06 }
+    }
+  },
+
+  // Persistent-market Stage 3 (master plan §8/§74): the Market Director.
+  // A deterministic, bounded six-regime chain behind the Market
+  // Environment seam. The Director INFLUENCES the market environment; it
+  // never sets final prices. Every regime template below is a full Market
+  // Environment at full intensity — the committed environment is lerped
+  // between NEUTRAL and the template by the regime's intensity.
+  director: {
+    regimes: {
+      GOLDEN_AGE: {
+        durationMs: { min: 12 * 60 * 60 * 1000, max: 36 * 60 * 60 * 1000 },
+        intensity: { min: 0.5, max: 0.9 },
+        environment: {
+          structuralBias: 0.10, volatilityScale: 0.9,
+          positiveEventBias: 0.2, negativeEventBias: -0.1, eventSeverityScale: 0.9,
+          crashProbabilityModifier: 0.4, recoveryModifier: 1.4, collapseRiskModifier: 0.5
+        }
+      },
+      BOOM: {
+        durationMs: { min: 8 * 60 * 60 * 1000, max: 24 * 60 * 60 * 1000 },
+        intensity: { min: 0.5, max: 0.9 },
+        environment: {
+          structuralBias: 0.06, volatilityScale: 1.2,
+          positiveEventBias: 0.1, negativeEventBias: 0, eventSeverityScale: 1.1,
+          crashProbabilityModifier: 0.8, recoveryModifier: 1.2, collapseRiskModifier: 0.8
+        }
+      },
+      BULL: {
+        durationMs: { min: 16 * 60 * 60 * 1000, max: 40 * 60 * 60 * 1000 },
+        intensity: { min: 0.4, max: 0.9 },
+        environment: {
+          structuralBias: 0.03, volatilityScale: 1.0,
+          positiveEventBias: 0.05, negativeEventBias: 0, eventSeverityScale: 1.0,
+          crashProbabilityModifier: 0.9, recoveryModifier: 1.1, collapseRiskModifier: 0.9
+        }
+      },
+      BEAR: {
+        durationMs: { min: 16 * 60 * 60 * 1000, max: 40 * 60 * 60 * 1000 },
+        intensity: { min: 0.4, max: 0.9 },
+        environment: {
+          structuralBias: -0.03, volatilityScale: 1.1,
+          positiveEventBias: 0, negativeEventBias: 0.05, eventSeverityScale: 1.0,
+          crashProbabilityModifier: 1.2, recoveryModifier: 0.9, collapseRiskModifier: 1.1
+        }
+      },
+      BUST: {
+        durationMs: { min: 6 * 60 * 60 * 1000, max: 18 * 60 * 60 * 1000 },
+        intensity: { min: 0.5, max: 0.9 },
+        environment: {
+          structuralBias: -0.07, volatilityScale: 1.4,
+          positiveEventBias: 0, negativeEventBias: 0.15, eventSeverityScale: 1.2,
+          crashProbabilityModifier: 2.0, recoveryModifier: 0.8, collapseRiskModifier: 1.4
+        }
+      },
+      RECESSION: {
+        durationMs: { min: 12 * 60 * 60 * 1000, max: 30 * 60 * 60 * 1000 },
+        intensity: { min: 0.4, max: 0.9 },
+        environment: {
+          structuralBias: -0.05, volatilityScale: 0.95,
+          positiveEventBias: -0.1, negativeEventBias: 0.15, eventSeverityScale: 1.0,
+          crashProbabilityModifier: 1.5, recoveryModifier: 0.7, collapseRiskModifier: 1.5
+        }
+      }
+    },
+    // The genesis draw (the regime the world opens in) and the seeded
+    // transition matrix. Every row is normalised over the six regimes;
+    // off-regime totals are strictly positive in every row (validated),
+    // so no regime can absorb the chain, and bounded durations guarantee
+    // variety. Positive regimes flow mostly onward/up, negative regimes
+    // keep believable hope (positive targets always possible).
+    initialWeights: { GOLDEN_AGE: 0.05, BOOM: 0.15, BULL: 0.35, BEAR: 0.25, BUST: 0.05, RECESSION: 0.15 },
+    transitionWeights: {
+      GOLDEN_AGE: { GOLDEN_AGE: 0, BOOM: 0.35, BULL: 0.35, BEAR: 0.15, BUST: 0.05, RECESSION: 0.10 },
+      BOOM: { GOLDEN_AGE: 0.15, BOOM: 0, BULL: 0.40, BEAR: 0.20, BUST: 0.15, RECESSION: 0.10 },
+      BULL: { GOLDEN_AGE: 0.10, BOOM: 0.25, BULL: 0, BEAR: 0.35, BUST: 0.15, RECESSION: 0.15 },
+      BEAR: { GOLDEN_AGE: 0.05, BOOM: 0.15, BULL: 0.35, BEAR: 0, BUST: 0.20, RECESSION: 0.25 },
+      BUST: { GOLDEN_AGE: 0.05, BOOM: 0.10, BULL: 0.25, BEAR: 0.30, BUST: 0, RECESSION: 0.30 },
+      RECESSION: { GOLDEN_AGE: 0.05, BOOM: 0.15, BULL: 0.30, BEAR: 0.30, BUST: 0.15, RECESSION: 0.05 }
+    }
   }
 };
 
@@ -624,6 +794,183 @@ function validateDynamicCollapse(name, dynamicCollapse) {
   }
 }
 
+function validatePersistent(name, persistent) {
+  requireExactKeys(name, persistent, [
+    'restoringForcePerCycle', 'referenceConditionRatePerDay', 'maxReferenceLogMovePerDay',
+    'crashDamageHalfLifeMs', 'baseCrashProbability', 'baseRallyProbability',
+    'recoveryStrength', 'peakReferenceHalfLifeMs', 'normalModifierLimit', 'condition'
+  ]);
+
+  // §23: the restoring force must be weak (a cycle closes only a small
+  // fraction of the gap) but positive (drift cannot run away forever).
+  requireFiniteNumber(`${name}.restoringForcePerCycle`, persistent.restoringForcePerCycle);
+  if (persistent.restoringForcePerCycle <= 0 || persistent.restoringForcePerCycle >= 1) {
+    failConfig(`${name}.restoringForcePerCycle must be a small fraction in (0, 1); received ${persistent.restoringForcePerCycle}`);
+  }
+  if (persistent.restoringForcePerCycle > 0.1) {
+    failConfig(`${name}.restoringForcePerCycle ${persistent.restoringForcePerCycle} is too strong to be a WEAK restoring force (trends, booms and crashes must still matter)`);
+  }
+
+  requireFiniteNumber(`${name}.referenceConditionRatePerDay`, persistent.referenceConditionRatePerDay);
+  if (persistent.referenceConditionRatePerDay <= 0 || persistent.referenceConditionRatePerDay >= 1) {
+    failConfig(`${name}.referenceConditionRatePerDay must be a slow daily rate in (0, 1); received ${persistent.referenceConditionRatePerDay}`);
+  }
+  requireFiniteNumber(`${name}.maxReferenceLogMovePerDay`, persistent.maxReferenceLogMovePerDay);
+  if (persistent.maxReferenceLogMovePerDay <= 0) {
+    failConfig(`${name}.maxReferenceLogMovePerDay must be positive; received ${persistent.maxReferenceLogMovePerDay}`);
+  }
+  // The daily cap must leave room for the full condition-driven rate (a
+  // cap at or below the rate would make max condition meaningless).
+  if (persistent.maxReferenceLogMovePerDay <= persistent.referenceConditionRatePerDay) {
+    failConfig(`${name}.maxReferenceLogMovePerDay ${persistent.maxReferenceLogMovePerDay} must exceed referenceConditionRatePerDay ${persistent.referenceConditionRatePerDay}`);
+  }
+
+  requirePositiveInteger(`${name}.crashDamageHalfLifeMs`, persistent.crashDamageHalfLifeMs);
+
+  requireProbability(`${name}.baseCrashProbability`, persistent.baseCrashProbability);
+  requireProbability(`${name}.baseRallyProbability`, persistent.baseRallyProbability);
+
+  const recovery = requireRange(`${name}.recoveryStrength`, persistent.recoveryStrength);
+  if (recovery.min <= 0) {
+    failConfig(`${name}.recoveryStrength.min must be positive; received ${recovery.min}`);
+  }
+  if (recovery.max < 1) {
+    failConfig(`${name}.recoveryStrength.max must be >= 1 so a healthy rally can reach a new high; received ${recovery.max}`);
+  }
+
+  requirePositiveInteger(`${name}.peakReferenceHalfLifeMs`, persistent.peakReferenceHalfLifeMs);
+
+  requireFiniteNumber(`${name}.normalModifierLimit`, persistent.normalModifierLimit);
+  if (persistent.normalModifierLimit <= 0 || persistent.normalModifierLimit >= 1) {
+    failConfig(`${name}.normalModifierLimit must be a fraction in (0, 1); received ${persistent.normalModifierLimit}`);
+  }
+
+  requireExactKeys(`${name}.condition`, persistent.condition, [
+    'maxChangePerDay', 'recentReturnWindowMs', 'recentReturnScale', 'recentReturnWeight',
+    'drawdownWeight', 'crashDamageWeight', 'eventWeight',
+    'environmentBiasScale', 'environmentWeight', 'meanReversionPerDay',
+    'typicalDrawdown', 'typicalLogCommittedDamage'
+  ]);
+  const condition = persistent.condition;
+  requireFiniteNumber(`${name}.condition.maxChangePerDay`, condition.maxChangePerDay);
+  if (condition.maxChangePerDay <= 0 || condition.maxChangePerDay > 1) {
+    failConfig(`${name}.condition.maxChangePerDay must be in (0, 1]; received ${condition.maxChangePerDay}`);
+  }
+  requirePositiveInteger(`${name}.condition.recentReturnWindowMs`, condition.recentReturnWindowMs);
+  requireFiniteNumber(`${name}.condition.recentReturnScale`, condition.recentReturnScale);
+  if (condition.recentReturnScale <= 0) {
+    failConfig(`${name}.condition.recentReturnScale must be positive; received ${condition.recentReturnScale}`);
+  }
+  for (const key of ['recentReturnWeight', 'drawdownWeight', 'crashDamageWeight', 'eventWeight', 'environmentWeight']) {
+    requireFiniteNumber(`${name}.condition.${key}`, condition[key]);
+    if (condition[key] < 0) {
+      failConfig(`${name}.condition.${key} must be non-negative; received ${condition[key]}`);
+    }
+  }
+  requireFiniteNumber(`${name}.condition.environmentBiasScale`, condition.environmentBiasScale);
+  if (condition.environmentBiasScale <= 0) {
+    failConfig(`${name}.condition.environmentBiasScale must be positive; received ${condition.environmentBiasScale}`);
+  }
+  requireFiniteNumber(`${name}.condition.meanReversionPerDay`, condition.meanReversionPerDay);
+  if (condition.meanReversionPerDay < 0 || condition.meanReversionPerDay >= 1) {
+    failConfig(`${name}.condition.meanReversionPerDay must be a weak daily rate in [0, 1); received ${condition.meanReversionPerDay}`);
+  }
+
+  // Per-archetype neutral typicals (the canonical archetype vocabulary, mirroring
+  // marketDomain.MARKET_ARCHETYPES): exact key sets, drawdown fractions in (0, 1),
+  // log-damage levels in [-2, 2].
+  const ARCHETYPE_IDS = ['ZIP', 'MOON', 'BULL', 'HODL', 'DEGEN', 'RUG'];
+  requireExactKeys(`${name}.condition.typicalDrawdown`, condition.typicalDrawdown, ARCHETYPE_IDS);
+  requireExactKeys(`${name}.condition.typicalLogCommittedDamage`, condition.typicalLogCommittedDamage, ARCHETYPE_IDS);
+  for (const id of ARCHETYPE_IDS) {
+    requireFiniteNumber(`${name}.condition.typicalDrawdown.${id}`, condition.typicalDrawdown[id]);
+    if (condition.typicalDrawdown[id] <= 0 || condition.typicalDrawdown[id] >= 1) {
+      failConfig(`${name}.condition.typicalDrawdown.${id} must be a fraction in (0, 1); received ${condition.typicalDrawdown[id]}`);
+    }
+    requireFiniteNumber(`${name}.condition.typicalLogCommittedDamage.${id}`, condition.typicalLogCommittedDamage[id]);
+    if (Math.abs(condition.typicalLogCommittedDamage[id]) > 2) {
+      failConfig(`${name}.condition.typicalLogCommittedDamage.${id} must be a log-space level in [-2, 2]; received ${condition.typicalLogCommittedDamage[id]}`);
+    }
+  }
+}
+
+function validateDirector(name, director) {
+  requireExactKeys(name, director, ['regimes', 'initialWeights', 'transitionWeights']);
+
+  // The six persistent regimes (mirrors MARKET_PHASE_IDS).
+  requireExactKeys(`${name}.regimes`, director.regimes, MARKET_PHASE_IDS);
+  for (const id of MARKET_PHASE_IDS) {
+    const regime = director.regimes[id];
+    requireExactKeys(`${name}.regimes.${id}`, regime, ['durationMs', 'intensity', 'environment']);
+    const duration = requireRange(`${name}.regimes.${id}.durationMs`, regime.durationMs);
+    requirePositiveInteger(`${name}.regimes.${id}.durationMs.min`, duration.min);
+    requirePositiveInteger(`${name}.regimes.${id}.durationMs.max`, duration.max);
+    const intensity = requireRange(`${name}.regimes.${id}.intensity`, regime.intensity);
+    if (intensity.min < 0 || intensity.max > 1) {
+      failConfig(`${name}.regimes.${id}.intensity must be a fraction range inside [0, 1]; received ${intensity.min}..${intensity.max}`);
+    }
+    // The full-intensity environment template: exact Market Environment
+    // keys, every value finite and inside the environment safety bounds
+    // (mirroring game/marketEnvironment.BOUNDS without a module cycle).
+    requireExactKeys(`${name}.regimes.${id}.environment`, regime.environment, [
+      'structuralBias', 'volatilityScale', 'positiveEventBias', 'negativeEventBias',
+      'eventSeverityScale', 'crashProbabilityModifier', 'recoveryModifier', 'collapseRiskModifier'
+    ]);
+    const bounds = {
+      structuralBias: [-0.5, 0.5], volatilityScale: [0.1, 4],
+      positiveEventBias: [-0.5, 0.5], negativeEventBias: [-0.5, 0.5],
+      eventSeverityScale: [0.1, 4], crashProbabilityModifier: [0, 4],
+      recoveryModifier: [0, 2], collapseRiskModifier: [0, 4]
+    };
+    for (const key of Object.keys(bounds)) {
+      requireFiniteNumber(`${name}.regimes.${id}.environment.${key}`, regime.environment[key]);
+      const [min, max] = bounds[key];
+      if (regime.environment[key] < min || regime.environment[key] > max) {
+        failConfig(`${name}.regimes.${id}.environment.${key} must be within [${min}, ${max}]; received ${regime.environment[key]}`);
+      }
+    }
+    // Sign contract: positive regimes bias structure up and crash danger
+    // down; negative regimes the reverse. Both directions keep hope and
+    // danger alive (no zeroed crash or recovery modifier anywhere).
+    const env = regime.environment;
+    if (POSITIVE_MARKET_PHASE_IDS.includes(id)) {
+      if (env.structuralBias <= 0) {
+        failConfig(`${name}.regimes.${id}.environment.structuralBias must be positive for a positive regime; received ${env.structuralBias}`);
+      }
+      if (env.crashProbabilityModifier >= 1) {
+        failConfig(`${name}.regimes.${id}.environment.crashProbabilityModifier must be below 1 for a positive regime; received ${env.crashProbabilityModifier}`);
+      }
+    } else {
+      if (env.structuralBias >= 0) {
+        failConfig(`${name}.regimes.${id}.environment.structuralBias must be negative for a negative regime; received ${env.structuralBias}`);
+      }
+      if (env.crashProbabilityModifier <= 1) {
+        failConfig(`${name}.regimes.${id}.environment.crashProbabilityModifier must exceed 1 for a negative regime; received ${env.crashProbabilityModifier}`);
+      }
+    }
+  }
+
+  requireNormalisedWeights(`${name}.initialWeights`, director.initialWeights, MARKET_PHASE_IDS);
+  requireExactKeys(`${name}.transitionWeights`, director.transitionWeights, MARKET_PHASE_IDS);
+  for (const id of MARKET_PHASE_IDS) {
+    requireNormalisedWeights(`${name}.transitionWeights.${id}`, director.transitionWeights[id], MARKET_PHASE_IDS);
+    // No absorbing regime: every regime has strictly positive weight on
+    // SOME other regime, and bounded durations force timely exits.
+    const offRegime = MARKET_PHASE_IDS.filter((target) => target !== id)
+      .reduce((sum, target) => sum + director.transitionWeights[id][target], 0);
+    if (offRegime <= 0) {
+      failConfig(`${name}.transitionWeights.${id} gives all weight to itself: an absorbing regime is forbidden`);
+    }
+    // Believable hope: every regime keeps positive-regime targets possible.
+    const positiveTotal = POSITIVE_MARKET_PHASE_IDS
+      .filter((target) => target !== id)
+      .reduce((sum, target) => sum + director.transitionWeights[id][target], 0);
+    if (positiveTotal <= 0) {
+      failConfig(`${name}.transitionWeights.${id} makes positive regimes unreachable; believable hope is required in every regime`);
+    }
+  }
+}
+
 // Validate a COMPLETE simulation config: every section and every leaf must
 // be present with exactly the expected keys, and every value must pass its
 // range/probability/cap/ordering rules. Throws on the first problem.
@@ -632,7 +979,7 @@ function validateSimulationConfig(config) {
     failConfig(`config must be an object; received ${Array.isArray(config) ? 'array' : typeof config}`);
   }
   requireExactKeys('config', config, [
-    'coinEvents', 'marketPhases', 'lifecycle', 'crashRally', 'tradingPressure', 'dynamicCollapse'
+    'coinEvents', 'marketPhases', 'lifecycle', 'crashRally', 'tradingPressure', 'dynamicCollapse', 'persistent', 'director'
   ]);
   validateCoinEvents('coinEvents', config.coinEvents);
   validateMarketPhases('marketPhases', config.marketPhases);
@@ -640,6 +987,8 @@ function validateSimulationConfig(config) {
   validateCrashRally('crashRally', config.crashRally);
   validateTradingPressure('tradingPressure', config.tradingPressure);
   validateDynamicCollapse('dynamicCollapse', config.dynamicCollapse);
+  validatePersistent('persistent', config.persistent);
+  validateDirector('director', config.director);
   return config;
 }
 

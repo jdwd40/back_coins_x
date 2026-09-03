@@ -1,13 +1,12 @@
 const usersModel = require('../models/users.model');
 const logger = require('../utils/logger');
 
-const { 
+const {
   createUser,
   authenticateUser,
   selectUserById,
   updateUser,
-  removeUser,
-  updateUserFunds
+  removeUser
 } = usersModel;
 
 /**
@@ -46,6 +45,20 @@ const registerUser = async (req, res, next) => {
       await gameRoundService.joinRound({ userId: newUser.user_id });
     } catch (gameErr) {
       logger.error(`Post-registration round initialization failed for user ${newUser.user_id}: ${gameErr.message}`);
+    }
+
+    // Persistent-market Stage 6: registration also provisions the user's
+    // persistent account — exactly-once £10,000, idempotent
+    // (UNIQUE (world_id, user_id)); no round enrolment is required by the
+    // persistent economy. Best-effort like the legacy path: before the
+    // world is provisioned at deployment (or if provisioning races), the
+    // first persistent trade provisions the same account idempotently, so
+    // registration never fails because persistent provisioning did.
+    try {
+      const persistentEconomy = require('../game/persistentEconomy');
+      await persistentEconomy.provisionPersistentAccount({ userId: newUser.user_id });
+    } catch (persistentErr) {
+      logger.error(`Post-registration persistent provisioning failed for user ${newUser.user_id}: ${persistentErr.message}`);
     }
 
     logger.log(`User registered successfully: ${username} (${email})`);
@@ -303,86 +316,33 @@ const deleteUser = async (req, res, next) => {
 };
 
 /**
- * Updates a user's funds
- * @param {Object} req - Express request object
- * @param {Object} res - Express response object
- * @param {Function} next - Express next middleware function
+ * Persistent-market product rule: ordinary-player self-funding is retired.
+ * Legacy `users.funds` is historical/archive data and is no longer
+ * player-mutable through the API; the persistent economy (server-owned
+ * accounts provisioned by the backend) is the only writable gameplay cash.
+ * There is no admin role, so this endpoint now denies every authenticated
+ * caller uniformly with 403. The route is kept (rather than removed) so the
+ * previously deployed frontend receives a clean, safe denial instead of an
+ * unexpected 404 while compatibility consumers still exist.
  */
 const updateUserFundsHandler = async (req, res, next) => {
   try {
     const { user_id } = req.params;
-    const { amount } = req.body;
 
     if (isNaN(Number(user_id))) {
-      return res.status(400).json({ 
-        success: false,
-        msg: 'Invalid user ID' 
-      });
-    }
-    
-    if (amount === undefined || amount === null) {
-      return res.status(400).json({ 
-        success: false,
-        msg: 'Amount is required' 
-      });
-    }
-
-    // Verify amount is a valid number
-    const fundAmount = parseFloat(amount);
-    if (isNaN(fundAmount)) {
-      return res.status(400).json({ 
-        success: false,
-        msg: 'Invalid amount provided' 
-      });
-    }
-
-    // Milestone 1: strict self-service ownership — the authenticated user may
-    // only mutate their OWN funds. There is no admin role, so no cross-user
-    // funds control exists at all.
-    if (req.user.user_id !== Number(user_id)) {
-      return res.status(403).json({
-        success: false,
-        msg: 'Forbidden: you can only update your own funds'
-      });
-    }
-
-    // The non-negative balance rule is enforced atomically inside the model's
-    // guarded UPDATE (concurrent debits cannot overdraw); 'Insufficient
-    // funds' surfaces here as a 400.
-    const updatedUser = await updateUserFunds(user_id, fundAmount);
-    
-    logger.log(`User funds updated: ${updatedUser.username} (ID: ${user_id}), Amount: ${fundAmount}`);
-    
-    res.status(200).json({
-      success: true,
-      msg: 'Funds updated successfully',
-      user: updatedUser
-    });
-  } catch (error) {
-    logger.error('Error updating user funds:', error.message);
-    
-    if (error.message === 'User not found') {
-      return res.status(404).json({ 
-        success: false,
-        msg: 'User not found' 
-      });
-    }
-    
-    if (error.message === 'Insufficient funds') {
       return res.status(400).json({
         success: false,
-        msg: 'Insufficient funds'
+        msg: 'Invalid user ID'
       });
     }
 
-    if (error.message.includes('Valid user ID is required') ||
-        error.message.includes('Amount must be a valid number')) {
-      return res.status(400).json({ 
-        success: false,
-        msg: error.message 
-      });
-    }
-    
+    logger.log(`Rejected retired self-funding attempt on user ${user_id} by user ${req.user.user_id}`);
+    return res.status(403).json({
+      success: false,
+      msg: 'Self-funding is retired: funds are managed by the game economy'
+    });
+  } catch (error) {
+    logger.error('Error in retired funds endpoint:', error.message);
     next(error);
   }
 };

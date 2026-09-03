@@ -89,8 +89,11 @@ const NORMAL_MODIFIER_LIMIT = 0.25;
 
 // Bounded walk guard for the per-coin episode chain (mirrors
 // marketDomain's MAX_TIMELINE_CYCLES convention): with a minimum 2-minute
-// gap a 30-minute cycle yields well under 20 episodes; the cap only exists
-// so a pathological config can never loop forever.
+// gap a 30-minute cycle yields well under 20 episodes. The cap bounds WALK
+// LENGTH (iterations between an origin/checkpoint and the evaluated
+// instant), never the absolute episode index — a long-lived persistent
+// market legitimately accumulates far more than 10,000 episodes from its
+// origin, and checkpointed continuation keeps every individual walk tiny.
 const MAX_CRASH_EPISODES = 10000;
 
 // Late rallies that roll under lowerHighBias have their recovery strength
@@ -249,18 +252,69 @@ function resolveRecoveryStrength(episode, lifecycleState, config) {
 //
 // Returns the factor plus internal detail (active episode, per-episode
 // residuals) for tests/diagnostics — never serialise publicly.
-function evaluateCrashRallyFactor({ seed, coinId, roundStartMs, nowMs, lifecycleState, config = resolveSimulationConfig() }) {
+// Persistent-market Stage 1: validate a resumable crash/rally accumulator.
+// The accumulator freezes the chain at the END of the last candidate episode
+// window at or before the checkpoint instant: episodeIndex is the NEXT
+// candidate, cursorMs is that window's end (or roundStartMs when no
+// candidate has completed), factor is the exact product of the permanent
+// residuals of all activated episodes completed at or before the checkpoint.
+// An episode in flight at the checkpoint instant is NEVER frozen — it is
+// redrawn from the seed and re-evaluated transiently on resume (the
+// in-flight episode rule). Validation is loud: a corrupt accumulator can
+// never silently rescale a coin's price path.
+function assertCrashCheckpoint(checkpoint) {
+  if (!checkpoint || typeof checkpoint !== 'object' || Array.isArray(checkpoint)) {
+    throw new Error('price engine crash checkpoint must be an object');
+  }
+  if (!Number.isInteger(checkpoint.episodeIndex) || checkpoint.episodeIndex < 1) {
+    throw new Error(`price engine crash checkpoint episodeIndex must be a positive integer; received ${String(checkpoint.episodeIndex)}`);
+  }
+  assertFiniteNumber('crash checkpoint cursorMs', checkpoint.cursorMs);
+  assertFiniteNumber('crash checkpoint factor', checkpoint.factor);
+  if (checkpoint.factor <= 0) {
+    throw new Error(`price engine crash checkpoint factor must be positive; received ${String(checkpoint.factor)}`);
+  }
+}
+
+function evaluateCrashRallyFactor({ seed, coinId, roundStartMs, nowMs, lifecycleState, checkpoint = null, config = resolveSimulationConfig() }) {
   assertFiniteNumber('roundStartMs', roundStartMs);
   assertFiniteNumber('nowMs', nowMs);
   assertLifecycleState(lifecycleState);
   const cr = config.crashRally;
 
-  let factor = 1;
-  let cursor = roundStartMs;
+  let factor;
+  let cursor;
   let activeEpisode = null;
   let activatedCount = 0;
+  let firstIndex;
 
-  for (let index = 1; index <= MAX_CRASH_EPISODES; index++) {
+  if (checkpoint) {
+    // Resume from the persisted accumulator. BIT-IDENTITY CONTRACT: this is
+    // only identical to an origin walk while the lifecycle input matches the
+    // context the accumulator was frozen under — the consumer enforces that
+    // (discarding the accumulator on any lifecycle transition); the engine
+    // itself stays a pure function of its inputs.
+    assertCrashCheckpoint(checkpoint);
+    if (checkpoint.cursorMs < roundStartMs) {
+      throw new Error(`price engine crash checkpoint cursor ${checkpoint.cursorMs} precedes the timeline origin ${roundStartMs}; refusing to resume`);
+    }
+    if (checkpoint.cursorMs > nowMs) {
+      throw new Error(`price engine crash checkpoint is from the future for nowMs=${nowMs} (cursorMs=${checkpoint.cursorMs}); refusing to resume`);
+    }
+    factor = checkpoint.factor;
+    cursor = checkpoint.cursorMs;
+    firstIndex = checkpoint.episodeIndex;
+  } else {
+    factor = 1;
+    cursor = roundStartMs;
+    firstIndex = 1;
+  }
+
+  // Iteration-bounded walk: the guard caps how far a single evaluation
+  // walks, not the absolute episode index (unbounded over a persistent
+  // world's life).
+  for (let walk = 0; walk < MAX_CRASH_EPISODES; walk++) {
+    const index = firstIndex + walk;
     const episode = drawCrashEpisode({ seed, coinId, episodeIndex: index, config });
     const start = cursor + episode.gapMs;
     const crashEnd = start + episode.crashDurationMs;
@@ -307,6 +361,70 @@ function evaluateCrashRallyFactor({ seed, coinId, roundStartMs, nowMs, lifecycle
   return { factor, activeEpisode, activatedCount };
 }
 
+// Persistent-market Stage 1: freeze the resumable crash/rally accumulator at
+// nowMs. Walks the candidate chain (resuming from an optional prior
+// accumulator under the SAME lifecycle state) and freezes at the END of the
+// last candidate window at or before nowMs:
+//   episodeIndex — the NEXT candidate index after the frozen boundary;
+//   cursorMs     — the frozen boundary (roundStartMs when no candidate has
+//                  completed yet);
+//   factor       — the exact product of the permanent residuals of all
+//                  activated episodes completed at or before nowMs.
+// A candidate whose window CONTAINS nowMs (in flight) is deliberately NOT
+// frozen: on resume it is redrawn from the seed and re-evaluated
+// transiently, so checkpointing mid-crash or mid-rally resumes
+// bit-identically (the in-flight episode rule). The residual multiplication
+// order matches the evaluation walk exactly, so the frozen product is the
+// identical double the origin walk would have accumulated.
+function extractCrashCheckpoint({ seed, coinId, roundStartMs, nowMs, lifecycleState, checkpoint = null, config = resolveSimulationConfig() }) {
+  assertFiniteNumber('roundStartMs', roundStartMs);
+  assertFiniteNumber('nowMs', nowMs);
+  assertLifecycleState(lifecycleState);
+  const cr = config.crashRally;
+
+  let factor;
+  let cursor;
+  let firstIndex;
+  if (checkpoint) {
+    assertCrashCheckpoint(checkpoint);
+    if (checkpoint.cursorMs < roundStartMs) {
+      throw new Error(`price engine crash checkpoint cursor ${checkpoint.cursorMs} precedes the timeline origin ${roundStartMs}; refusing to resume`);
+    }
+    if (checkpoint.cursorMs > nowMs) {
+      throw new Error(`price engine crash checkpoint is from the future for nowMs=${nowMs} (cursorMs=${checkpoint.cursorMs}); refusing to resume`);
+    }
+    factor = checkpoint.factor;
+    cursor = checkpoint.cursorMs;
+    firstIndex = checkpoint.episodeIndex;
+  } else {
+    factor = 1;
+    cursor = roundStartMs;
+    firstIndex = 1;
+  }
+
+  let nextIndex = firstIndex;
+  for (let walk = 0; walk < MAX_CRASH_EPISODES; walk++) {
+    const index = firstIndex + walk;
+    const episode = drawCrashEpisode({ seed, coinId, episodeIndex: index, config });
+    const start = cursor + episode.gapMs;
+    const crashEnd = start + episode.crashDurationMs;
+    const end = crashEnd + episode.rallyDurationMs;
+    if (end > nowMs) break; // in-flight or future candidate: never frozen
+    const activated = episode.activationRoll < cr.crashProbability[lifecycleState];
+    if (activated) {
+      const rallyActive = episode.rallyRoll < cr.rallyProbabilityAfterCrash[lifecycleState];
+      const strength = rallyActive ? resolveRecoveryStrength(episode, lifecycleState, config) : 0;
+      factor *= 1 - episode.magnitude * (1 - strength);
+    }
+    cursor = end;
+    nextIndex = index + 1;
+    if (!Number.isFinite(factor) || factor <= 0) {
+      throw new Error(`price engine froze an invalid crash/rally factor ${String(factor)} for coin ${String(coinId)}; aborting`);
+    }
+  }
+  return { episodeIndex: nextIndex, cursorMs: cursor, factor };
+}
+
 // ---------------------------------------------------------------------------
 // SIM-08: the unified price.
 // ---------------------------------------------------------------------------
@@ -339,6 +457,8 @@ function computeUnifiedPrice({
   phaseModifier = 0,
   eventModifier = 0,
   pressureModifier = 0,
+  domainCheckpoint = null,
+  crashCheckpoint = null,
   config = resolveSimulationConfig()
 }) {
   assertFiniteNumber('cycleProgress', cycleProgress);
@@ -347,14 +467,14 @@ function computeUnifiedPrice({
   }
 
   const base = marketDomain.evaluateMarketPoint({
-    seed, coinId, baselinePrice, roundStartMs, nowMs, amplitude
+    seed, coinId, baselinePrice, roundStartMs, nowMs, amplitude, checkpoint: domainCheckpoint
   }).price;
 
   const normalModifier = computeNormalModifier({
     lifecycleState, cycleProgress, phaseModifier, eventModifier, pressureModifier, config
   });
   const { factor: crashRallyFactor, activeEpisode, activatedCount } = evaluateCrashRallyFactor({
-    seed, coinId, roundStartMs, nowMs, lifecycleState, config
+    seed, coinId, roundStartMs, nowMs, lifecycleState, checkpoint: crashCheckpoint, config
   });
 
   const raw = base * (1 + normalModifier) * crashRallyFactor;
@@ -391,7 +511,9 @@ module.exports = {
   computeNormalModifier,
   drawCrashEpisode,
   resolveRecoveryStrength,
+  assertCrashCheckpoint,
   evaluateCrashRallyFactor,
+  extractCrashCheckpoint,
   computeUnifiedPrice,
   unifiedPriceAt
 };

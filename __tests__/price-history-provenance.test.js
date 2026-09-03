@@ -1,58 +1,24 @@
 // Apocalypse Monitor persistence foundation: writer provenance coverage.
 //
-// The normal market writer (models/market-simulator.js:updateAllPrices) must
-// stamp every price_history row with the already-reconciled authoritative
-// cycle id and source='MARKET_TICK'. The collapse writer
-// (game/dynamicCollapseService.js — the single death authority, SIM-13/14)
-// must stamp its £0 transition rows with the caller's authoritative cycle id
-// and source='COLLAPSE'. Legacy rows with NULL cycle_id/source stay valid
-// and remain readable through the unchanged public price-history API
-// contract.
+// Stage 4 note: the live market writer is now persistent-authoritative; its
+// ticks are world-scoped and carry cycle_id NULL with source 'MARKET_TICK'
+// (cycle_id is nullable by design, migration 019). That coverage lives in
+// __tests__/market-persistent-writer.test.js. What REMAINS here:
+//   * the legacy collapse writer (game/dynamicCollapseService.js — the old
+//     cycle-scoped death authority, retained as a compatibility module) still
+//     stamps its £0 transition rows with the caller's authoritative cycle id
+//     and source='COLLAPSE';
+//   * legacy rows with NULL cycle_id/source stay valid and remain readable
+//     through the unchanged public price-history API contract.
 
 const request = require('supertest');
 const app = require('../app');
 const db = require('../db/connection');
-const marketSimulator = require('../models/market-simulator');
 const gameCycleService = require('../game/gameCycleService');
 const dynamicCollapseService = require('../game/dynamicCollapseService');
 const { assertDisposableTestDatabase } = require('./helpers/testDatabaseGuard');
 
 jest.setTimeout(30000);
-
-describe('price_history provenance: normal market tick writer', () => {
-  beforeEach(() => {
-    assertDisposableTestDatabase();
-    marketSimulator.stop();
-    marketSimulator.lastBatch = null;
-  });
-
-  afterEach(() => {
-    marketSimulator.stop();
-    jest.restoreAllMocks();
-  });
-
-  test('every normal tick row carries the reconciled cycle id and source MARKET_TICK', async () => {
-    const cycle = await gameCycleService.reconcileCycle({ now: new Date('2026-08-25T10:07:00.000Z') });
-    jest.spyOn(gameCycleService, 'reconcileCycle').mockResolvedValue(cycle);
-    // Mid-cycle but before the collapse window: every live coin is written.
-    const nowMs = new Date(cycle.start_time).getTime() + Math.floor(cycle.duration_ms * 0.3);
-    jest.spyOn(Date, 'now').mockReturnValue(nowMs);
-
-    await marketSimulator.updateAllPrices();
-
-    const { rows } = await db.query(
-      `SELECT coin_id, cycle_id, source FROM price_history`
-    );
-    expect(rows.length).toBeGreaterThan(0);
-    for (const row of rows) {
-      expect(row.cycle_id).toBe(cycle.cycle_id);
-      expect(row.source).toBe('MARKET_TICK');
-    }
-    // One row per live coin (no collapse has executed at 30% progress).
-    const { rows: live } = await db.query('SELECT count(*)::int AS n FROM coins WHERE current_price > 0');
-    expect(rows.length).toBe(live[0].n);
-  });
-});
 
 describe('price_history provenance: collapse writer', () => {
   beforeEach(() => {
