@@ -14,8 +14,11 @@
 //     writer-side path that sets price to exactly £0 AND records DEAD via
 //     marketCoinState.recordDeath (the sole status writer). History,
 //     events and trades are preserved; coin_id is never reused/resurrected.
-//   * Idempotent: re-running apply against an already-DEAD coin at the same
-//     instant is a no-op via recordDeath; a different instant fails loud.
+//   * Effect-idempotent: apply gates on the locked market_coin_state row
+//     BEFORE any price/history/checkpoint/accumulator write. Exact replay
+//     at the same diedAt is a successful no-op (alreadyDead). A different
+//     death instant fails loudly with zero mutations. First death stays
+//     on the caller's transaction.
 
 const marketDomain = require('./marketDomain');
 const collapseRiskDomain = require('./collapseRiskDomain');
@@ -84,6 +87,10 @@ async function applyAuthoritativePersistentDeath(client, {
   if (!Number.isInteger(coinIdNum) || coinIdNum <= 0) {
     throw new Error(`applyAuthoritativePersistentDeath requires a positive integer coinId; received ${String(coinId)}`);
   }
+  const worldIdNum = Number(worldId);
+  if (!Number.isInteger(worldIdNum) || worldIdNum <= 0) {
+    throw new Error(`applyAuthoritativePersistentDeath requires a positive integer worldId; received ${String(worldId)}`);
+  }
   const diedAtDate = new Date(diedAt);
   if (!Number.isFinite(diedAtDate.getTime())) {
     throw new Error(`applyAuthoritativePersistentDeath requires a valid death instant; received ${String(diedAt)}`);
@@ -92,6 +99,35 @@ async function applyAuthoritativePersistentDeath(client, {
     throw new Error('applyAuthoritativePersistentDeath requires the batch instant ISO string for price_history provenance');
   }
 
+  // Authoritative gate FIRST: lock the coin-state row and decide
+  // ALIVE→DEAD / exact-replay / moved-death before any side effect.
+  const { rows: existing } = await client.query(
+    `SELECT status, died_at
+       FROM market_coin_state
+      WHERE coin_id = $1 AND world_id = $2
+      FOR UPDATE`,
+    [coinIdNum, worldIdNum]
+  );
+  if (existing.length === 0) {
+    throw new Error(`applyAuthoritativePersistentDeath: no state row for coin ${coinIdNum} in world ${worldIdNum}`);
+  }
+  const recordedMs = existing[0].died_at ? new Date(existing[0].died_at).getTime() : null;
+  if (existing[0].status === 'DEAD') {
+    if (recordedMs === diedAtDate.getTime()) {
+      return {
+        died: false,
+        alreadyDead: true,
+        price: 0,
+        reason: 'PERSISTENT_COLLAPSE_RISK_THRESHOLD'
+      };
+    }
+    throw new Error(`applyAuthoritativePersistentDeath: coin ${coinIdNum} is already DEAD at a different instant (${existing[0].died_at}); death is permanent and cannot move`);
+  }
+  if (existing[0].status !== 'ALIVE') {
+    throw new Error(`applyAuthoritativePersistentDeath: coin ${coinIdNum} has unexpected status ${JSON.stringify(existing[0].status)}`);
+  }
+
+  // First valid ALIVE → DEAD. All writes ride the caller's transaction.
   await client.query(
     'UPDATE coins SET current_price = $1 WHERE coin_id = $2',
     [0, coinIdNum]
@@ -116,7 +152,7 @@ async function applyAuthoritativePersistentDeath(client, {
 
   const result = await coinStateModel.recordDeath(client, {
     coinId: coinIdNum,
-    worldId,
+    worldId: worldIdNum,
     diedAt: diedAtDate
   });
 

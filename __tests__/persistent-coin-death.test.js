@@ -12,7 +12,6 @@ const persistentWorld = require('../game/persistentWorld');
 const persistentEconomy = require('../game/persistentEconomy');
 const persistentCoinDeath = require('../game/persistentCoinDeath');
 const collapseRiskDomain = require('../game/collapseRiskDomain');
-const coinStateModel = require('../models/marketCoinState.model');
 const { resolveSimulationConfig, DEFAULT_SIMULATION_CONFIG } = require('../game/simulationConfig');
 const { assertDisposableTestDatabase } = require('./helpers/testDatabaseGuard');
 
@@ -317,48 +316,140 @@ describe('Stage 9 S9-01: writer authoritative death path', () => {
     expect(parseFloat(rows[0].quantity)).toBe(4);
   });
 
-  test('applyAuthoritativePersistentDeath is idempotent on exact replay and refuses a moved death', async () => {
+  test('applyAuthoritativePersistentDeath is effect-idempotent on exact replay and rejects a moved death with zero writes', async () => {
     const world = await persistentWorld.resolveActiveWorld(db);
     const coinId = 5;
     const existing = await db.query('SELECT status FROM market_coin_state WHERE coin_id = $1', [coinId]);
     expect(existing.rows[0].status).toBe('ALIVE');
 
+    const { rows: checkpointRows } = await db.query(
+      `SELECT coin_id, seed, checkpoint_ms, domain_cycle_index, domain_cycle_start_ms,
+              domain_anchor, domain_boundary, crash_episode_index, crash_cursor_ms,
+              crash_factor, activation_context
+         FROM market_price_checkpoints WHERE coin_id = $1`,
+      [coinId]
+    );
+    expect(checkpointRows.length).toBe(1);
+    const baseCheckpoint = {
+      coinId,
+      seed: checkpointRows[0].seed,
+      checkpointMs: Number(checkpointRows[0].checkpoint_ms),
+      domainCycleIndex: Number(checkpointRows[0].domain_cycle_index),
+      domainCycleStartMs: Number(checkpointRows[0].domain_cycle_start_ms),
+      domainAnchor: checkpointRows[0].domain_anchor,
+      domainBoundary: checkpointRows[0].domain_boundary,
+      crashEpisodeIndex: Number(checkpointRows[0].crash_episode_index),
+      crashCursorMs: Number(checkpointRows[0].crash_cursor_ms),
+      crashFactor: checkpointRows[0].crash_factor,
+      activationContext: checkpointRows[0].activation_context
+    };
+    const firstCheckpoint = { ...baseCheckpoint, crashFactor: 0.5 };
+    const replayCheckpoint = { ...baseCheckpoint, crashFactor: 2.5 };
+
+    const firstNextState = {
+      coinId,
+      worldId: world.worldId,
+      archetype: marketDomain.GAMEPLAY_ROSTER.get(coinId),
+      condition: -1,
+      structuralReference: 1,
+      peakReference: 1,
+      status: 'ALIVE',
+      diedAt: null
+    };
+    const replayNextState = {
+      ...firstNextState,
+      condition: 0.25,
+      structuralReference: 99,
+      peakReference: 99
+    };
+    const applyArgs = {
+      coinId,
+      worldId: world.worldId,
+      diedAt: T2_MS,
+      nextState: firstNextState,
+      checkpoint: firstCheckpoint,
+      batchInstant: new Date(T2_MS).toISOString()
+    };
+
+    async function snapshot(client) {
+      const price = await client.query('SELECT current_price FROM coins WHERE coin_id = $1', [coinId]);
+      const state = await client.query(
+        `SELECT status, died_at, condition, structural_reference, peak_reference
+           FROM market_coin_state WHERE coin_id = $1`,
+        [coinId]
+      );
+      const ticks = await client.query(
+        `SELECT count(*)::int AS n FROM price_history
+          WHERE coin_id = $1 AND price = 0 AND source = 'MARKET_TICK'`,
+        [coinId]
+      );
+      const history = await client.query(
+        'SELECT count(*)::int AS n FROM price_history WHERE coin_id = $1',
+        [coinId]
+      );
+      const checkpoint = await client.query(
+        `SELECT checkpoint_ms, crash_factor, domain_cycle_index, domain_anchor
+           FROM market_price_checkpoints WHERE coin_id = $1`,
+        [coinId]
+      );
+      return {
+        price: parseFloat(price.rows[0].current_price),
+        status: state.rows[0].status,
+        diedAtMs: new Date(state.rows[0].died_at).getTime(),
+        condition: state.rows[0].condition,
+        structuralReference: state.rows[0].structural_reference,
+        peakReference: state.rows[0].peak_reference,
+        zeroTicks: ticks.rows[0].n,
+        historyCount: history.rows[0].n,
+        checkpointMs: Number(checkpoint.rows[0].checkpoint_ms),
+        crashFactor: checkpoint.rows[0].crash_factor,
+        domainCycleIndex: Number(checkpoint.rows[0].domain_cycle_index),
+        domainAnchor: checkpoint.rows[0].domain_anchor
+      };
+    }
+
     const client = await db.getClient();
     try {
       await client.query('BEGIN');
-      const first = await persistentCoinDeath.applyAuthoritativePersistentDeath(client, {
-        coinId,
-        worldId: world.worldId,
-        diedAt: T2_MS,
-        nextState: {
-          coinId,
-          worldId: world.worldId,
-          archetype: marketDomain.GAMEPLAY_ROSTER.get(coinId),
-          condition: -1,
-          structuralReference: 1,
-          peakReference: 1,
-          status: 'ALIVE',
-          diedAt: null
-        },
-        batchInstant: new Date(T2_MS).toISOString()
-      });
+      const first = await persistentCoinDeath.applyAuthoritativePersistentDeath(client, applyArgs);
       expect(first.died).toBe(true);
+      expect(first.alreadyDead).toBe(false);
       expect(first.price).toBe(0);
 
-      const replay = await coinStateModel.recordDeath(client, {
-        coinId,
-        worldId: world.worldId,
-        diedAt: T2_MS
+      const afterFirst = await snapshot(client);
+      expect(afterFirst.price).toBe(0);
+      expect(afterFirst.status).toBe('DEAD');
+      expect(afterFirst.diedAtMs).toBe(T2_MS);
+      expect(afterFirst.condition).toBe(-1);
+      expect(afterFirst.structuralReference).toBe(1);
+      expect(afterFirst.peakReference).toBe(1);
+      expect(afterFirst.zeroTicks).toBe(1);
+      expect(afterFirst.crashFactor).toBe(0.5);
+
+      const replay = await persistentCoinDeath.applyAuthoritativePersistentDeath(client, {
+        ...applyArgs,
+        nextState: replayNextState,
+        checkpoint: replayCheckpoint
       });
       expect(replay.alreadyDead).toBe(true);
+      expect(replay.died).toBe(false);
+      expect(replay.price).toBe(0);
+
+      const afterReplay = await snapshot(client);
+      expect(afterReplay).toEqual(afterFirst);
 
       await expect(
-        coinStateModel.recordDeath(client, {
-          coinId,
-          worldId: world.worldId,
-          diedAt: T3_MS
+        persistentCoinDeath.applyAuthoritativePersistentDeath(client, {
+          ...applyArgs,
+          diedAt: T3_MS,
+          nextState: replayNextState,
+          checkpoint: replayCheckpoint,
+          batchInstant: new Date(T3_MS).toISOString()
         })
       ).rejects.toThrow(/already DEAD|cannot move/);
+
+      const afterMoved = await snapshot(client);
+      expect(afterMoved).toEqual(afterFirst);
 
       await client.query('ROLLBACK');
     } finally {
