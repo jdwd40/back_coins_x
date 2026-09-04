@@ -5,6 +5,7 @@ const gameCycleWorker = require('./game/gameCycleWorker');
 const botWorker = require('./game/botWorker');
 const economyWorker = require('./game/economyWorker');
 const persistentBotWorker = require('./game/persistentBotWorker');
+const persistentReplacementWorker = require('./game/persistentReplacementWorker');
 const marketSimulator = require('./models/market-simulator');
 
 // Top-level production JWT check (executes on require, before any listen or startServer).
@@ -63,6 +64,11 @@ const startServer = async (port = PORT) => {
         // persistent economy. A tick before world provisioning is a loud
         // logged skip, never a crash (the worker never fabricates a world).
         persistentBotWorker.start();
+        // Stage 9 S9-03: DEAD coins are soft-retired immediately and each
+        // eligible death consumes at most one authored replacement after the
+        // configured delay. DB locks + durable counters make multi-process
+        // wakeups idempotent; the worker never merges/deploys anything.
+        persistentReplacementWorker.start();
       }
       console.log('Express server started successfully');
       console.log(`Server is running on port ${port}`);
@@ -118,6 +124,11 @@ const shutdown = (signal = 'unknown') => {
       persistentBotWorker.stop();
     } catch (err) {
       console.error('[LIFECYCLE] Error stopping persistent bot worker:', err.message);
+    }
+    try {
+      persistentReplacementWorker.stop();
+    } catch (err) {
+      console.error('[LIFECYCLE] Error stopping persistent replacement worker:', err.message);
     }
     try {
       economyWorker.stop();
