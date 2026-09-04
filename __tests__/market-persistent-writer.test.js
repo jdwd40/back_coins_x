@@ -44,6 +44,11 @@ const coinStateModel = require('../models/marketCoinState.model');
 const directorStateModel = require('../models/marketDirectorState.model');
 const { resolveSimulationConfig } = require('../game/simulationConfig');
 const { assertDisposableTestDatabase } = require('./helpers/testDatabaseGuard');
+const replacementRuntime = require('../game/persistentReplacementRuntime');
+const collapseRiskDomain = require('../game/collapseRiskDomain');
+const settlementService = require('../game/gameSettlementService');
+const request = require('supertest');
+const app = require('../app');
 
 jest.setTimeout(60000);
 
@@ -51,6 +56,9 @@ const WORLD_SEED = 'stage4-writer-world-seed';
 const EPOCH_MS = new Date('2026-08-31T00:00:00.000Z').getTime();
 const T1_MS = EPOCH_MS + 10 * 60 * 1000;
 const T2_MS = T1_MS + 30 * 1000;
+
+const replacementPool = require('../game/replacementPool');
+const DELAY_MS = replacementPool.DEFAULT_REPLACEMENT_CONFIG.replacementDelayMs;
 
 async function provisionedWorld() {
   return persistentWorld.provisionWorld(db, { seed: WORLD_SEED, epochStartedAt: new Date(EPOCH_MS) });
@@ -549,5 +557,170 @@ describe('Stage 4 persistent market writer: provenance and redaction', () => {
       expect(payload).not.toContain('transitionRoll');
       expect(payload).not.toContain('directorRolls');
     }
+  });
+});
+
+// S11-01 P0 cutover integration coverage (real disposable PG, strict TDD)
+// Strengthened per controller review: use actual Stage 9 death/replacement runtime paths,
+// real legacy settlement via gameSettlementService, supertest for HTTP, explicit single-writer.
+describe('S11-01 P0: persistent price authority cutover — legacy paths neutralised', () => {
+  beforeEach(async () => {
+    assertDisposableTestDatabase();
+    marketSimulator.stop();
+    marketSimulator.lastBatch = null;
+    await provisionedWorld();
+    // Establish persistent live prices (different from any legacy baseline in seed)
+    await marketSimulator.updateAllPrices({ nowMs: T1_MS });
+  });
+
+  afterEach(() => {
+    marketSimulator.stop();
+    jest.restoreAllMocks();
+  });
+
+  test('new-cycle baseline restoration cannot rewrite persistent live prices (RED then GREEN)', async () => {
+    const beforeRows = await db.query('SELECT coin_id, current_price FROM coins ORDER BY coin_id');
+    const before = beforeRows.rows.map(r => ({ coin_id: r.coin_id, current_price: parseFloat(r.current_price) }));
+
+    // Exercise still-available legacy cycle/reconcile path (triggers ensureActiveCycle -> restoreBaselinePrices)
+    await gameCycleService.reconcileCycle({ now: new Date(T1_MS + 1000) });
+
+    const afterRows = await db.query('SELECT coin_id, current_price FROM coins ORDER BY coin_id');
+    const after = afterRows.rows.map(r => ({ coin_id: r.coin_id, current_price: parseFloat(r.current_price) }));
+
+    expect(after).toEqual(before); // must be identical; no legacy restore mutation
+  });
+
+  test('A. actual persistent death via Stage 9 authority + legacy reconcile keeps DEAD/£0 (real path, not hand SQL)', async () => {
+    const coinId = 1;
+    // Use ACTUAL Stage 9 death authority through real writer/service path (not direct INSERT/UPDATE of DEAD)
+    const deathSpy = jest.spyOn(collapseRiskDomain, 'getPersistentCollapseRiskScore')
+      .mockImplementation((opts) => Number(opts.coinId) === coinId ? 9.5 : 0.5);
+    await marketSimulator.updateAllPrices({ nowMs: T2_MS });
+    deathSpy.mockRestore();
+
+    // Verify DEAD + exact £0 via real apply
+    let { rows: stateRows } = await db.query('SELECT status, died_at FROM market_coin_state WHERE coin_id = $1', [coinId]);
+    expect(stateRows[0].status).toBe('DEAD');
+    let priceRes = await db.query('SELECT current_price FROM coins WHERE coin_id = $1', [coinId]);
+    expect(parseFloat(priceRes.rows[0].current_price)).toBe(0);
+
+    // Invoke real legacy reconcile/cycle paths with active persistent world
+    await gameCycleService.reconcileCycle({ now: new Date(T2_MS + 1000) });
+
+    // Verify same coin is still DEAD/£0
+    stateRows = (await db.query('SELECT status FROM market_coin_state WHERE coin_id = $1', [coinId])).rows;
+    expect(stateRows[0].status).toBe('DEAD');
+    priceRes = await db.query('SELECT current_price FROM coins WHERE coin_id = $1', [coinId]);
+    expect(parseFloat(priceRes.rows[0].current_price)).toBe(0);
+
+    // Run persistent writer successfully afterward
+    await marketSimulator.updateAllPrices({ nowMs: T2_MS + 2000 });
+    priceRes = await db.query('SELECT current_price FROM coins WHERE coin_id = $1', [coinId]);
+    expect(parseFloat(priceRes.rows[0].current_price)).toBe(0);
+  });
+
+  test('B. actual Stage 9 replacement runtime + actual legacy settlement (via executeRemainingCollapses) keeps replacement ALIVE/nonzero', async () => {
+    const deathCoinId = 2;
+    // Cause a real persistent death with the Stage 9 authority
+    const deathSpy = jest.spyOn(collapseRiskDomain, 'getPersistentCollapseRiskScore')
+      .mockImplementation((opts) => Number(opts.coinId) === deathCoinId ? 9.5 : 0.5);
+    await marketSimulator.updateAllPrices({ nowMs: T2_MS });
+    deathSpy.mockRestore();
+
+    // Verify death
+    let stateRes = await db.query('SELECT status FROM market_coin_state WHERE coin_id = $1', [deathCoinId]);
+    expect(stateRes.rows[0].status).toBe('DEAD');
+
+    // Invoke reconcilePersistentReplacements with test-safe explicit time after delay (established config)
+    // so it creates an authored Stage 9 replacement through the production runtime. Do not fabricate with SQL.
+    const introducedAtMs = T2_MS + DELAY_MS + 5000;
+    const replResult = await replacementRuntime.reconcilePersistentReplacements({ nowMs: introducedAtMs });
+    expect(replResult.inserted.length).toBeGreaterThan(0);
+    const replCoinId = replResult.inserted[0].coinId;
+
+    // Verify replacement is ALIVE, non-retired, and positive price
+    let coinRes = await db.query('SELECT current_price, retired FROM coins WHERE coin_id = $1', [replCoinId]);
+    expect(parseFloat(coinRes.rows[0].current_price)).toBeGreaterThan(0);
+    expect(coinRes.rows[0].retired).toBe(false);
+    let stateRow = (await db.query('SELECT status FROM market_coin_state WHERE coin_id = $1', [replCoinId])).rows[0];
+    expect(stateRow.status).toBe('ALIVE');
+
+    // Create/drive a real legacy cycle to SETTLING/settle through the normal services
+    // so gameSettlementService invokes executeRemainingCollapses
+    const CYCLE_START = new Date(T2_MS - 120000);
+    const DURATION_MS = 60000;
+    const CYCLE_END = new Date(CYCLE_START.getTime() + DURATION_MS);
+    const cycle = await gameCycleService.reconcileCycle({
+      now: CYCLE_START,
+      durationMs: DURATION_MS,
+      generateSeed: () => 's11-settle-test-seed'
+    });
+    await settlementService.freezeExpiredActiveCycle({ nowMs: CYCLE_END.getTime() + 1000 });
+    const settled = await settlementService.settleSettlingCycle();
+    // Strict assertion per controller review: non-null proves the real settlement path
+    // (incl. executeRemainingCollapses inside settleSettlingCycle) was taken; terminal
+    // COMPLETED in DB per service contract proves it reached end state. (Returned row
+    // snapshot is pre-update; check persisted state for terminal status.)
+    expect(settled).not.toBeNull();
+    expect(settled.cycle_id).toBe(cycle.cycle_id);
+    const terminal = await db.query(
+      'SELECT status, settled_at FROM apocalypse_cycles WHERE cycle_id = $1',
+      [settled.cycle_id]
+    );
+    expect(terminal.rows[0].status).toBe('COMPLETED');
+    expect(terminal.rows[0].settled_at).not.toBeNull();
+
+    // Verify replacement remains ALIVE/non-retired/nonzero after actual settlement
+    coinRes = await db.query('SELECT current_price, retired FROM coins WHERE coin_id = $1', [replCoinId]);
+    expect(parseFloat(coinRes.rows[0].current_price)).toBeGreaterThan(0);
+    expect(coinRes.rows[0].retired).toBe(false);
+    stateRow = (await db.query('SELECT status FROM market_coin_state WHERE coin_id = $1', [replCoinId])).rows[0];
+    expect(stateRow.status).toBe('ALIVE');
+
+    // Verify persistent writer can price it after settlement
+    await marketSimulator.updateAllPrices({ nowMs: introducedAtMs + 30000 });
+    coinRes = await db.query('SELECT current_price FROM coins WHERE coin_id = $1', [replCoinId]);
+    expect(parseFloat(coinRes.rows[0].current_price)).toBeGreaterThan(0);
+  });
+
+  test('C. explicit single-writer: legacy live collapse evaluation cannot zero a persistent living coin', async () => {
+    // After establishing persistent live, force a legacy reconcile which would evaluate collapses
+    // but guard prevents zeroing living persistent coins
+    const before = await db.query('SELECT coin_id, current_price FROM coins WHERE current_price > 0 ORDER BY coin_id LIMIT 3');
+    const beforePrices = before.rows.map(r => ({ coin_id: r.coin_id, current_price: parseFloat(r.current_price) }));
+
+    // This path would call evaluateAndExecuteCollapses -> executeCollapse if legacy cycle, but guarded
+    await gameCycleService.reconcileCycle({ now: new Date(T1_MS + 5000) });
+
+    const after = await db.query('SELECT coin_id, current_price FROM coins WHERE coin_id = ANY($1) ORDER BY coin_id', [before.rows.map(r => r.coin_id)]);
+    const afterPrices = after.rows.map(r => ({ coin_id: r.coin_id, current_price: parseFloat(r.current_price) }));
+    expect(afterPrices).toEqual(beforePrices);
+  });
+
+  test('HTTP reconcile-before-read safety: use real supertest against Express app (not direct service calls)', async () => {
+    const beforePricesRes = await db.query('SELECT coin_id, current_price FROM coins ORDER BY coin_id LIMIT 5');
+    const beforePrices = beforePricesRes.rows.map(r => parseFloat(r.current_price));
+    const beforeStates = await db.query('SELECT coin_id, status FROM market_coin_state ORDER BY coin_id LIMIT 5');
+
+    // Use Supertest against the real Express app under disposable DB
+    const stateRes = await request(app).get('/api/game/state');
+    expect(stateRes.status).toBe(200);
+    expect(stateRes.body).toHaveProperty('apocalypseId'); // expected lifecycle shape from getGameState
+
+    // at least one other reconcile-before-read legacy game GET
+    const lbRes = await request(app).get('/api/game/leaderboard');
+    // may 409 if no legacy cycle yet, but should not 5xx and not mutate
+    expect([200, 409]).toContain(lbRes.status);
+
+    const signalsRes = await request(app).get('/api/game/market-signals');
+    expect(signalsRes.status).toBe(200);
+
+    const afterPricesRes = await db.query('SELECT coin_id, current_price FROM coins ORDER BY coin_id LIMIT 5');
+    const afterPrices = afterPricesRes.rows.map(r => parseFloat(r.current_price));
+    expect(afterPrices).toEqual(beforePrices); // no mutation from HTTP read
+
+    const afterStates = await db.query('SELECT coin_id, status FROM market_coin_state ORDER BY coin_id LIMIT 5');
+    expect(afterStates.rows.map(r => r.status)).toEqual(beforeStates.rows.map(r => r.status));
   });
 });

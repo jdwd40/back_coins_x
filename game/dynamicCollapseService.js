@@ -63,6 +63,7 @@ const {
   NEGATIVE_MARKET_PHASE_IDS,
   resolveSimulationConfig
 } = require('./simulationConfig');
+const persistentWorld = require('./persistentWorld');
 
 // The dynamic collapse evaluation bucket: one seeded roll per coin per
 // bucket of elapsed cycle time. 30s mirrors the live market writer's batch
@@ -240,6 +241,15 @@ function buildCollapseRiskInputs({
 // Runs only at a new cycle boundary, so a previous cycle's £0 collapse can
 // never leak into the next cycle (no resurrection across cycle boundaries).
 async function restoreBaselinePrices(client) {
+  // S11-01 cutover: when persistent world is active, the persistent market
+  // writer is the sole authority. Legacy baseline restore must be a no-op
+  // (fail-safe; never overwrites live persistent prices or resurrects DEAD).
+  try {
+    await persistentWorld.resolveActiveWorld(client);
+    return;
+  } catch (err) {
+    if (!/no active market world/.test(err.message)) throw err;
+  }
   await client.query(`UPDATE coins SET current_price = cycle_baseline_price`);
 }
 
@@ -282,19 +292,29 @@ async function isCoinCollapsed(coinId, queryable = db) {
 // only not-yet-dead coins are ever executed, so a replay finds nothing to
 // do and cannot duplicate state or £0 history rows.
 async function executeCollapse(client, cycleId, coinId, collapseRank, atDate) {
-  await client.query(
-    `UPDATE coins SET current_price = 0 WHERE coin_id = $1`,
-    [coinId]
-  );
-  // Apocalypse Monitor foundation: stamp the actual £0 transition with the
-  // caller's authoritative cycle id and its COLLAPSE provenance. The death
-  // record remains the only collapse authority — never inferred from zero
-  // prices.
-  await client.query(
-    `INSERT INTO price_history (coin_id, cycle_id, price, created_at, source)
-     VALUES ($1, $2, 0, $3, 'COLLAPSE')`,
-    [coinId, cycleId, atDate.toISOString()]
-  );
+  // S11-01 cutover: when persistent world active, legacy Apocalypse must
+  // never zero persistent coins (living, DEAD, or replacements). Price
+  // write is no-op; legacy collapse record may still insert (inert for
+  // persistent catalogue).
+  try {
+    await persistentWorld.resolveActiveWorld(client);
+    // skip price + history write for persistent; death record is legacy-only
+  } catch (err) {
+    if (!/no active market world/.test(err.message)) throw err;
+    await client.query(
+      `UPDATE coins SET current_price = 0 WHERE coin_id = $1`,
+      [coinId]
+    );
+    // Apocalypse Monitor foundation: stamp the actual £0 transition with the
+    // caller's authoritative cycle id and its COLLAPSE provenance. The death
+    // record remains the only collapse authority — never inferred from zero
+    // prices.
+    await client.query(
+      `INSERT INTO price_history (coin_id, cycle_id, price, created_at, source)
+       VALUES ($1, $2, 0, $3, 'COLLAPSE')`,
+      [coinId, cycleId, atDate.toISOString()]
+    );
+  }
   const { rows: inserted } = await client.query(
     `INSERT INTO apocalypse_coin_collapses (cycle_id, coin_id, collapse_rank, collapsed_at)
      VALUES ($1, $2, $3, $4)

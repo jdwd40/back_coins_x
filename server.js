@@ -53,13 +53,17 @@ const startServer = async (port = PORT) => {
     console.log('Database connection successful:', result.rows[0]);
 
     httpServer = app.listen(port, () => {
-      // The sole production lifecycle entry point for the persistent global
-      // cycle. The worker itself makes duplicate calls a no-op and uses the
-      // database as the cross-process authority.
+      // S11-01 cutover: persistent market writer is the ONLY gameplay system
+      // allowed to mutate live coins.current_price. Explicit lifecycle policy:
+      // do NOT start dangerous legacy price-mutating workers (gameCycleWorker,
+      // botWorker, economyWorker). Persistent systems (market writer via app.js,
+      // persistentBotWorker, persistentReplacementWorker) still start.
       if (process.env.NODE_ENV === 'production') {
-        gameCycleWorker.start();
-        botWorker.start();
-        economyWorker.start();
+        // Legacy gameCycle/bot/economy deliberately omitted — they drive
+        // restoreBaselinePrices + executeCollapse + settlement zeroing.
+        // Reconcile paths remain available (HTTP compat) but are guarded
+        // inside dynamicCollapseService to be price-neutral when persistent
+        // world active.
         // Persistent-market Stage 8: the persistent roster bots trade THE
         // persistent economy. A tick before world provisioning is a loud
         // logged skip, never a crash (the worker never fabricates a world).
