@@ -29,7 +29,8 @@ const {
   assertDeterministicReplay,
   replayFingerprint,
   DAY_MS,
-  HOUR_MS
+  HOUR_MS,
+  DEFAULT_NO_EXTINCTION_ACTIVE_FLOOR
 } = require('../simulation/stage9Horizon');
 const { assertDisposableTestDatabase } = require('./helpers/testDatabaseGuard');
 const { DEFAULT_SIMULATION_CONFIG } = require('../game/simulationConfig');
@@ -111,10 +112,14 @@ describe('Stage 9 S9-04: domain simulation quality gates', () => {
       replacementDelayMs: replacementPool.DEFAULT_REPLACEMENT_CONFIG.replacementDelayMs
     });
 
+    expect(DEFAULT_NO_EXTINCTION_ACTIVE_FLOOR).toBe(7);
+
     expect(() => assertStage9QualityGates(result, {
       minOriginalSurvivors: 1,
       minRecoveries: 1,
-      minActiveFloor: 1,
+      minActiveFloor: DEFAULT_NO_EXTINCTION_ACTIVE_FLOOR,
+      requireReplacementDeaths: true,
+      requireReplacementChain: true,
       maxEarlyChurn: 0,
       minReplacementLifetimeMs: 12 * HOUR_MS
     })).not.toThrow();
@@ -122,14 +127,26 @@ describe('Stage 9 S9-04: domain simulation quality gates', () => {
     const { metrics, events } = result;
     expect(metrics.originalDeaths).toBeGreaterThanOrEqual(1);
     expect(metrics.replacements).toBeGreaterThanOrEqual(1);
+    expect(metrics.replacementDeaths).toBeGreaterThanOrEqual(1);
     expect(metrics.originalSurvivors).toBeGreaterThanOrEqual(1);
     expect(metrics.recoveries).toBeGreaterThanOrEqual(1);
-    expect(metrics.minActive).toBeGreaterThanOrEqual(1);
+    expect(metrics.minActive).toBeGreaterThanOrEqual(DEFAULT_NO_EXTINCTION_ACTIVE_FLOOR);
     expect(metrics.maxActive).toBeLessThanOrEqual(10);
-    expect(metrics.finalActive).toBeGreaterThanOrEqual(1);
+    expect(metrics.finalActive).toBeGreaterThanOrEqual(DEFAULT_NO_EXTINCTION_ACTIVE_FLOOR);
     expect(metrics.duplicateIds).toBe(0);
     expect(metrics.earlyReplacementChurn).toBe(0);
     expect(metrics.longestSurvivorMs).toBeGreaterThanOrEqual(7 * DAY_MS);
+
+    // Natural replacement death + chain: another authored insert follows
+    // after a replacement death + configured delay (no spy/mock).
+    const replacementDeaths = events.deaths.filter((d) => d.isReplacement);
+    expect(replacementDeaths.length).toBeGreaterThanOrEqual(1);
+    const chained = replacementDeaths.some((death) => (
+      events.replacements.some((repl) => (
+        repl.atMs >= death.atMs + result.replacementDelayMs
+      ))
+    ));
+    expect(chained).toBe(true);
 
     // Delayed replacement: no insert may precede death + delay.
     for (const repl of events.replacements) {
@@ -159,7 +176,8 @@ describe('Stage 9 S9-04: domain simulation quality gates', () => {
         ? null
         : metrics.minReplacementLifetimeMs / DAY_MS,
       duplicateIds: metrics.duplicateIds,
-      wallClockMs: metrics.wallClockMs
+      wallClockMs: metrics.wallClockMs,
+      noExtinctionFloor: DEFAULT_NO_EXTINCTION_ACTIVE_FLOOR
     });
   });
 
@@ -188,21 +206,36 @@ describe('Stage 9 S9-04: domain simulation quality gates', () => {
       provider: 'director',
       replacementDelayMs: replacementPool.DEFAULT_REPLACEMENT_CONFIG.replacementDelayMs
     });
+
+    expect(() => assertStage9QualityGates(result, {
+      minActiveFloor: DEFAULT_NO_EXTINCTION_ACTIVE_FLOOR,
+      requireReplacementDeaths: true,
+      requireReplacementChain: true,
+      maxEarlyChurn: 0,
+      minReplacementLifetimeMs: 12 * HOUR_MS
+    })).not.toThrow();
+
     const replacementDeaths = result.events.deaths.filter((d) => d.isReplacement);
-    // Under default director + 30d, probe observed replacement deaths; gate
-    // that at least one chain step occurred when replacements exist.
-    if (result.metrics.replacements >= 2) {
-      expect(
-        replacementDeaths.length + result.metrics.replacementSurvivors
-      ).toBe(result.metrics.replacements);
-    }
+    expect(result.metrics.replacements).toBeGreaterThanOrEqual(2);
+    expect(replacementDeaths.length).toBeGreaterThanOrEqual(1);
+    expect(
+      replacementDeaths.length + result.metrics.replacementSurvivors
+    ).toBe(result.metrics.replacements);
+
+    // Another authored replacement follows after configured delay.
+    const chained = replacementDeaths.some((death) => (
+      result.events.replacements.some((repl) => (
+        repl.atMs >= death.atMs + result.replacementDelayMs
+      ))
+    ));
+    expect(chained).toBe(true);
+
     // Authored ids are not hardcoded to only 101/102 — consumption walks the roster.
     const usedIds = result.events.replacements.map((r) => r.coinId);
     expect(usedIds.length).toBe(new Set(usedIds).size);
-    if (usedIds.length >= 2) {
-      expect(usedIds[0]).toBe(101);
-      expect(usedIds[1]).toBe(102);
-    }
+    expect(usedIds.length).toBeGreaterThanOrEqual(2);
+    expect(usedIds[0]).toBe(101);
+    expect(usedIds[1]).toBe(102);
     // Historical originals remain reserved forever.
     for (const id of usedIds) {
       expect(id).toBeGreaterThanOrEqual(101);
@@ -466,5 +499,57 @@ describe('Stage 9 S9-04: persistence / restart / chain gates (coins_test)', () =
     });
     expect(await activeRosterCount()).toBe(10);
     expect((await db.query('SELECT count(*)::int AS n FROM coins WHERE coin_id >= 101')).rows[0].n).toBe(1);
+  });
+
+  test('concurrent reconcile at eligibility: exactly one authored replacement, no duplicate intro', async () => {
+    const cfg = shortReplacementConfig();
+    const deathMs = FIRST_BATCH_MS + 30 * 1000;
+    await forceWriterDeath(1, deathMs);
+
+    const introMs = deathMs + SHORT_DELAY_MS;
+    // Race two reconciles at the same nowMs/config. Do not mock locks;
+    // do not sequentialize — real coins table EXCLUSIVE lock must serialize.
+    const [a, b] = await Promise.all([
+      replacementRuntime.reconcilePersistentReplacements({
+        nowMs: introMs,
+        replacementConfig: cfg
+      }),
+      replacementRuntime.reconcilePersistentReplacements({
+        nowMs: introMs,
+        replacementConfig: cfg
+      })
+    ]);
+
+    const insertedTogether = [...a.inserted, ...b.inserted];
+    expect(insertedTogether).toHaveLength(1);
+    expect(insertedTogether[0]).toMatchObject({ coinId: 101, archetype: 'ZIP' });
+    expect(
+      (a.inserted.length === 1 && b.inserted.length === 0)
+      || (a.inserted.length === 0 && b.inserted.length === 1)
+    ).toBe(true);
+
+    expect((await db.query('SELECT count(*)::int AS n FROM coins WHERE coin_id = 101')).rows[0].n).toBe(1);
+    expect((await db.query(
+      'SELECT count(*)::int AS n FROM price_history WHERE coin_id = 101'
+    )).rows[0].n).toBe(1);
+    expect((await db.query('SELECT count(*)::int AS n FROM coins WHERE coin_id >= 101')).rows[0].n).toBe(1);
+    expect(await activeRosterCount()).toBe(10);
+
+    const ids = (await db.query('SELECT coin_id FROM coins ORDER BY coin_id'))
+      .rows.map((r) => Number(r.coin_id));
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids).toContain(101);
+
+    // Both completed without corruption: subsequent reconcile is a no-op.
+    const replay = await replacementRuntime.reconcilePersistentReplacements({
+      nowMs: introMs,
+      replacementConfig: cfg
+    });
+    expect(replay.inserted).toEqual([]);
+    expect(await activeRosterCount()).toBe(10);
+    expect((await db.query('SELECT count(*)::int AS n FROM coins WHERE coin_id = 101')).rows[0].n).toBe(1);
+    expect((await db.query(
+      'SELECT count(*)::int AS n FROM price_history WHERE coin_id = 101'
+    )).rows[0].n).toBe(1);
   });
 });

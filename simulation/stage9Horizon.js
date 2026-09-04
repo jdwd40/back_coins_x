@@ -385,13 +385,15 @@ function finalizeMetrics(world, events, { durationMs, steps, earlyChurnMs }) {
   for (const entry of world) {
     ids.push(entry.coin.coinId);
     metrics.floorTouchesWhileAlive += entry.state.floorTouchesWhileAlive;
-    if (entry.state.lifetimeMs > metrics.longestSurvivorMs) {
-      metrics.longestSurvivorMs = entry.state.lifetimeMs;
-    }
     if (entry.state.status === 'ALIVE') {
       metrics.finalActive += 1;
       if (entry.state.isReplacement) metrics.replacementSurvivors += 1;
       else metrics.originalSurvivors += 1;
+      // Longest survivor is currently-ALIVE lifetime only — a dead coin is
+      // not a survivor, even if it lived longer before dying.
+      if (entry.state.lifetimeMs > metrics.longestSurvivorMs) {
+        metrics.longestSurvivorMs = entry.state.lifetimeMs;
+      }
     }
     if (entry.state.isReplacement && entry.state.status === 'DEAD') {
       lifetimes.push(entry.state.lifetimeMs);
@@ -591,15 +593,23 @@ function runStage9Horizon({
   };
 }
 
+// No-extinction active-roster floor for the default-director 30d gate.
+// Measured minActive under deterministic seed stage9-gate-seed is 9 (~10
+// roster). Floor 7 fails regressions that wipe most of the roster (>30%
+// loss) without asserting the brittle exact measured value of 9.
+const DEFAULT_NO_EXTINCTION_ACTIVE_FLOOR = 7;
+
 // Quality gates for Stage 9 long-lived roster behaviour under DEFAULT
 // death balancing. Thresholds are measurable floors/ceilings — not brittle
 // single magic numbers — derived from observed default-director behaviour.
 function assertStage9QualityGates(result, {
   requireDeaths = true,
   requireReplacements = true,
+  requireReplacementDeaths = false,
+  requireReplacementChain = false,
   minOriginalSurvivors = 1,
   minRecoveries = 1,
-  minActiveFloor = 1,
+  minActiveFloor = DEFAULT_NO_EXTINCTION_ACTIVE_FLOOR,
   maxActiveCeiling = null,
   maxEarlyChurn = 0,
   minReplacementLifetimeMs = 12 * HOUR_MS,
@@ -654,6 +664,32 @@ function assertStage9QualityGates(result, {
   }
   if (!allowPoolExhaustion && metrics.poolExhausted) {
     failures.push('authored replacement pool exhausted during horizon');
+  }
+  if (requireReplacementDeaths && metrics.replacementDeaths < 1) {
+    failures.push(
+      'expected at least one natural replacement death via S9-01 (replacementDeaths >= 1)'
+    );
+  }
+  if (requireReplacementChain) {
+    if (metrics.replacements < 1) {
+      failures.push('replacement chain: expected at least one authored replacement born');
+    }
+    if (metrics.replacementDeaths < 1) {
+      failures.push('replacement chain: expected at least one natural replacement death');
+    } else {
+      // After a replacement dies, another authored insert must follow at/after
+      // death + configured delay (multi-generation chain without spies).
+      const delayMs = result.replacementDelayMs;
+      const replacementDeathEvents = events.deaths.filter((d) => d.isReplacement);
+      const chained = replacementDeathEvents.some((death) => (
+        events.replacements.some((repl) => repl.atMs >= death.atMs + delayMs)
+      ));
+      if (!chained) {
+        failures.push(
+          'replacement chain: expected another authored replacement after a replacement death + delay'
+        );
+      }
+    }
   }
   // Living floor never kills: every recorded death must carry the named
   // threshold reason with riskScore >= threshold.
@@ -766,6 +802,7 @@ if (require.main === module) {
 module.exports = {
   DAY_MS,
   HOUR_MS,
+  DEFAULT_NO_EXTINCTION_ACTIVE_FLOOR,
   CANONICAL_PERSISTENT_COINS,
   createEnvironmentProvider,
   runStage9Horizon,
