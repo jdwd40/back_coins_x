@@ -20,7 +20,8 @@
     "simulate:multi-cycle": "node simulation/run.js --mode multi-cycle",
     "simulate:checkpoint-horizon": "node simulation/checkpointHorizon.js",
     "simulate:persistent-horizon": "node simulation/persistentHorizon.js",
-    "clear-price-history": "node clear-price-history.js"
+    "clear-price-history": "node clear-price-history.js",
+    "simulate:stage9": "node simulation/stage9Horizon.js"
   },
   "keywords": [],
   "author": "",
