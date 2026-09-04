@@ -22,6 +22,7 @@
 
 const persistentEconomy = require('../game/persistentEconomy');
 const persistentLeaderboard = require('../game/persistentLeaderboard');
+const persistentMarketSignalsService = require('../game/persistentMarketSignalsService');
 
 function statusOf(err) {
   return Number.isInteger(err && err.status) ? err.status : 500;
@@ -122,6 +123,24 @@ exports.getPersistentLeaderboard = async (req, res, next) => {
   try {
     const board = await persistentLeaderboard.getPersistentLeaderboard({});
     res.status(200).json({ status: 'success', data: board });
+  } catch (err) {
+    if (statusOf(err) < 500) {
+      return res.status(statusOf(err)).json({ status: 'error', message: err.message });
+    }
+    next(err);
+  }
+};
+
+// GET /api/persistent/signals — public read-only persistent market signals.
+// Soft-resolves the world (returns 200 null/empty never provisions).
+// Exact public DTO keys only. currentPrice from coins.current_price verbatim.
+// death/status/archetype from market_coin_state. recentChangePct + momentum
+// from committed price_history (bounded lookback). director public only.
+// No mutations, no writer, no reconcile, no provision, no legacy fields.
+exports.getPersistentMarketSignals = async (req, res, next) => {
+  try {
+    const data = await persistentMarketSignalsService.getPersistentMarketSignals({});
+    res.status(200).json({ status: 'success', data });
   } catch (err) {
     if (statusOf(err) < 500) {
       return res.status(statusOf(err)).json({ status: 'error', message: err.message });

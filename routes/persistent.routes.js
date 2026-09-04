@@ -11,7 +11,8 @@ const {
   sellPersistent,
   getMyPersistentAccount,
   getMyPersistentTransactions,
-  getPersistentLeaderboard
+  getPersistentLeaderboard,
+  getPersistentMarketSignals
 } = require('../controllers/persistent.controller');
 const { authenticateToken } = require('../middleware/auth.middleware');
 
@@ -23,5 +24,8 @@ persistentRouter.get('/account', authenticateToken, getMyPersistentAccount);
 persistentRouter.get('/transactions', authenticateToken, getMyPersistentTransactions);
 // Primary Stage 10A public persistent leaderboard.
 persistentRouter.get('/leaderboard', getPersistentLeaderboard);
+// Stage 11-02: public read-only persistent market signals (soft world resolve,
+// exact key contract, authoritative current_price from coins, no mutations).
+persistentRouter.get('/signals', getPersistentMarketSignals);
 
 exports.persistentRouter = persistentRouter;
