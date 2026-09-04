@@ -363,4 +363,103 @@ describe('Stage 11-02: GET /api/persistent/signals (real PG, disposable coins_te
     expect(res.body.data.director).toBeNull();
     expect(res.body.data.coins).toEqual([]);
   });
+
+  test('11. provenance filtering (real PG): legacy/cycle rows never affect recentChangePct; only qualifying persistent (cycle_id=NULL AND source=MARKET_TICK) used; only-legacy => null/FLAT; bounded non-N+1', async () => {
+    assertDisposableTestDatabase();
+    const coinId = 5;
+    // ensure clean for this coin; current world epoch is set in beforeEach
+    await db.query('DELETE FROM price_history WHERE coin_id = $1', [coinId]);
+    await db.query('UPDATE coins SET current_price = 10.00 WHERE coin_id = $1', [coinId]);
+
+    const nowMs = Date.now();
+    // Use sufficiently old timestamps so they are <= cutoff (now - 60s) at GET time.
+    // tLegacyNewer is "newer" than tGood (larger created_at) but still <=cutoff and legacy.
+    const tLegacyNewer = new Date(nowMs - 70000).toISOString(); // newer legacy/cycle (70s ago)
+    const tCollapse = new Date(nowMs - 80000).toISOString();   // legacy COLLAPSE
+    const tNullSrc = new Date(nowMs - 85000).toISOString();    // legacy NULL source
+    const tGood = new Date(nowMs - 90000).toISOString();       // qualifying (90s ago, <=cutoff)
+    const tGoodOlder = new Date(nowMs - 100000).toISOString(); // older qualifying
+
+    // Create a real legacy cycle so cycle_id FK is satisfied for "legacy/cycle" provenance rows
+    const { rows: cycleRows } = await db.query(
+      `INSERT INTO apocalypse_cycles (apocalypse_id, seed, start_time, end_time, duration_ms, status, settlement_started_at, settled_at)
+       VALUES (999, 'prov-test-legacy', $1, $2, 60000, 'COMPLETED', $1, $1)
+       RETURNING cycle_id`,
+      [new Date(nowMs - 40000).toISOString(), new Date(nowMs - 30000).toISOString()]
+    );
+    const legacyCycleId = cycleRows[0].cycle_id;
+
+    // Case: only legacy history present (covers req 5, and parts of 1,2,3)
+    await db.query(
+      `INSERT INTO price_history (coin_id, price, created_at, source, cycle_id) VALUES
+       ($1, 1.00, $2, 'MARKET_TICK', $5),
+       ($1, 2.00, $3, 'COLLAPSE', $5),
+       ($1, 3.00, $4, NULL, NULL)`,
+      [coinId, tLegacyNewer, tCollapse, tNullSrc, legacyCycleId]
+    );
+    let res = await request(app).get('/api/persistent/signals').expect(200);
+    let c = res.body.data.coins.find(cc => cc.coinId === coinId);
+    expect(c).toBeDefined();
+    expect(c.currentPrice).toBe(10.00);
+    // req 5: only legacy => recentChangePct null, momentum FLAT
+    expect(c.recentChangePct).toBeNull();
+    expect(c.momentum).toBe('FLAT');
+
+    // Now add qualifying history (cycle_id=NULL, source=MARKET_TICK); must be used
+    // Insert older good first, then newer good? Use tGood as the recent qualifying
+    await db.query(
+      `INSERT INTO price_history (coin_id, price, created_at, source, cycle_id) VALUES ($1, 9.50, $2, 'MARKET_TICK', NULL)`,
+      [coinId, tGood]
+    );
+    // also older one to ensure rn=1 picks the newest qualifying (tGood)
+    await db.query(
+      `INSERT INTO price_history (coin_id, price, created_at, source, cycle_id) VALUES ($1, 9.00, $2, 'MARKET_TICK', NULL)`,
+      [coinId, tGoodOlder]
+    );
+    res = await request(app).get('/api/persistent/signals').expect(200);
+    c = res.body.data.coins.find(cc => cc.coinId === coinId);
+    expect(c).toBeDefined();
+    // req 4: qualifying cycle_id=NULL/source=MARKET_TICK history is used
+    // (9.5 -> 10) = +5.263... rounded to 5.26
+    expect(c.recentChangePct).toBe(5.26);
+    expect(c.momentum).toBe('UP');
+
+    // Now insert NEWER legacy rows (after tGood); they must NOT affect (still use tGood's 9.5)
+    // req 1: a newer legacy/cycle MARKET_TICK row cannot affect
+    await db.query(
+      `INSERT INTO price_history (coin_id, price, created_at, source, cycle_id) VALUES ($1, 1.50, $2, 'MARKET_TICK', $3)`,
+      [coinId, tLegacyNewer, legacyCycleId]
+    );
+    // req 2: a legacy COLLAPSE row cannot affect
+    await db.query(
+      `INSERT INTO price_history (coin_id, price, created_at, source, cycle_id) VALUES ($1, 2.50, $2, 'COLLAPSE', $3)`,
+      [coinId, tCollapse, legacyCycleId]
+    );
+    // req 3: a legacy NULL-source row cannot affect
+    await db.query(
+      `INSERT INTO price_history (coin_id, price, created_at, source, cycle_id) VALUES ($1, 3.50, $2, NULL, NULL)`,
+      [coinId, tNullSrc]
+    );
+    res = await request(app).get('/api/persistent/signals').expect(200);
+    c = res.body.data.coins.find(cc => cc.coinId === coinId);
+    expect(c).toBeDefined();
+    // still based on qualifying 9.5, not the newer legacies (which would be ~ (10-1.5)/1.5 ~566% etc)
+    expect(c.recentChangePct).toBe(5.26);
+    expect(c.momentum).toBe('UP');
+
+    // Final: remove the qualifying rows, leave only legacies => back to null/FLAT
+    await db.query(
+      `DELETE FROM price_history WHERE coin_id = $1 AND source = 'MARKET_TICK' AND cycle_id IS NULL`,
+      [coinId]
+    );
+    res = await request(app).get('/api/persistent/signals').expect(200);
+    c = res.body.data.coins.find(cc => cc.coinId === coinId);
+    expect(c).toBeDefined();
+    expect(c.recentChangePct).toBeNull();
+    expect(c.momentum).toBe('FLAT');
+
+    // cleanup this coin's test history (incl the temp cycle we created)
+    await db.query('DELETE FROM price_history WHERE coin_id = $1', [coinId]);
+    await db.query('DELETE FROM apocalypse_cycles WHERE cycle_id = $1', [legacyCycleId]);
+  });
 });

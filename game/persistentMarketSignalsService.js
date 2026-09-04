@@ -117,12 +117,15 @@ async function getPersistentMarketSignals({ queryable = db, now = new Date() } =
     );
 
     // Recent change from committed history only. Windowed query (no N+1).
+    // Provenance filter: only persistent writer rows (source='MARKET_TICK' AND cycle_id IS NULL).
+    // Pre-epoch samples rejected using resolved world.epochStartedAtMs (readily available).
     const coinIdList = coinRows.map((r) => Number(r.coin_id));
     const pastPrices = new Map();
     if (coinIdList.length > 0) {
       const lookbackMs = marketDomain.PUBLIC_SIGNAL_LOOKBACK_MS || 60000;
       const cutoff = new Date(nowDate.getTime() - lookbackMs).toISOString();
-      const placeholders = coinIdList.map((_, i) => `$${i + 2}`).join(', ');
+      const epochStartedAt = new Date(world.epochStartedAtMs).toISOString();
+      const placeholders = coinIdList.map((_, i) => `$${i + 3}`).join(', ');
       const histSql = `
         SELECT coin_id, price
         FROM (
@@ -131,10 +134,13 @@ async function getPersistentMarketSignals({ queryable = db, now = new Date() } =
             FROM price_history
            WHERE coin_id IN (${placeholders})
              AND created_at <= $1
+             AND created_at >= $2
+             AND source = 'MARKET_TICK'
+             AND cycle_id IS NULL
         ) ranked
         WHERE rn = 1
       `;
-      const { rows: histRows } = await client.query(histSql, [cutoff, ...coinIdList]);
+      const { rows: histRows } = await client.query(histSql, [cutoff, epochStartedAt, ...coinIdList]);
       for (const h of histRows) {
         const p = parseNum(h.price);
         if (p != null) pastPrices.set(Number(h.coin_id), p);
