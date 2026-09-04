@@ -8,7 +8,8 @@ const {
   getCycleResults,
   getRecentLeaderboards,
   getMyParticipant,
-  getMarketSignals
+  getMarketSignals,
+  getPersistentLeaderboardAlias
 } = require('../controllers/game.controller');
 const { authenticateToken } = require('../middleware/auth.middleware');
 
@@ -25,6 +26,8 @@ gameRouter.get('/market-signals', getMarketSignals);
 // Core 6 public read-only leaderboard/results APIs. Reads reconcile-then-read
 // (leaderboard) or serve the immutable settlement snapshot (results/recent).
 gameRouter.get('/leaderboard', getLiveLeaderboard);
+// Stage 10A alias → same handler as GET /api/persistent/leaderboard (primary).
+gameRouter.get('/persistent-leaderboard', getPersistentLeaderboardAlias);
 gameRouter.get('/leaderboards/recent', getRecentLeaderboards);
 gameRouter.get('/results/:cycleId', getCycleResults);
 
