@@ -16,8 +16,12 @@
 //     unknown errors fall through to the generic handler;
 //   * responses carry no internal state: no world seed, no Director
 //     internals, no checkpoint accumulators — public account data only.
+//
+// Stage 10A (S10-01): public GET /api/persistent/leaderboard — read-only
+// ranking of every provisioned persistent account in THE active world.
 
 const persistentEconomy = require('../game/persistentEconomy');
+const persistentLeaderboard = require('../game/persistentLeaderboard');
 
 function statusOf(err) {
   return Number.isInteger(err && err.status) ? err.status : 500;
@@ -106,6 +110,22 @@ exports.getMyPersistentAccount = async (req, res, next) => {
     }
     res.status(200).json({ status: 'success', data: { provisioned: true, ...state } });
   } catch (err) {
+    next(err);
+  }
+};
+
+// GET /api/persistent/leaderboard — public read-only ranking of every
+// provisioned persistent account in THE active world (humans + bots).
+// Valuation: netWorth = cash + liveHoldingsValue - debt (DEAD coins £0).
+// No auth; no mutations; no seed / Director / bot-decision leakage.
+exports.getPersistentLeaderboard = async (req, res, next) => {
+  try {
+    const board = await persistentLeaderboard.getPersistentLeaderboard({});
+    res.status(200).json({ status: 'success', data: board });
+  } catch (err) {
+    if (statusOf(err) < 500) {
+      return res.status(statusOf(err)).json({ status: 'error', message: err.message });
+    }
     next(err);
   }
 };

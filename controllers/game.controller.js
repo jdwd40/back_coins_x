@@ -1,6 +1,7 @@
 const { getGameState } = require('../game/gameCycleService');
 const gameRoundService = require('../game/gameRoundService');
 const gameResultsService = require('../game/gameResultsService');
+const persistentLeaderboard = require('../game/persistentLeaderboard');
 const economyService = require('../game/economyService');
 const marketSignalsService = require('../game/marketSignalsService');
 
@@ -137,5 +138,18 @@ exports.getMarketSignals = async (req, res, next) => {
     res.status(200).json({ status: 'success', data });
   } catch (err) {
     next(err);
+  }
+};
+
+// Stage 10A belt-and-suspenders alias: same handler as GET /api/persistent/leaderboard.
+// Primary surface remains /api/persistent/*; this alias exists so clients that
+// expected /api/game/persistent-leaderboard still work. Additive only —
+// legacy GET /api/game/leaderboard is untouched.
+exports.getPersistentLeaderboardAlias = async (req, res, next) => {
+  try {
+    const board = await persistentLeaderboard.getPersistentLeaderboard({});
+    res.status(200).json({ status: 'success', data: board });
+  } catch (err) {
+    handleGameError(err, res, next);
   }
 };
