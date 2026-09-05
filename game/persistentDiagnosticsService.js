@@ -165,7 +165,4 @@ async function getPersistentDiagnostics() {
   });
 }
 
-module.exports = {
-  getPersistentDiagnostics,
-  __test: { withReadOnlySnapshot }
-};
+module.exports = { getPersistentDiagnostics };
