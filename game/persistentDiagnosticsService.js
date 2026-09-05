@@ -5,10 +5,14 @@
 
 const db = require('../db/connection');
 
-async function readOnly(fn) {
+// Every query contributing to one diagnostics response must observe the same
+// committed database snapshot. The persistent writer can commit between these
+// SELECTs, so plain READ COMMITTED is insufficient for an internally coherent
+// operator view.
+async function withReadOnlySnapshot(fn) {
   const client = await db.getClient();
   try {
-    await client.query('BEGIN READ ONLY');
+    await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
     const result = await fn(client);
     await client.query('COMMIT');
     return result;
@@ -33,7 +37,7 @@ function numericOrNull(value) {
 }
 
 async function getPersistentDiagnostics() {
-  return readOnly(async (client) => {
+  return withReadOnlySnapshot(async (client) => {
     const { rows: worldRows } = await client.query(
       `SELECT world_id, version, seed, epoch_started_at, active
          FROM market_worlds
@@ -60,10 +64,18 @@ async function getPersistentDiagnostics() {
       `SELECT
          (SELECT count(*)::int FROM coins WHERE retired = false) AS catalogue_active_coins,
          (SELECT count(*)::int FROM coins WHERE retired = true) AS retired_coins,
-         (SELECT count(*)::int FROM market_coin_state
-           WHERE world_id = $1 AND status = 'ALIVE') AS alive_coins,
-         (SELECT count(*)::int FROM market_coin_state
-           WHERE world_id = $1 AND status = 'DEAD') AS dead_coins,
+         (SELECT count(*)::int
+            FROM market_coin_state s
+            JOIN coins c ON c.coin_id = s.coin_id
+           WHERE s.world_id = $1
+             AND c.retired = false
+             AND s.status = 'ALIVE') AS active_alive_coins,
+         (SELECT count(*)::int
+            FROM market_coin_state s
+            JOIN coins c ON c.coin_id = s.coin_id
+           WHERE s.world_id = $1
+             AND c.retired = false
+             AND s.status = 'DEAD') AS active_dead_coins,
          (SELECT max(ph.created_at)
             FROM price_history ph
            WHERE ph.source = 'MARKET_TICK'
@@ -83,8 +95,8 @@ async function getPersistentDiagnostics() {
         director: null,
         market: {
           catalogueActiveCoins: Number(summary.catalogue_active_coins),
-          aliveCoins: 0,
-          deadCoins: 0,
+          activeAliveCoins: 0,
+          activeDeadCoins: 0,
           retiredCoins: Number(summary.retired_coins),
           latestMarketTickAt: null
         },
@@ -129,8 +141,8 @@ async function getPersistentDiagnostics() {
         : null,
       market: {
         catalogueActiveCoins: Number(summary.catalogue_active_coins),
-        aliveCoins: Number(summary.alive_coins),
-        deadCoins: Number(summary.dead_coins),
+        activeAliveCoins: Number(summary.active_alive_coins),
+        activeDeadCoins: Number(summary.active_dead_coins),
         retiredCoins: Number(summary.retired_coins),
         latestMarketTickAt: isoOrNull(summary.latest_market_tick_at)
       },
@@ -153,4 +165,7 @@ async function getPersistentDiagnostics() {
   });
 }
 
-module.exports = { getPersistentDiagnostics };
+module.exports = {
+  getPersistentDiagnostics,
+  __test: { withReadOnlySnapshot }
+};
