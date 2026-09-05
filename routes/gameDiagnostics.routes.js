@@ -12,11 +12,11 @@ const { authenticateDiagnostics } = require('../middleware/diagnostics.middlewar
 const gameDiagnosticsRouter = express.Router();
 
 // Issue #21: operator/game diagnostics. Every route is GET-only, read-only
-// at the database level (BEGIN READ ONLY), and gated by the dedicated
-// env-configured operator token — never by the player JWT, because this
-// backend has no admin role and these views expose every participant's
-// activity. When GAME_DIAGNOSTICS_TOKEN is unset the router answers 404
-// for all four routes (fail closed).
+// at the database level (persistent diagnostics use REPEATABLE READ READ ONLY),
+// and gated by the dedicated env-configured operator token — never by the
+// player JWT, because this backend has no admin role and these views expose
+// every participant's activity. When GAME_DIAGNOSTICS_TOKEN is unset the
+// router answers 404 for all diagnostics routes (fail closed).
 gameDiagnosticsRouter.use(authenticateDiagnostics);
 
 // Authenticated diagnostics payloads are live operator views of game state:
