@@ -414,3 +414,11 @@ provenance (`price_history.cycle_id`); legacy-only (`cycle_id IS NULL`)
 rows never count. Computed with a single `EXISTS` query (no N+1). No seed,
 internal `cycle_id`, schedule, rank, or bot data is exposed; the read
 performs zero writes and never reconciles, settles, or rolls over anything.
+
+### GET /api/game/diagnostics/persistent
+
+Operator-token gated via the existing `authenticateDiagnostics` mechanism and `GAME_DIAGNOSTICS_TOKEN`. Fail-closed 404 when the token is unset. 401 for missing/invalid bearer credentials. Responses carry `Cache-Control: no-store`.
+
+PostgreSQL `REPEATABLE READ READ ONLY` transaction. Exposes persisted persistent-world identity and Director state, active-roster market summary, per-coin persistent state (including DEAD/retired semantics), checkpoint update timestamp, and latest persistent `MARKET_TICK` timestamp using persistent provenance.
+
+Performs no provisioning, reconciliation, writer/economy/bot/debt/replacement/settlement mutation; no world seed, RNG, or future-state leakage. GET only.
