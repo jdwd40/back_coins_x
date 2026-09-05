@@ -1,5 +1,12 @@
 # Changelog
 
+## Stage 12A: persistent diagnostics (2026-09-05)
+
+- **New endpoint** `GET /api/game/diagnostics/persistent` on the restricted diagnostics router (same `GAME_DIAGNOSTICS_TOKEN` gate via existing `authenticateDiagnostics` mechanism; fail-closed 404 when unset; 401 for missing/invalid bearer credentials; `Cache-Control: no-store`; PostgreSQL `REPEATABLE READ READ ONLY` transaction).
+- Persisted persistent-world identity and Director state; active-roster market summary; per-coin persistent state including DEAD/retired semantics; checkpoint update timestamp; latest persistent `MARKET_TICK` timestamp using persistent provenance.
+- No provisioning, reconciliation, writer/economy/bot/debt/replacement/settlement mutation; no world seed, RNG, or future-state leakage.
+- Docs: `API_DOCUMENTATION.md` persistent section. No gameplay, writer, schema, test, migration, package, workflow, frontend, or generated changes.
+
 ## Apocalypse Monitor Phase 2.5: monitor cycle discovery (2026-08-29)
 
 - **New endpoint** `GET /api/game/diagnostics/monitor/cycles` on the
