@@ -4,6 +4,8 @@ const logger = require('./utils/logger');
 const gameCycleWorker = require('./game/gameCycleWorker');
 const botWorker = require('./game/botWorker');
 const economyWorker = require('./game/economyWorker');
+const persistentBotWorker = require('./game/persistentBotWorker');
+const persistentReplacementWorker = require('./game/persistentReplacementWorker');
 const marketSimulator = require('./models/market-simulator');
 
 // Top-level production JWT check (executes on require, before any listen or startServer).
@@ -51,13 +53,26 @@ const startServer = async (port = PORT) => {
     console.log('Database connection successful:', result.rows[0]);
 
     httpServer = app.listen(port, () => {
-      // The sole production lifecycle entry point for the persistent global
-      // cycle. The worker itself makes duplicate calls a no-op and uses the
-      // database as the cross-process authority.
+      // S11-01 cutover: persistent market writer is the ONLY gameplay system
+      // allowed to mutate live coins.current_price. Explicit lifecycle policy:
+      // do NOT start dangerous legacy price-mutating workers (gameCycleWorker,
+      // botWorker, economyWorker). Persistent systems (market writer via app.js,
+      // persistentBotWorker, persistentReplacementWorker) still start.
       if (process.env.NODE_ENV === 'production') {
-        gameCycleWorker.start();
-        botWorker.start();
-        economyWorker.start();
+        // Legacy gameCycle/bot/economy deliberately omitted — they drive
+        // restoreBaselinePrices + executeCollapse + settlement zeroing.
+        // Reconcile paths remain available (HTTP compat) but are guarded
+        // inside dynamicCollapseService to be price-neutral when persistent
+        // world active.
+        // Persistent-market Stage 8: the persistent roster bots trade THE
+        // persistent economy. A tick before world provisioning is a loud
+        // logged skip, never a crash (the worker never fabricates a world).
+        persistentBotWorker.start();
+        // Stage 9 S9-03: DEAD coins are soft-retired immediately and each
+        // eligible death consumes at most one authored replacement after the
+        // configured delay. DB locks + durable counters make multi-process
+        // wakeups idempotent; the worker never merges/deploys anything.
+        persistentReplacementWorker.start();
       }
       console.log('Express server started successfully');
       console.log(`Server is running on port ${port}`);
@@ -108,6 +123,16 @@ const shutdown = (signal = 'unknown') => {
       botWorker.stop();
     } catch (err) {
       console.error('[LIFECYCLE] Error stopping bot worker:', err.message);
+    }
+    try {
+      persistentBotWorker.stop();
+    } catch (err) {
+      console.error('[LIFECYCLE] Error stopping persistent bot worker:', err.message);
+    }
+    try {
+      persistentReplacementWorker.stop();
+    } catch (err) {
+      console.error('[LIFECYCLE] Error stopping persistent replacement worker:', err.message);
     }
     try {
       economyWorker.stop();

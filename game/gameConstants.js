@@ -185,6 +185,41 @@ function resolveGameStartingCash(raw = process.env.GAME_STARTING_CASH) {
   return validateGameStartingCash(raw);
 }
 
+// ---------------------------------------------------------------------------
+// Persistent-market Stage 8: bot-only debt. These are the single
+// authoritative game-design values — do not scatter literals. Validated env
+// overrides are resolved below; game/persistentDebt.js is the only consumer.
+//
+// A bankrupt bot (no usable cash AND no meaningful sellable holdings) may
+// receive a PERSISTENT_BOT_LOAN_AMOUNT virtual, interest-free loan; multiple
+// loans are allowed, each requiring bankruptcy again. Cash above the
+// configurable PERSISTENT_BOT_OPERATING_RESERVE repays outstanding debt
+// first, automatically. Humans never carry debt.
+// ---------------------------------------------------------------------------
+
+// The interest-free virtual loan principal.
+const PERSISTENT_BOT_LOAN_AMOUNT = 10000;
+// The operating reserve: automatic repayment only touches cash ABOVE this
+// floor, so a repaying bot never strips its own operating float.
+const PERSISTENT_BOT_OPERATING_RESERVE = 2000;
+
+function resolvePersistentBotLoanAmount(raw = process.env.PERSISTENT_BOT_LOAN_AMOUNT) {
+  if (raw === undefined || raw === null || (typeof raw === 'string' && raw.trim() === '')) return PERSISTENT_BOT_LOAN_AMOUNT;
+  return validateGameStartingCash(raw); // identical money validation rules
+}
+
+// The reserve is a money amount that may legitimately be zero (no floor) —
+// validated to the same exact 2dp precision but without the positivity rule.
+function resolvePersistentBotOperatingReserve(raw = process.env.PERSISTENT_BOT_OPERATING_RESERVE) {
+  if (raw === undefined || raw === null || (typeof raw === 'string' && raw.trim() === '')) return PERSISTENT_BOT_OPERATING_RESERVE;
+  const value = typeof raw === 'string' ? Number(raw.trim()) : raw;
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    throw new Error(`PERSISTENT_BOT_OPERATING_RESERVE must be a non-negative finite number; received ${typeof raw === 'string' ? JSON.stringify(raw) : String(raw)}`);
+  }
+  if (value !== 0) validateGameStartingCash(value); // exact 2dp money precision
+  return value;
+}
+
 module.exports = {
   GAME_STARTING_CASH,
   GAME_QUANTITY_DECIMALS,
@@ -209,5 +244,9 @@ module.exports = {
   resolveGamePowerMax,
   resolveGamePowerRegenMsPerPoint,
   resolveGamePowerBuyCostDivisor,
-  resolveGameMaxOpenPositions
+  resolveGameMaxOpenPositions,
+  PERSISTENT_BOT_LOAN_AMOUNT,
+  PERSISTENT_BOT_OPERATING_RESERVE,
+  resolvePersistentBotLoanAmount,
+  resolvePersistentBotOperatingReserve
 };

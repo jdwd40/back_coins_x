@@ -36,10 +36,13 @@ describe('simulation config defaults', () => {
     expect(resolveSimulationConfig(null)).toBe(DEFAULT_SIMULATION_CONFIG);
   });
 
-  test('top-level shape is exactly the six sections', () => {
+  test('top-level shape is exactly the eight sections', () => {
+    // Persistent-market Stage 2 added the `persistent` section (the
+    // persistent-safe pricing coefficients, master plan §21-27); Stage 3
+    // added the `director` section (the Market Director, master plan §8).
     expect(Object.keys(DEFAULT_SIMULATION_CONFIG).sort()).toEqual([
-      'coinEvents', 'crashRally', 'dynamicCollapse', 'lifecycle',
-      'marketPhases', 'tradingPressure'
+      'coinEvents', 'crashRally', 'director', 'dynamicCollapse', 'lifecycle',
+      'marketPhases', 'persistent', 'tradingPressure'
     ]);
   });
 
@@ -380,5 +383,40 @@ describe('simulation config immutability', () => {
     expect(() => resolveSimulationConfig({
       dynamicCollapse: { preDeclineRiskCap: 0.5 }
     })).toThrow(/preDeclineRiskCap/);
+  });
+});
+
+describe('simulation config persistent death (Stage 9 S9-01)', () => {
+  test('defaults include a validated death risk threshold above CRITICAL', () => {
+    expect(DEFAULT_SIMULATION_CONFIG.persistent.death.riskThreshold).toBe(6.0);
+    expect(DEFAULT_SIMULATION_CONFIG.persistent.death.riskThreshold).toBeGreaterThan(4.5);
+  });
+
+  test('rejects a death threshold at or below the public CRITICAL band', () => {
+    const atCritical = freshConfig();
+    atCritical.persistent.death.riskThreshold = 4.5;
+    expect(() => validateSimulationConfig(atCritical)).toThrow(/CRITICAL/);
+
+    const below = freshConfig();
+    below.persistent.death.riskThreshold = 3;
+    expect(() => validateSimulationConfig(below)).toThrow(/CRITICAL/);
+  });
+
+  test('rejects a missing or unknown death key', () => {
+    const missing = freshConfig();
+    delete missing.persistent.death;
+    expect(() => validateSimulationConfig(missing)).toThrow(/exact keys|death/);
+
+    expect(() => resolveSimulationConfig({
+      persistent: { death: { riskThreshold: 7, extra: true } }
+    })).toThrow(/exact keys|unknown key/);
+  });
+
+  test('death threshold overrides merge and freeze', () => {
+    const resolved = resolveSimulationConfig({
+      persistent: { death: { riskThreshold: 7.25 } }
+    });
+    expect(resolved.persistent.death.riskThreshold).toBe(7.25);
+    expect(Object.isFrozen(resolved.persistent.death)).toBe(true);
   });
 });

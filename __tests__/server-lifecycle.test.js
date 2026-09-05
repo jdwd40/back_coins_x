@@ -6,6 +6,11 @@ const path = require('path');
 const { spawn } = require('child_process');
 const db = require('../db/connection');
 const gameCycleWorker = require('../game/gameCycleWorker');
+const botWorker = require('../game/botWorker');
+const economyWorker = require('../game/economyWorker');
+const persistentBotWorker = require('../game/persistentBotWorker');
+const persistentReplacementWorker = require('../game/persistentReplacementWorker');
+const marketSimulator = require('../models/market-simulator');
 const { assertDisposableTestDatabase } = require('./helpers/testDatabaseGuard');
 
 const PROJECT_ROOT = path.resolve(__dirname, '..');
@@ -15,6 +20,7 @@ jest.setTimeout(30000);
 describe('Core 1: server lifecycle', () => {
   afterEach(() => {
     gameCycleWorker.stop();
+    persistentReplacementWorker.stop();
   });
 
   test('importing server.js starts no listener, worker, or timer', () => {
@@ -25,6 +31,7 @@ describe('Core 1: server lifecycle', () => {
       expect(serverModule.shutdown).toBeInstanceOf(Function);
     });
     expect(gameCycleWorker.isRunning()).toBe(false);
+    expect(persistentReplacementWorker.isRunning()).toBe(false);
     jest.dontMock('../models/market-simulator');
   });
 
@@ -35,9 +42,11 @@ describe('Core 1: server lifecycle', () => {
     const server = await serverModule.startServer(0);
     expect(server.listening).toBe(true);
 
-    // Simulate a running production worker; shutdown must stop it.
+    // Simulate running production workers; shutdown must stop them.
     gameCycleWorker.start();
+    persistentReplacementWorker.start();
     expect(gameCycleWorker.isRunning()).toBe(true);
+    expect(persistentReplacementWorker.isRunning()).toBe(true);
 
     // Observe pool draining without actually ending the suite-shared pool
     // (jest.setup.js reseeds via the same pool before later tests).
@@ -49,6 +58,7 @@ describe('Core 1: server lifecycle', () => {
 
     await first;
     expect(gameCycleWorker.isRunning()).toBe(false);
+    expect(persistentReplacementWorker.isRunning()).toBe(false);
     expect(server.listening).toBe(false);
     expect(endSpy).toHaveBeenCalledTimes(1); // drained exactly once
   });
@@ -154,5 +164,82 @@ describe('Core 1: server lifecycle', () => {
     expect(exit.code).toBe(0);
     expect(stdout).toContain('SIGINT received');
     expect(stdout).toContain('Shutdown complete');
+  });
+
+  test('E. production startup calls only persistent workers + market writer (no legacy trio); shutdown safe (lifecycle observation via mocks)', async () => {
+    assertDisposableTestDatabase();
+
+    const origEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'production';
+
+    const gameCycleStart = jest.fn();
+    const botStart = jest.fn();
+    const economyStart = jest.fn();
+    const pBotStart = jest.fn();
+    const pReplStart = jest.fn();
+    const mktStart = jest.fn();
+
+    let serverModule;
+    jest.isolateModules(() => {
+      jest.doMock('../game/gameCycleWorker', () => ({
+        start: gameCycleStart,
+        stop: jest.fn(),
+        isRunning: jest.fn(() => false)
+      }));
+      jest.doMock('../game/botWorker', () => ({
+        start: botStart,
+        stop: jest.fn(),
+        isRunning: jest.fn(() => false)
+      }));
+      jest.doMock('../game/economyWorker', () => ({
+        start: economyStart,
+        stop: jest.fn(),
+        isRunning: jest.fn(() => false)
+      }));
+      jest.doMock('../game/persistentBotWorker', () => ({
+        start: pBotStart,
+        stop: jest.fn(),
+        isRunning: jest.fn(() => false)
+      }));
+      jest.doMock('../game/persistentReplacementWorker', () => ({
+        start: pReplStart,
+        stop: jest.fn(),
+        isRunning: jest.fn(() => false)
+      }));
+      jest.doMock('../models/market-simulator', () => ({
+        start: mktStart,
+        stop: jest.fn(),
+        lastBatch: null,
+        getMarketStatus: jest.fn(() => ({})),
+        getMarketStats: jest.fn(() => ({}))
+      }));
+
+      serverModule = require('../server');
+    });
+
+    // Calling startServer triggers app load (market start at top level if prod) and listen cb (persistent starts)
+    const httpServer = await serverModule.startServer(0);
+    // allow listen callback to fire
+    await new Promise((r) => setImmediate(r));
+
+    // Per E: gameCycle, bot, economy NOT called; persistentBot, persistentReplacement, and market writer ARE
+    expect(gameCycleStart).not.toHaveBeenCalled();
+    expect(botStart).not.toHaveBeenCalled();
+    expect(economyStart).not.toHaveBeenCalled();
+    expect(pBotStart).toHaveBeenCalled();
+    expect(pReplStart).toHaveBeenCalled();
+    expect(mktStart).toHaveBeenCalled();
+
+    // shutdown safe under new policy (no-ops for unstarted legacy are fine)
+    await serverModule.shutdown('SIGTERM');
+    expect(httpServer.listening).toBe(false);
+
+    process.env.NODE_ENV = origEnv;
+    jest.dontMock('../game/gameCycleWorker');
+    jest.dontMock('../game/botWorker');
+    jest.dontMock('../game/economyWorker');
+    jest.dontMock('../game/persistentBotWorker');
+    jest.dontMock('../game/persistentReplacementWorker');
+    jest.dontMock('../models/market-simulator');
   });
 });

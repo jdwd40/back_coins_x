@@ -9,6 +9,14 @@
 // (game/economyService.buildEventSchedule). Nothing here uses
 // Math.random(), a real clock, or a database handle: time is injected.
 //
+// Persistent-market Stage 1 (master plan §20): every price evaluation
+// goes through the SAME checkpointed production price path the live
+// writer uses (game/pricingCheckpoint.js): per-coin pricing accumulators
+// resume and freeze forward exactly as they do per live batch, and the
+// checkpointed price is BIT-IDENTICAL to the stateless origin engine at
+// every instant (automated by round-environment-checkpoint-parity.test.js).
+// Simulation never uses a simplified alternative price implementation.
+//
 // SIM-08 parity: the live writer prices each coin from the persisted Wave
 // 1/2/4 authorities (coin events, market phases, hidden lifecycle, bounded
 // round-ledger trading pressure) via game/pricingContext.js. Those
@@ -67,6 +75,7 @@ const coinEventEngine = require('../game/coinEventEngine');
 const marketPhaseEngine = require('../game/marketPhaseEngine');
 const marketStateEngine = require('../game/marketStateEngine');
 const priceEngine = require('../game/priceEngine');
+const pricingCheckpoint = require('../game/pricingCheckpoint');
 const { resolveSimulationConfig } = require('../game/simulationConfig');
 const {
   GAME_FEE_TICK_INTERVAL_MS,
@@ -162,6 +171,47 @@ function createRoundEnvironment({ seed, coins = CANONICAL_COINS, durationMs = DE
     nowMs: tMs,
     config: simConfig
   }).sellPressure;
+
+  // ---------------------------------------------------------------------
+  // Persistent-market Stage 1 (master plan §20): the simulation prices
+  // through the SAME checkpointed production price path the live writer
+  // uses (game/pricingCheckpoint.js over game/priceEngine.js — no
+  // simplified alternative implementation). A per-coin accumulator cache
+  // advances monotonically: an evaluation at or after the coin's frozen
+  // checkpoint resumes from it (bit-identical to the origin walk by the
+  // Stage 1 invariant) and freezes forward; an evaluation BEHIND it (a
+  // public-signal lookback) prices from the origin — the identical
+  // stateless engine call. Round evaluation order is not time-monotone
+  // per coin (lookbacks), so the cache never rewinds; within a 30-minute
+  // round every walk stays far inside the bounded-walk guards.
+  // ---------------------------------------------------------------------
+  const checkpointsByCoin = new Map();
+  function unifiedPriceWithCheckpoints({ coinId, baselinePrice, nowMs, amplitude, lifecycleState, cycleProgress, phaseModifier, eventModifier, pressureModifier }) {
+    const stored = checkpointsByCoin.get(coinId) || null;
+    let resume = { domainCheckpoint: null, crashCheckpoint: null };
+    if (stored && nowMs >= stored.checkpointMs) {
+      resume = pricingCheckpoint.resolveResumeCheckpoints({ stored, seed, coinId, nowMs, lifecycleState });
+    }
+    const price = priceEngine.unifiedPriceAt({
+      seed, coinId, baselinePrice, roundStartMs: 0, nowMs,
+      amplitude, lifecycleState, cycleProgress, phaseModifier, eventModifier, pressureModifier,
+      domainCheckpoint: resume.domainCheckpoint,
+      crashCheckpoint: resume.crashCheckpoint
+    });
+    if (!stored || nowMs >= stored.checkpointMs) {
+      checkpointsByCoin.set(coinId, pricingCheckpoint.extractPricingCheckpoint({
+        seed, coinId, roundStartMs: 0, nowMs, lifecycleState, stored, config: simConfig
+      }));
+    }
+    return price;
+  }
+
+  // Internal/test surface: the coin's cached pricing checkpoint row (the
+  // proof the checkpointed path is load-bearing in simulation). Never
+  // part of any public response.
+  function pricingCheckpointAt(coinId) {
+    return checkpointsByCoin.get(coinId) || null;
+  }
 
   // Issue #18 passive economy: the same deterministic event schedule plus
   // the fixed fee/tax cadences (first tick lands one interval after start;
@@ -270,11 +320,12 @@ function createRoundEnvironment({ seed, coins = CANONICAL_COINS, durationMs = DE
     // The unified price of one LIVE coin at tMs under a given market state.
     // Dead coins are excluded by callers (measurement) or return 0
     // (priceAt): death is the collapse engine's, not the price engine's.
-    const livePriceAt = (coinId, tMs, lifecycleState) => priceEngine.unifiedPriceAt({
-      seed,
+    // Stage 1: priced through the checkpointed production path
+    // (unifiedPriceWithCheckpoints — bit-identical to the stateless
+    // engine, resumed accumulators where legal).
+    const livePriceAt = (coinId, tMs, lifecycleState) => unifiedPriceWithCheckpoints({
       coinId,
       baselinePrice: baselineByCoin.get(coinId),
-      roundStartMs: 0,
       nowMs: tMs,
       amplitude: amplitudeAt(tMs),
       lifecycleState,
@@ -441,15 +492,14 @@ function createRoundEnvironment({ seed, coins = CANONICAL_COINS, durationMs = DE
   }
 
   // Persisted-precision gameplay price: 0 for a dead coin, otherwise the
-  // SAME unified engine call the live writer persists.
+  // SAME unified engine call the live writer persists — through the
+  // checkpointed production path (Stage 1, bit-identical).
   function priceAt(coinId, nowMs) {
     if (isDead(coinId, nowMs)) return 0;
     const inputs = pricingInputsAt(coinId, nowMs);
-    return priceEngine.unifiedPriceAt({
-      seed,
+    return unifiedPriceWithCheckpoints({
       coinId,
       baselinePrice: baselineByCoin.get(coinId),
-      roundStartMs: 0,
       nowMs,
       amplitude: inputs.amplitude,
       lifecycleState: inputs.lifecycleState,
@@ -556,6 +606,7 @@ function createRoundEnvironment({ seed, coins = CANONICAL_COINS, durationMs = DE
     priceAt,
     publicSignal,
     pricingInputsAt,
+    pricingCheckpointAt,
     gameplayDiagnostics
   };
 }

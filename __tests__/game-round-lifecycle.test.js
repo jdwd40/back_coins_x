@@ -16,6 +16,7 @@ const {
   reconcileActivePeaks
 } = require('../game/gameRoundService');
 const marketSimulator = require('../models/market-simulator');
+const persistentWorld = require('../game/persistentWorld');
 
 const CYCLE_START_MS = new Date('2026-08-20T10:00:00.000Z').getTime();
 const DURATION_MS = 30 * 60 * 1000;
@@ -243,8 +244,14 @@ describe('Core 4: wealth and monotonic peak', () => {
     const participant = await joinRound({ userId: 1, now: new Date() });
     await buyRoundTrade({ userId: 1, apocalypseId: cycle.apocalypse_id, coinId: 1, quantity: 10, now: new Date() });
 
-    // V2-1: the writer needs no in-memory initialisation — prices come from
-    // the shared deterministic domain.
+    // Stage 4: the writer is persistent-authoritative — it prices from THE
+    // active persistent world (provisioned explicitly, epoch just before
+    // now) and still runs the old-economy Core 4 peak reconciliation in the
+    // same batch transaction for as long as the legacy round surface exists.
+    await persistentWorld.provisionWorld(db, {
+      seed: 'stage4-round-lifecycle-world',
+      epochStartedAt: new Date(Date.now() - 60 * 1000)
+    });
     marketSimulator.stop();
     await marketSimulator.updateAllPrices();
 

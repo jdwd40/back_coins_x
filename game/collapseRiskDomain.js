@@ -140,6 +140,61 @@ function getCollapseRisk(options) {
   return 'STABLE';
 }
 
+// ---------------------------------------------------------------------------
+// Persistent-market Stage 2: the persistent collapse-risk signal.
+//
+// The persistent world has NO apocalypse percentage — the progress danger
+// ramp is replaced by the coin's PUBLIC condition (master plan §11: the
+// condition labels are player-facing derived state). Everything else is
+// unchanged in kind: the public archetype personality, currently
+// OBSERVABLE market stress, and the same two schedule-independent seeded
+// noise streams. The signal NEVER reads hidden Director rolls, future
+// environment, committed damage internals or any death probability — it
+// is deliberately useful but imperfect, exactly like the V2 signal.
+// ---------------------------------------------------------------------------
+
+// Condition danger: a coin in poor condition is genuinely dangerous to
+// hold (its sustained damage/drawdown drove the condition down); a
+// healthy coin is not. Zero at neutral-or-better condition, full weight
+// (matching the V2 progress ramp's full weight) at the worst condition.
+function conditionDanger(condition) {
+  if (typeof condition !== 'number' || !Number.isFinite(condition)) {
+    throw new Error(`persistent collapse risk condition must be a finite number; received ${String(condition)}`);
+  }
+  if (condition < -1 || condition > 1) {
+    throw new Error(`persistent collapse risk condition must be in [-1, 1]; received ${condition}`);
+  }
+  return 4 * Math.max(0, -condition);
+}
+
+// The persistent numeric risk score for a live coin (never serialised
+// publicly). archetypeId is the coin's explicit persistent archetype
+// (master plan §29 — never silently defaulted); callers holding the
+// canonical roster may omit it (roster resolution).
+function getPersistentCollapseRiskScore({ seed, coinId, archetypeId = null, condition, phase, momentum, recentChangePct, nowMs }) {
+  if (typeof seed !== 'string' || seed.length === 0) {
+    throw new Error('collapse risk seed must be a non-empty string');
+  }
+  const archetype = archetypeId || marketDomain.resolveArchetypeId(coinId);
+  if (!marketDomain.MARKET_ARCHETYPES[archetype]) {
+    throw new Error(`persistent collapse risk requires a known archetype; received ${JSON.stringify(archetypeId)}`);
+  }
+  return conditionDanger(condition)
+    + (ARCHETYPE_RISK[archetype] || 0)
+    + marketStress({ phase, momentum, recentChangePct })
+    + persistentNoise(seed, coinId)
+    + jitterNoise(seed, coinId, Number.isFinite(nowMs) ? nowMs : 0);
+}
+
+// The coarse public persistent level for a live coin.
+function getPersistentCollapseRisk(options) {
+  const score = getPersistentCollapseRiskScore(options);
+  if (score >= RISK_THRESHOLDS.CRITICAL) return 'CRITICAL';
+  if (score >= RISK_THRESHOLDS.DANGER) return 'DANGER';
+  if (score >= RISK_THRESHOLDS.SHAKY) return 'SHAKY';
+  return 'STABLE';
+}
+
 module.exports = {
   COLLAPSE_RISK_LEVELS,
   COLLAPSE_RISK_ORDINAL,
@@ -149,5 +204,8 @@ module.exports = {
   RISK_JITTER_BUCKET_MS,
   progressDanger,
   getCollapseRiskScore,
-  getCollapseRisk
+  getCollapseRisk,
+  conditionDanger,
+  getPersistentCollapseRiskScore,
+  getPersistentCollapseRisk
 };

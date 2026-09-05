@@ -1,10 +1,12 @@
-// Milestone 1 hardening: PATCH /api/users/:user_id/funds is a self-service
-// endpoint — it requires authentication AND the authenticated user must own
-// the path user_id (there is no admin role, so no cross-user funds control
-// exists at all). The mutation is concurrency-safe: the non-negative guard
-// lives inside a single atomic UPDATE, so concurrent debits can never drive
-// funds negative. Legacy account funds stay fully isolated from game round
-// cash (apocalypse_participants.current_cash is never touched).
+// Persistent-market product rule: ordinary-player self-funding is RETIRED.
+// PATCH /api/users/:user_id/funds still requires authentication (401 for
+// anonymous callers), but every authenticated ordinary player — including the
+// account owner — is denied with 403 and legacy `users.funds` never changes.
+// There is no admin role, so no caller may mutate funds through the API at
+// all; the persistent economy (server-owned accounts) is the only writable
+// gameplay cash. The route is retained so previously deployed frontends get a
+// clean, safe denial instead of a 404. The model-level guarded UPDATE keeps
+// its atomic non-negative invariant for any internal/future callers.
 //
 // jest.setup.js reseeds the disposable test database before every test;
 // seeded users are ids 1 (john_doe) and 2 (jane_smith) with £1,000 each.
@@ -24,13 +26,13 @@ async function fundsOf(userId) {
   return parseFloat(rows[0].funds);
 }
 
-describe('PATCH /api/users/:user_id/funds security', () => {
+describe('PATCH /api/users/:user_id/funds security (self-funding retired)', () => {
   test('anonymous callers are denied (401)', async () => {
     await request(app).patch('/api/users/1/funds').send({ amount: 500 }).expect(401);
     expect(await fundsOf(1)).toBe(1000);
   });
 
-  test('a caller cannot mutate another user\'s funds (403) and the target is untouched', async () => {
+  test('an authenticated caller cannot mutate another user\'s funds (403) and the target is untouched', async () => {
     const response = await request(app)
       .patch('/api/users/2/funds')
       .set('Authorization', `Bearer ${tokenFor(1)}`)
@@ -42,40 +44,29 @@ describe('PATCH /api/users/:user_id/funds security', () => {
     expect(await fundsOf(1)).toBe(1000);
   });
 
-  test('the owner can still adjust their own funds', async () => {
+  test('the owner can no longer adjust their own funds (403) and funds are unchanged', async () => {
     const response = await request(app)
       .patch('/api/users/1/funds')
       .set('Authorization', `Bearer ${tokenFor(1)}`)
       .send({ amount: 250 });
 
-    expect(response.status).toBe(200);
-    expect(response.body.success).toBe(true);
-    expect(parseFloat(response.body.user.funds)).toBe(1250);
+    expect(response.status).toBe(403);
+    expect(response.body.success).toBe(false);
+    expect(response.body.msg).toBe('Self-funding is retired: funds are managed by the game economy');
+    expect(await fundsOf(1)).toBe(1000);
   });
 
-  test('a debit that would overdraw is rejected atomically (400) with funds unchanged', async () => {
+  test('a debit attempt is denied (403) with funds unchanged', async () => {
     const response = await request(app)
       .patch('/api/users/1/funds')
       .set('Authorization', `Bearer ${tokenFor(1)}`)
       .send({ amount: -2000 });
 
-    expect(response.status).toBe(400);
-    expect(response.body.msg).toBe('Insufficient funds');
+    expect(response.status).toBe(403);
     expect(await fundsOf(1)).toBe(1000);
   });
 
-  test('concurrent debits cannot overdraw: exactly one of two £800 debits lands', async () => {
-    const results = await Promise.allSettled([
-      request(app).patch('/api/users/1/funds').set('Authorization', `Bearer ${tokenFor(1)}`).send({ amount: -800 }),
-      request(app).patch('/api/users/1/funds').set('Authorization', `Bearer ${tokenFor(1)}`).send({ amount: -800 })
-    ]);
-
-    const statuses = results.map((r) => r.status === 'fulfilled' ? r.value.status : 500).sort();
-    expect(statuses).toEqual([200, 400]);
-    expect(await fundsOf(1)).toBe(200);
-  });
-
-  test('legacy funds changes never touch game round cash', async () => {
+  test('denied funds attempts never touch game round cash', async () => {
     const participant = await gameRoundService.joinRound({ userId: 1 });
     expect(participant.currentCash).toBe(10000); // #17 authoritative round cash
 
@@ -83,8 +74,9 @@ describe('PATCH /api/users/:user_id/funds security', () => {
       .patch('/api/users/1/funds')
       .set('Authorization', `Bearer ${tokenFor(1)}`)
       .send({ amount: 500 })
-      .expect(200);
+      .expect(403);
 
+    expect(await fundsOf(1)).toBe(1000);
     const { rows } = await db.query(
       'SELECT current_cash FROM apocalypse_participants WHERE participant_id = $1',
       [participant.participantId]
@@ -95,7 +87,8 @@ describe('PATCH /api/users/:user_id/funds security', () => {
   test('the model enforces the non-negative balance atomically (no read-then-write window)', async () => {
     // Deterministic unit-level proof: the guarded UPDATE itself rejects the
     // overdraw — correctness no longer depends on a separate read winning a
-    // race against a concurrent debit.
+    // race against a concurrent debit. The model keeps this invariant for
+    // internal/future callers even though API self-funding is retired.
     const usersModel = require('../models/users.model');
     await expect(usersModel.updateUserFunds(1, -2000)).rejects.toThrow('Insufficient funds');
     expect(await fundsOf(1)).toBe(1000);
