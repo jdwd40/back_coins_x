@@ -1,4 +1,5 @@
 const diagnosticsService = require('../game/gameDiagnosticsService');
+const persistentDiagnosticsService = require('../game/persistentDiagnosticsService');
 
 // Map diagnostics domain errors (which carry an explicit status) to
 // responses; anything else falls through to the generic error middleware —
@@ -73,5 +74,14 @@ exports.getDiagnosticsMonitorCycles = async (req, res, next) => {
     res.status(200).json({ status: 'success', data });
   } catch (err) {
     handleDiagnosticsError(err, res, next);
+  }
+};
+
+exports.getPersistentDiagnostics = async (req, res, next) => {
+  try {
+    const data = await persistentDiagnosticsService.getPersistentDiagnostics();
+    res.status(200).json({ status: 'success', data });
+  } catch (err) {
+    next(err);
   }
 };

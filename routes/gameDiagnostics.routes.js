@@ -4,7 +4,8 @@ const {
   getDiagnosticsActivity,
   getDiagnosticsBots,
   getDiagnosticsMonitor,
-  getDiagnosticsMonitorCycles
+  getDiagnosticsMonitorCycles,
+  getPersistentDiagnostics
 } = require('../controllers/gameDiagnostics.controller');
 const { authenticateDiagnostics } = require('../middleware/diagnostics.middleware');
 
@@ -35,5 +36,6 @@ gameDiagnosticsRouter.get('/monitor', getDiagnosticsMonitor);
 // Apocalypse Monitor Phase 2.5: newest-first cycle discovery for the
 // monitor (public cycle fields + hasExactHistory; strict ?limit= 1-100).
 gameDiagnosticsRouter.get('/monitor/cycles', getDiagnosticsMonitorCycles);
+gameDiagnosticsRouter.get('/persistent', getPersistentDiagnostics);
 
 exports.gameDiagnosticsRouter = gameDiagnosticsRouter;
