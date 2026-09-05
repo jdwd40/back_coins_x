@@ -1305,14 +1305,18 @@ async function verifyPriceHistoryProvenance(q, problems) {
     problems.push(`index idx_price_history_cycle_coin_created: ${index.rows[0].indexdef}, expected (cycle_id, coin_id, created_at)`);
   }
 
-  // Live-data invariants (local-only, no joins): provenance-tagged rows must
-  // always carry the writer's cycle id, and a COLLAPSE row is always the £0
-  // transition. Legacy NULL rows are exempt from both.
-  const untagged = await q(
+  // Live-data invariants (local-only, no joins): persistent-world ticks are
+  // world-scoped and intentionally use source MARKET_TICK with cycle_id NULL;
+  // Apocalypse/cycle-owned rows carry a non-NULL cycle id. A COLLAPSE row is
+  // always the £0 transition and remains cycle-owned. Legacy NULL rows are
+  // exempt from both provenance checks.
+  const badCollapseProvenance = await q(
     `SELECT count(*)::int AS n FROM price_history
-      WHERE source IS NOT NULL AND cycle_id IS NULL`
+      WHERE source = 'COLLAPSE' AND cycle_id IS NULL`
   );
-  if (untagged.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${untagged.rows[0].n} price_history rows with a source tag but NULL cycle_id`);
+  if (badCollapseProvenance.rows[0].n > 0) {
+    problems.push(`INVARIANT VIOLATION: ${badCollapseProvenance.rows[0].n} COLLAPSE rows with NULL cycle_id; COLLAPSE provenance requires a non-NULL cycle_id`);
+  }
 
   const badCollapse = await q(
     `SELECT count(*)::int AS n FROM price_history
