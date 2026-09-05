@@ -2,7 +2,6 @@ const request = require('supertest');
 const app = require('../app');
 const db = require('../db/connection');
 const persistentWorld = require('../game/persistentWorld');
-const persistentDiagnosticsService = require('../game/persistentDiagnosticsService');
 
 jest.setTimeout(45000);
 
@@ -106,6 +105,24 @@ async function fingerprint() {
   return rows[0];
 }
 
+async function waitForBlockedDirectorRead(timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const { rows } = await db.query(`
+      SELECT state, wait_event_type, query
+        FROM pg_stat_activity
+       WHERE datname = current_database()
+         AND pid <> pg_backend_pid()
+         AND state = 'active'
+         AND wait_event_type = 'Lock'
+         AND query ILIKE '%FROM market_director_state%'
+    `);
+    if (rows.length > 0) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error('timed out waiting for persistent diagnostics Director read to block');
+}
+
 describe('Stage 12A persistent diagnostics', () => {
   test('uses the existing diagnostics gate and fails closed when token is unset', async () => {
     delete process.env.GAME_DIAGNOSTICS_TOKEN;
@@ -206,33 +223,37 @@ describe('Stage 12A persistent diagnostics', () => {
     expect(res.body.data.market.latestMarketTickAt).toBeNull();
   });
 
-  test('uses a real repeatable-read, read-only PostgreSQL snapshot across a concurrent commit', async () => {
-    await db.query('UPDATE coins SET current_price = 10.00 WHERE coin_id = 1');
-    const writer = await db.getClient();
+  test('the HTTP endpoint holds one repeatable-read snapshot across a concurrent commit', async () => {
+    await createWorldFixture();
+    const blocker = await db.getClient();
+    let pendingRequest;
     try {
-      const observed = await persistentDiagnosticsService.__test.withReadOnlySnapshot(async (client) => {
-        const first = await client.query('SELECT current_price FROM coins WHERE coin_id = 1');
+      await blocker.query('BEGIN');
+      await blocker.query('LOCK TABLE market_director_state IN ACCESS EXCLUSIVE MODE');
 
-        await writer.query('BEGIN');
-        await writer.query('UPDATE coins SET current_price = 20.00 WHERE coin_id = 1');
-        await writer.query('COMMIT');
+      pendingRequest = request(app)
+        .get('/api/game/diagnostics/persistent')
+        .set('Authorization', `Bearer ${TOKEN}`)
+        .then((res) => res);
 
-        const second = await client.query('SELECT current_price FROM coins WHERE coin_id = 1');
-        return [Number(first.rows[0].current_price), Number(second.rows[0].current_price)];
-      });
-
-      expect(observed).toEqual([10, 10]);
+      // The endpoint has already read world + summary state and is now blocked
+      // at its Director SELECT. Commit a newer price before allowing the later
+      // coin SELECT to run. READ COMMITTED would expose 88.88; REPEATABLE READ
+      // must keep the endpoint on the original 12.34 snapshot.
+      await waitForBlockedDirectorRead();
+      await db.query('UPDATE coins SET current_price = 88.88 WHERE coin_id = 1');
       const committed = await db.query('SELECT current_price FROM coins WHERE coin_id = 1');
-      expect(Number(committed.rows[0].current_price)).toBe(20);
+      expect(Number(committed.rows[0].current_price)).toBe(88.88);
 
-      await expect(
-        persistentDiagnosticsService.__test.withReadOnlySnapshot((client) =>
-          client.query('UPDATE coins SET current_price = 30.00 WHERE coin_id = 1')
-        )
-      ).rejects.toMatchObject({ code: '25006' });
+      await blocker.query('COMMIT');
+      const res = await pendingRequest;
+      const coin1 = res.body.data.coins.find((coin) => coin.coinId === 1);
+      expect(res.status).toBe(200);
+      expect(coin1.currentPrice).toBe(12.34);
     } finally {
-      try { await writer.query('ROLLBACK'); } catch (_) {}
-      writer.release();
+      try { await blocker.query('ROLLBACK'); } catch (_) {}
+      blocker.release();
+      if (pendingRequest) await pendingRequest.catch(() => {});
     }
   });
 });
