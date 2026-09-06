@@ -43,6 +43,8 @@ const seed = async (shouldEnd = false) => {
       DROP TABLE IF EXISTS "coin_collapse_schedule" CASCADE;
       DROP TABLE IF EXISTS "market_price_checkpoints" CASCADE;
       DROP TABLE IF EXISTS "persistent_bot_ticks" CASCADE;
+      DROP TABLE IF EXISTS "persistent_coin_events" CASCADE;
+      DROP TABLE IF EXISTS "director_control_state" CASCADE;
       DROP TABLE IF EXISTS "persistent_loans" CASCADE;
       DROP TABLE IF EXISTS "persistent_transactions" CASCADE;
       DROP TABLE IF EXISTS "persistent_holdings" CASCADE;
@@ -361,6 +363,15 @@ const seed = async (shouldEnd = false) => {
       'utf8'
     );
     await db.query(persistentBotTicksMigration);
+
+    console.log('📦 Applying persistent coin-events migration (db/migrations/029_create_persistent_coin_events.sql)...');
+    // Director Coin Events Wave 1 persistent coin-event authority + Director
+    // control state DDL, sourced from the production migration only.
+    const persistentCoinEventsMigration = require('fs').readFileSync(
+      require('path').join(__dirname, 'migrations', '029_create_persistent_coin_events.sql'),
+      'utf8'
+    );
+    await db.query(persistentCoinEventsMigration);
 
     console.log('📦 Inserting coins data...');
     // Insert coins data

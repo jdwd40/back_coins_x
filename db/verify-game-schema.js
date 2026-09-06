@@ -59,6 +59,16 @@
 //     non-negative index values, monotonic peak, drawdown in [0, 1],
 //     momentum >= -1, plateau target at/above the starting index — and
 //     live-data invariants for the same rules).
+//   * Director Coin Events Wave 1 (migration 029): persistent_coin_events
+//     (the persistent-world coin-event authority — columns, PK, FKs to
+//     market_worlds/coins, UNIQUE (world_id, coin_id, event_seq) replay
+//     identity, direction/source/sign/window/bounded-modifier CHECKs, the
+//     bounded active lookup indexes, and live-data invariants: positive
+//     windows, sign consistency, the configured active-per-coin overlap
+//     caps — total AND per-direction) and director_control_state (the
+//     Director short-term control cursor — columns, PK, FKs, all named
+//     CHECKs including Golden/Demon distinctness and pair consistency,
+//     and the same live-data rules).
 //
 // Exits non-zero with an explicit problem list on any mismatch.
 //
@@ -1940,6 +1950,140 @@ async function verifyPersistentBotTicks(q, problems) {
   ]);
 }
 
+// Director Coin Events Wave 1 (migration 029): the persistent-world
+// coin-event authority (world-scoped, never cycle-scoped) and the Director
+// short-term runtime/control state (separate from market_director_state).
+async function verifyPersistentCoinEvents(q, problems) {
+  const TS = 'timestamp with time zone';
+  await verifyPersistentEconomyTable(q, problems, 'persistent_coin_events', [
+    ['event_id', 'integer', 'NO'],
+    ['world_id', 'integer', 'NO'],
+    ['coin_id', 'integer', 'NO'],
+    ['event_seq', 'integer', 'NO'],
+    ['name', 'character varying', 'NO'],
+    ['direction', 'character varying', 'NO'],
+    ['source', 'character varying', 'NO'],
+    ['modifier', 'numeric', 'NO'],
+    ['starts_at', TS, 'NO'],
+    ['ends_at', TS, 'NO'],
+    ['created_at', TS, 'NO']
+  ], [
+    Object.assign((r) => r.contype === 'p', { describe: 'primary key (event_id)' }),
+    Object.assign((r) => r.contype === 'u' && /UNIQUE \(world_id, coin_id, event_seq\)/i.test(r.def), { describe: 'UNIQUE (world_id, coin_id, event_seq) — the replay/idempotency backstop' }),
+    Object.assign((r) => r.contype === 'f' && r.target === 'market_worlds' && /^FOREIGN KEY \(world_id\)/i.test(r.def), { describe: 'FOREIGN KEY world_id -> market_worlds' }),
+    Object.assign((r) => r.contype === 'f' && r.target === 'coins' && /^FOREIGN KEY \(coin_id\)/i.test(r.def), { describe: 'FOREIGN KEY coin_id -> coins' }),
+    // The CHECKs are pinned by EXACT name (migration 029 creates them
+    // named) plus a semantic definition predicate. The standalone
+    // direction vocabulary constraint must not mention the modifier, so
+    // the modifier sign-match constraint — which also names
+    // direction/POSITIVE/NEGATIVE — can never satisfy it.
+    Object.assign((r) => r.contype === 'c' && r.conname === 'persistent_coin_events_direction_known' && /direction/i.test(r.def) && /POSITIVE/.test(r.def) && /NEGATIVE/.test(r.def) && !/modifier/i.test(r.def), { describe: "CHECK persistent_coin_events_direction_known (direction IN ('POSITIVE','NEGATIVE'))" }),
+    Object.assign((r) => r.contype === 'c' && r.conname === 'persistent_coin_events_source_known' && /source/i.test(r.def) && /NORMAL/.test(r.def) && /GOLDEN/.test(r.def) && /DEMON/.test(r.def) && /RESCUE/.test(r.def) && /DIRECTOR/.test(r.def), { describe: "CHECK persistent_coin_events_source_known (source IN ('NORMAL','GOLDEN','DEMON','RESCUE','DIRECTOR'))" }),
+    Object.assign((r) => r.contype === 'c' && r.conname === 'persistent_coin_events_event_seq_positive' && /event_seq >= \(?1/.test(r.def), { describe: 'CHECK persistent_coin_events_event_seq_positive (event_seq >= 1)' }),
+    Object.assign((r) => r.contype === 'c' && r.conname === 'persistent_coin_events_window_positive' && /ends_at > starts_at/.test(r.def), { describe: 'CHECK persistent_coin_events_window_positive (ends_at > starts_at)' }),
+    Object.assign((r) => r.contype === 'c' && r.conname === 'persistent_coin_events_modifier_sign_matches_direction' && /direction/i.test(r.def) && /POSITIVE/.test(r.def) && /modifier/i.test(r.def), { describe: 'CHECK persistent_coin_events_modifier_sign_matches_direction' }),
+    Object.assign((r) => r.contype === 'c' && r.conname === 'persistent_coin_events_modifier_bounded' && /modifier > \(?'?-1/.test(r.def), { describe: 'CHECK persistent_coin_events_modifier_bounded (|modifier| < 1)' })
+  ]);
+
+  // Bounded active lookup indexes.
+  const eventsReg = await q(`SELECT to_regclass('public.persistent_coin_events') AS reg`);
+  if (!eventsReg.rows[0].reg) return; // shape problems already reported
+  for (const name of ['idx_persistent_coin_events_active', 'idx_persistent_coin_events_world_active']) {
+    const idx = await q(
+      `SELECT 1 FROM pg_class c
+       JOIN pg_index i ON i.indexrelid = c.oid
+       WHERE c.relname = '${name}' AND i.indrelid = 'public.persistent_coin_events'::regclass`
+    );
+    if (idx.rowCount === 0) problems.push(`missing index ${name}`);
+  }
+
+  // Live-data invariants (self-joins only on this table, so no joined-table
+  // guard is needed beyond presence). Every event is well-formed: positive
+  // window, sign matching direction.
+  const badEvents = await q(
+    `SELECT count(*)::int AS n FROM persistent_coin_events
+     WHERE ends_at <= starts_at
+        OR (direction = 'POSITIVE' AND modifier <= 0)
+        OR (direction = 'NEGATIVE' AND modifier >= 0)`
+  );
+  if (badEvents.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${badEvents.rows[0].n} persistent coin events with inverted window or direction/modifier sign mismatch`);
+
+  // The active-per-coin caps: no instant may have more than the configured
+  // maximum concurrent events for one coin in one world — in TOTAL and per
+  // DIRECTION (maxActivePositivePerCoin / maxActiveNegativePerCoin, which
+  // the validated model enforces alongside the total cap). Concurrency
+  // only changes at event boundaries, so measuring at each event's
+  // starts_at is exact for all three counts. Caps are validated config
+  // constants passed as bound parameters, never interpolated.
+  const eventCaps = resolveSimulationConfig().persistentEvents;
+  const overCap = await q(
+    `SELECT count(*)::int AS n FROM (
+       SELECT e1.event_id
+       FROM persistent_coin_events e1
+       JOIN persistent_coin_events e2
+         ON e2.world_id = e1.world_id AND e2.coin_id = e1.coin_id
+        AND e2.starts_at <= e1.starts_at AND e2.ends_at > e1.starts_at
+       GROUP BY e1.event_id
+       HAVING count(*) > $1
+          OR count(*) FILTER (WHERE e2.direction = 'POSITIVE') > $2
+          OR count(*) FILTER (WHERE e2.direction = 'NEGATIVE') > $3
+     ) d`,
+    [eventCaps.maxActivePerCoin, eventCaps.maxActivePositivePerCoin, eventCaps.maxActiveNegativePerCoin]
+  );
+  if (overCap.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${overCap.rows[0].n} persistent coin events overlap beyond the configured active caps (${eventCaps.maxActivePerCoin} total / ${eventCaps.maxActivePositivePerCoin} positive / ${eventCaps.maxActiveNegativePerCoin} negative per coin)`);
+}
+
+async function verifyDirectorControlState(q, problems) {
+  const TS = 'timestamp with time zone';
+  await verifyPersistentEconomyTable(q, problems, 'director_control_state', [
+    ['world_id', 'integer', 'NO'],
+    ['mode', 'character varying', 'NO'],
+    ['direction', 'character varying', 'NO'],
+    ['intensity', 'double precision', 'NO'],
+    ['started_at', TS, 'NO'],
+    ['ends_at', TS, 'NO'],
+    ['decision_index', 'integer', 'NO'],
+    ['reason', 'text', 'NO'],
+    ['golden_coin_id', 'integer', 'YES'],
+    ['golden_expires_at', TS, 'YES'],
+    ['demon_coin_id', 'integer', 'YES'],
+    ['demon_expires_at', TS, 'YES'],
+    ['last_swing_direction', 'character varying', 'YES'],
+    ['last_meaningful_movement_at', TS, 'YES'],
+    ['created_at', TS, 'NO'],
+    ['updated_at', TS, 'NO']
+  ], [
+    Object.assign((r) => r.contype === 'p', { describe: 'primary key (world_id)' }),
+    Object.assign((r) => r.contype === 'f' && r.target === 'market_worlds' && /^FOREIGN KEY \(world_id\)/i.test(r.def), { describe: 'FOREIGN KEY world_id -> market_worlds' }),
+    Object.assign((r) => r.contype === 'f' && r.target === 'coins' && /golden_coin_id/i.test(r.def), { describe: 'FOREIGN KEY golden_coin_id -> coins' }),
+    Object.assign((r) => r.contype === 'f' && r.target === 'coins' && /demon_coin_id/i.test(r.def), { describe: 'FOREIGN KEY demon_coin_id -> coins' }),
+    ...[
+      'director_control_state_mode_known',
+      'director_control_state_direction_known',
+      'director_control_state_intensity_bounded',
+      'director_control_state_decision_index_nonneg',
+      'director_control_state_window_positive',
+      'director_control_state_golden_consistent',
+      'director_control_state_demon_consistent',
+      'director_control_state_golden_demon_distinct',
+      'director_control_state_last_swing_known'
+    ].map((name) => Object.assign((r) => r.contype === 'c' && r.conname === name, { describe: `CHECK ${name}` }))
+  ]);
+
+  // Live-data invariant: Golden and Demon are never identical, and each
+  // assignment is pair-consistent (the CHECKs enforce this structurally;
+  // the query guards historical anomalies).
+  const reg = await q(`SELECT to_regclass('public.director_control_state') AS reg`);
+  if (!reg.rows[0].reg) return; // shape problems already reported
+  const bad = await q(
+    `SELECT count(*)::int AS n FROM director_control_state
+     WHERE golden_coin_id IS NOT NULL AND golden_coin_id = demon_coin_id
+        OR (golden_coin_id IS NULL) <> (golden_expires_at IS NULL)
+        OR (demon_coin_id IS NULL) <> (demon_expires_at IS NULL)`
+  );
+  if (bad.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${bad.rows[0].n} director control rows with identical Golden/Demon coins or pair-inconsistent assignments`);
+}
+
 async function verifyGameSchema({ query } = {}) {
   const q = query || ((...args) => db.query(...args));
   const problems = [];
@@ -1963,6 +2107,8 @@ async function verifyGameSchema({ query } = {}) {
   await verifyPersistentEconomy(q, problems);
   await verifyPersistentLoans(q, problems);
   await verifyPersistentBotTicks(q, problems);
+  await verifyPersistentCoinEvents(q, problems);
+  await verifyDirectorControlState(q, problems);
 
   return { ok: problems.length === 0, problems };
 }
@@ -1970,7 +2116,7 @@ if (require.main === module) {
   verifyGameSchema()
     .then(async ({ ok, problems }) => {
       if (ok) {
-        console.log('game schema verification PASSED (apocalypse_cycles [SETTLING lifecycle + settlement observability], coins.cycle_baseline_price, canonical coin catalogue [migrations 013 + 014 retirement], coin_collapse_schedule [legacy], apocalypse_coin_collapses [dynamic death record], apocalypse_participants, apocalypse_holdings, apocalypse_transactions, users.is_bot, apocalypse_bots, apocalypse_bot_ticks, apocalypse_cash_events, apocalypse_economy_ticks, apocalypse_economy_events, apocalypse_results [immutable], apocalypse_coin_events [0-5 active cap], apocalypse_market_phases [one primary phase], apocalypse_market_state [one row per cycle, monotonic peak], market_price_checkpoints [per-coin resumable pricing accumulator, exact float8/bigint round-trip], market_worlds [single active persistent world], market_coin_state [bidirectional condition, decaying reference, explicit timestamped death], market_director_state [one Director cursor per world, bounded intensity], persistent_accounts/holdings/transactions [one world-scoped persistent economy, exactly-once starting cash], persistent_accounts.debt + persistent_loans [bot-only interest-free loan ledger, debt persistence], persistent_bot_ticks [world-scoped bot tick identity])');
+        console.log('game schema verification PASSED (apocalypse_cycles [SETTLING lifecycle + settlement observability], coins.cycle_baseline_price, canonical coin catalogue [migrations 013 + 014 retirement], coin_collapse_schedule [legacy], apocalypse_coin_collapses [dynamic death record], apocalypse_participants, apocalypse_holdings, apocalypse_transactions, users.is_bot, apocalypse_bots, apocalypse_bot_ticks, apocalypse_cash_events, apocalypse_economy_ticks, apocalypse_economy_events, apocalypse_results [immutable], apocalypse_coin_events [0-5 active cap], apocalypse_market_phases [one primary phase], apocalypse_market_state [one row per cycle, monotonic peak], market_price_checkpoints [per-coin resumable pricing accumulator, exact float8/bigint round-trip], market_worlds [single active persistent world], market_coin_state [bidirectional condition, decaying reference, explicit timestamped death], market_director_state [one Director cursor per world, bounded intensity], persistent_accounts/holdings/transactions [one world-scoped persistent economy, exactly-once starting cash], persistent_accounts.debt + persistent_loans [bot-only interest-free loan ledger, debt persistence], persistent_bot_ticks [world-scoped bot tick identity], persistent_coin_events [persistent-world coin-event authority, per-world/per-coin sequence identity, 0-5 active cap], director_control_state [Director short-term control cursor, Golden/Demon distinct])');
         await db.end();
         return;
       }
