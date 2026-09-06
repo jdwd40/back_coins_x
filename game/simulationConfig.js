@@ -53,6 +53,18 @@ const NEGATIVE_MARKET_PHASE_IDS = Object.freeze(['BEAR', 'BUST', 'RECESSION']);
 // (GROWTH -> PLATEAU -> DECLINE -> COLLAPSE; never backwards).
 const LIFECYCLE_STATE_IDS = Object.freeze(['GROWTH', 'PLATEAU', 'DECLINE', 'COLLAPSE']);
 
+// Coin-event directions (shared by the cycle-scoped and persistent event
+// authorities).
+const COIN_EVENT_DIRECTION_IDS = Object.freeze(['POSITIVE', 'NEGATIVE']);
+
+// Persistent-world coin-event sources (Director Coin Events Wave 1): NORMAL
+// market events, Director GOLDEN/DEMON assignments, RESCUE interventions
+// and DIRECTOR broad swings share the one persistent authority.
+const PERSISTENT_EVENT_SOURCE_IDS = Object.freeze(['NORMAL', 'GOLDEN', 'DEMON', 'RESCUE', 'DIRECTOR']);
+
+// Director short-term intervention modes (Director Coin Events Wave 1).
+const DIRECTOR_CONTROL_MODE_IDS = Object.freeze(['NORMAL', 'BOOM', 'BUST', 'RESCUE']);
+
 // Dynamic collapse risk input weights (gameplay_changes.md §20 /
 // gameplay_build_plan.md Stage 10). Exact key set.
 const COLLAPSE_INPUT_IDS = Object.freeze([
@@ -458,6 +470,52 @@ const DEFAULT_SIMULATION_CONFIG = {
       BUST: { GOLDEN_AGE: 0.05, BOOM: 0.10, BULL: 0.25, BEAR: 0.30, BUST: 0, RECESSION: 0.30 },
       RECESSION: { GOLDEN_AGE: 0.05, BOOM: 0.15, BULL: 0.30, BEAR: 0.30, BUST: 0.15, RECESSION: 0.05 }
     }
+  },
+
+  // Director Coin Events Wave 1: persistent-world coin-event safety bounds.
+  // These bound the persistent_coin_events authority (migration 029) and the
+  // eventual Director-driven event decisions — they are validated tunable
+  // placeholders, NOT wired into live pricing or automatic generation yet.
+  persistentEvents: {
+    // 1 to 15 minutes (the documented event-duration safety band).
+    durationMs: { min: 1 * MINUTE_MS, max: 15 * MINUTE_MS },
+    // Up to 5 active events per live coin simultaneously.
+    maxActivePerCoin: 5,
+    // Bounded signed individual modifier (fraction of price; sign carried
+    // by the event direction).
+    maxIndividualModifier: 0.05,
+    // Bounded signed net stack modifier across all simultaneously active
+    // events of one coin.
+    maxNetModifier: 0.06,
+    // Max positive/negative active event counts per coin (each below the
+    // total cap, so one direction can never flood a coin's active set).
+    maxActivePositivePerCoin: 4,
+    maxActiveNegativePerCoin: 4
+  },
+
+  // Director Coin Events Wave 1: Director short-term runtime/control
+  // placeholders (director_control_state, migration 029). Separated from
+  // the deterministic six-regime `director` section: these bound the
+  // NORMAL/BOOM/BUST/RESCUE intervention runtime, not the regime chain.
+  // Validated placeholders only — no Director decisions run yet.
+  directorControl: {
+    // One Director decision tick per minute.
+    cadenceMs: 1 * MINUTE_MS,
+    // BOOM/BUST/RESCUE intervention durations (each spans at least one
+    // decision tick).
+    interventionDurationMs: { min: 2 * MINUTE_MS, max: 10 * MINUTE_MS },
+    // The NORMAL-mode broad market swing target: roughly 8-14 minutes.
+    normalSwingTargetMs: { min: 8 * MINUTE_MS, max: 14 * MINUTE_MS },
+    // Golden/Demon assignment durations.
+    goldenDurationMs: { min: 10 * MINUTE_MS, max: 30 * MINUTE_MS },
+    demonDurationMs: { min: 10 * MINUTE_MS, max: 30 * MINUTE_MS },
+    // Stagnation detection: the market is stagnant when no movement of at
+    // least stagnationThresholdPct occurs within stagnationWindowMs.
+    stagnationWindowMs: 60 * MINUTE_MS,
+    stagnationThresholdPct: 0.02,
+    // Safety window after a recent persistent coin death during which the
+    // Director must not target the freshly replaced coin.
+    recentDeathSafetyMs: 30 * MINUTE_MS
   }
 };
 
@@ -993,6 +1051,87 @@ function validateDirector(name, director) {
   }
 }
 
+// Director Coin Events Wave 1: persistent-world coin-event safety bounds.
+function validatePersistentEvents(name, persistentEvents) {
+  requireExactKeys(name, persistentEvents, [
+    'durationMs', 'maxActivePerCoin', 'maxIndividualModifier', 'maxNetModifier',
+    'maxActivePositivePerCoin', 'maxActiveNegativePerCoin'
+  ]);
+
+  const duration = requireRange(`${name}.durationMs`, persistentEvents.durationMs);
+  requirePositiveInteger(`${name}.durationMs.min`, duration.min);
+  requirePositiveInteger(`${name}.durationMs.max`, duration.max);
+  // The documented safety band: 1-15 minute event durations.
+  if (duration.min < MINUTE_MS) {
+    failConfig(`${name}.durationMs.min must be at least 1 minute; received ${duration.min}`);
+  }
+  if (duration.max > 15 * MINUTE_MS) {
+    failConfig(`${name}.durationMs.max must not exceed 15 minutes; received ${duration.max}`);
+  }
+
+  requirePositiveInteger(`${name}.maxActivePerCoin`, persistentEvents.maxActivePerCoin);
+
+  requireFiniteNumber(`${name}.maxIndividualModifier`, persistentEvents.maxIndividualModifier);
+  if (persistentEvents.maxIndividualModifier <= 0 || persistentEvents.maxIndividualModifier >= 1) {
+    failConfig(`${name}.maxIndividualModifier must be a fraction in (0, 1); received ${persistentEvents.maxIndividualModifier}`);
+  }
+  requireFiniteNumber(`${name}.maxNetModifier`, persistentEvents.maxNetModifier);
+  if (persistentEvents.maxNetModifier <= 0 || persistentEvents.maxNetModifier >= 1) {
+    failConfig(`${name}.maxNetModifier must be a fraction in (0, 1); received ${persistentEvents.maxNetModifier}`);
+  }
+  // A net cap below the individual bound would make a single maximal event
+  // unreachable — an impossible configuration, not something to clip.
+  if (persistentEvents.maxNetModifier < persistentEvents.maxIndividualModifier) {
+    failConfig(`${name}.maxNetModifier ${persistentEvents.maxNetModifier} is below maxIndividualModifier ${persistentEvents.maxIndividualModifier}`);
+  }
+
+  // Per-direction active counts: at least one of each direction must be
+  // possible, and neither direction cap may exceed the total cap.
+  for (const key of ['maxActivePositivePerCoin', 'maxActiveNegativePerCoin']) {
+    requirePositiveInteger(`${name}.${key}`, persistentEvents[key]);
+    if (persistentEvents[key] > persistentEvents.maxActivePerCoin) {
+      failConfig(`${name}.${key} ${persistentEvents[key]} exceeds maxActivePerCoin ${persistentEvents.maxActivePerCoin}`);
+    }
+  }
+}
+
+// Director Coin Events Wave 1: Director short-term control placeholders.
+function validateDirectorControl(name, directorControl) {
+  requireExactKeys(name, directorControl, [
+    'cadenceMs', 'interventionDurationMs', 'normalSwingTargetMs',
+    'goldenDurationMs', 'demonDurationMs', 'stagnationWindowMs',
+    'stagnationThresholdPct', 'recentDeathSafetyMs'
+  ]);
+
+  requirePositiveInteger(`${name}.cadenceMs`, directorControl.cadenceMs);
+
+  const intervention = requireRange(`${name}.interventionDurationMs`, directorControl.interventionDurationMs);
+  requirePositiveInteger(`${name}.interventionDurationMs.min`, intervention.min);
+  requirePositiveInteger(`${name}.interventionDurationMs.max`, intervention.max);
+  // An intervention must span at least one decision tick.
+  if (intervention.min < directorControl.cadenceMs) {
+    failConfig(`${name}.interventionDurationMs.min ${intervention.min} is below the Director cadenceMs ${directorControl.cadenceMs}`);
+  }
+
+  for (const key of ['normalSwingTargetMs', 'goldenDurationMs', 'demonDurationMs']) {
+    const range = requireRange(`${name}.${key}`, directorControl[key]);
+    requirePositiveInteger(`${name}.${key}.min`, range.min);
+    requirePositiveInteger(`${name}.${key}.max`, range.max);
+  }
+
+  requirePositiveInteger(`${name}.stagnationWindowMs`, directorControl.stagnationWindowMs);
+
+  requireFiniteNumber(`${name}.stagnationThresholdPct`, directorControl.stagnationThresholdPct);
+  if (directorControl.stagnationThresholdPct <= 0 || directorControl.stagnationThresholdPct >= 1) {
+    failConfig(`${name}.stagnationThresholdPct must be a fraction in (0, 1); received ${directorControl.stagnationThresholdPct}`);
+  }
+
+  requireFiniteNumber(`${name}.recentDeathSafetyMs`, directorControl.recentDeathSafetyMs);
+  if (!Number.isInteger(directorControl.recentDeathSafetyMs) || directorControl.recentDeathSafetyMs < 0) {
+    failConfig(`${name}.recentDeathSafetyMs must be a non-negative integer; received ${directorControl.recentDeathSafetyMs}`);
+  }
+}
+
 // Validate a COMPLETE simulation config: every section and every leaf must
 // be present with exactly the expected keys, and every value must pass its
 // range/probability/cap/ordering rules. Throws on the first problem.
@@ -1001,7 +1140,8 @@ function validateSimulationConfig(config) {
     failConfig(`config must be an object; received ${Array.isArray(config) ? 'array' : typeof config}`);
   }
   requireExactKeys('config', config, [
-    'coinEvents', 'marketPhases', 'lifecycle', 'crashRally', 'tradingPressure', 'dynamicCollapse', 'persistent', 'director'
+    'coinEvents', 'marketPhases', 'lifecycle', 'crashRally', 'tradingPressure', 'dynamicCollapse', 'persistent', 'director',
+    'persistentEvents', 'directorControl'
   ]);
   validateCoinEvents('coinEvents', config.coinEvents);
   validateMarketPhases('marketPhases', config.marketPhases);
@@ -1011,6 +1151,8 @@ function validateSimulationConfig(config) {
   validateDynamicCollapse('dynamicCollapse', config.dynamicCollapse);
   validatePersistent('persistent', config.persistent);
   validateDirector('director', config.director);
+  validatePersistentEvents('persistentEvents', config.persistentEvents);
+  validateDirectorControl('directorControl', config.directorControl);
   return config;
 }
 
@@ -1078,6 +1220,9 @@ module.exports = {
   POSITIVE_MARKET_PHASE_IDS,
   NEGATIVE_MARKET_PHASE_IDS,
   LIFECYCLE_STATE_IDS,
+  COIN_EVENT_DIRECTION_IDS,
+  PERSISTENT_EVENT_SOURCE_IDS,
+  DIRECTOR_CONTROL_MODE_IDS,
   COLLAPSE_INPUT_IDS,
   DEFAULT_SIMULATION_CONFIG,
   validateSimulationConfig,

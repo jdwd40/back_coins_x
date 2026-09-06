@@ -21,6 +21,7 @@ const MIGRATION_025 = '025_create_market_director_state.sql';
 const MIGRATION_026 = '026_create_persistent_economy.sql';
 const MIGRATION_027 = '027_create_persistent_bot_debt.sql';
 const MIGRATION_028 = '028_create_persistent_bot_ticks.sql';
+const MIGRATION_029 = '029_create_persistent_coin_events.sql';
 const WORLD_SEED = 'stage2-world-seed';
 
 async function provisionedWorld() {
@@ -63,7 +64,10 @@ describe('Stage 2: tracked production migration 024', () => {
     // schema — every dependent FK included — is restored before the full
     // verifier assertion. The verifier and every FK stay intact; only the
     // fixture changes. (Any future world-dependent migration must extend
-    // this replay chain.)
+    // this replay chain; Director Coin Events Wave 1's 029 tables depend on
+    // market_worlds, so they are part of it.)
+    await db.query('DROP TABLE IF EXISTS persistent_coin_events CASCADE');
+    await db.query('DROP TABLE IF EXISTS director_control_state CASCADE');
     await db.query('DROP TABLE IF EXISTS persistent_bot_ticks CASCADE');
     await db.query('DROP TABLE IF EXISTS persistent_loans CASCADE');
     await db.query('DROP TABLE IF EXISTS persistent_transactions CASCADE');
@@ -72,16 +76,19 @@ describe('Stage 2: tracked production migration 024', () => {
     await db.query('DROP TABLE IF EXISTS market_director_state CASCADE');
     await db.query('DROP TABLE IF EXISTS market_coin_state CASCADE');
     await db.query('DROP TABLE IF EXISTS market_worlds CASCADE');
-    await db.query('DELETE FROM schema_migrations WHERE migration = ANY($1)', [[MIGRATION_024, MIGRATION_025, MIGRATION_026, MIGRATION_027, MIGRATION_028]]);
+    await db.query('DELETE FROM schema_migrations WHERE migration = ANY($1)', [[MIGRATION_024, MIGRATION_025, MIGRATION_026, MIGRATION_027, MIGRATION_028, MIGRATION_029]]);
     const result = await runMigrations({ log: () => {} });
     expect(result.applied).toContain(MIGRATION_024);
     expect(result.applied).toContain(MIGRATION_025);
     expect(result.applied).toContain(MIGRATION_026);
     expect(result.applied).toContain(MIGRATION_027);
     expect(result.applied).toContain(MIGRATION_028);
+    expect(result.applied).toContain(MIGRATION_029);
     // The dependent Director + economy schema is restored by replay.
     expect((await db.query(`SELECT to_regclass('public.market_director_state') AS r`)).rows[0].r).not.toBeNull();
     expect((await db.query(`SELECT to_regclass('public.persistent_accounts') AS r`)).rows[0].r).not.toBeNull();
+    expect((await db.query(`SELECT to_regclass('public.persistent_coin_events') AS r`)).rows[0].r).not.toBeNull();
+    expect((await db.query(`SELECT to_regclass('public.director_control_state') AS r`)).rows[0].r).not.toBeNull();
 
     const verification = await verifyGameSchema();
     expect(verification.problems).toEqual([]);

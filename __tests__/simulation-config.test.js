@@ -36,13 +36,16 @@ describe('simulation config defaults', () => {
     expect(resolveSimulationConfig(null)).toBe(DEFAULT_SIMULATION_CONFIG);
   });
 
-  test('top-level shape is exactly the eight sections', () => {
+  test('top-level shape is exactly the ten sections', () => {
     // Persistent-market Stage 2 added the `persistent` section (the
     // persistent-safe pricing coefficients, master plan §21-27); Stage 3
     // added the `director` section (the Market Director, master plan §8).
+    // Director Coin Events Wave 1 added `persistentEvents` (the persistent
+    // coin-event safety bounds) and `directorControl` (the Director
+    // short-term intervention control placeholders).
     expect(Object.keys(DEFAULT_SIMULATION_CONFIG).sort()).toEqual([
-      'coinEvents', 'crashRally', 'director', 'dynamicCollapse', 'lifecycle',
-      'marketPhases', 'persistent', 'tradingPressure'
+      'coinEvents', 'crashRally', 'director', 'directorControl', 'dynamicCollapse',
+      'lifecycle', 'marketPhases', 'persistent', 'persistentEvents', 'tradingPressure'
     ]);
   });
 
@@ -418,5 +421,129 @@ describe('simulation config persistent death (Stage 9 S9-01)', () => {
     });
     expect(resolved.persistent.death.riskThreshold).toBe(7.25);
     expect(Object.isFrozen(resolved.persistent.death)).toBe(true);
+  });
+});
+
+describe('simulation config persistent coin events (Director Coin Events Wave 1)', () => {
+  test('persistentEvents defaults carry the documented safety bounds', () => {
+    const { persistentEvents } = DEFAULT_SIMULATION_CONFIG;
+    // 1-15 minute event durations.
+    expect(persistentEvents.durationMs).toEqual({ min: 60 * 1000, max: 15 * 60 * 1000 });
+    // Max 5 active events per live coin.
+    expect(persistentEvents.maxActivePerCoin).toBe(5);
+    // Bounded signed individual / net stack modifiers.
+    expect(persistentEvents.maxIndividualModifier).toBe(0.05);
+    expect(persistentEvents.maxNetModifier).toBe(0.06);
+    // Max positive/negative active event counts per coin.
+    expect(persistentEvents.maxActivePositivePerCoin).toBe(4);
+    expect(persistentEvents.maxActiveNegativePerCoin).toBe(4);
+  });
+
+  test('rejects durations outside the 1-15 minute safety band', () => {
+    const tooShort = freshConfig();
+    tooShort.persistentEvents.durationMs = { min: 30 * 1000, max: 15 * 60 * 1000 };
+    expect(() => validateSimulationConfig(tooShort)).toThrow(/1 minute/);
+
+    const tooLong = freshConfig();
+    tooLong.persistentEvents.durationMs = { min: 60 * 1000, max: 20 * 60 * 1000 };
+    expect(() => validateSimulationConfig(tooLong)).toThrow(/15 minutes/);
+
+    const inverted = freshConfig();
+    inverted.persistentEvents.durationMs = { min: 15 * 60 * 1000, max: 60 * 1000 };
+    expect(() => validateSimulationConfig(inverted)).toThrow(/min < max/);
+  });
+
+  test('rejects illegal active caps and modifier bounds', () => {
+    const zeroCap = freshConfig();
+    zeroCap.persistentEvents.maxActivePerCoin = 0;
+    expect(() => validateSimulationConfig(zeroCap)).toThrow(/maxActivePerCoin/);
+
+    const directionCapAboveTotal = freshConfig();
+    directionCapAboveTotal.persistentEvents.maxActivePositivePerCoin = 6;
+    expect(() => validateSimulationConfig(directionCapAboveTotal)).toThrow(/maxActivePositivePerCoin/);
+
+    const zeroDirectionCap = freshConfig();
+    zeroDirectionCap.persistentEvents.maxActiveNegativePerCoin = 0;
+    expect(() => validateSimulationConfig(zeroDirectionCap)).toThrow(/maxActiveNegativePerCoin/);
+
+    const hugeIndividual = freshConfig();
+    hugeIndividual.persistentEvents.maxIndividualModifier = 1;
+    expect(() => validateSimulationConfig(hugeIndividual)).toThrow(/maxIndividualModifier/);
+
+    const netBelowIndividual = freshConfig();
+    netBelowIndividual.persistentEvents.maxIndividualModifier = 0.07;
+    netBelowIndividual.persistentEvents.maxNetModifier = 0.06;
+    expect(() => validateSimulationConfig(netBelowIndividual)).toThrow(/maxNetModifier/);
+  });
+});
+
+describe('simulation config Director control (Director Coin Events Wave 1)', () => {
+  test('directorControl defaults carry the documented placeholder bounds', () => {
+    const { directorControl } = DEFAULT_SIMULATION_CONFIG;
+    expect(directorControl.cadenceMs).toBe(60 * 1000);
+    expect(directorControl.interventionDurationMs).toEqual({ min: 2 * 60 * 1000, max: 10 * 60 * 1000 });
+    // Normal broad-swing target: roughly 8-14 minutes.
+    expect(directorControl.normalSwingTargetMs).toEqual({ min: 8 * 60 * 1000, max: 14 * 60 * 1000 });
+    expect(directorControl.goldenDurationMs).toEqual({ min: 10 * 60 * 1000, max: 30 * 60 * 1000 });
+    expect(directorControl.demonDurationMs).toEqual({ min: 10 * 60 * 1000, max: 30 * 60 * 1000 });
+    expect(directorControl.stagnationWindowMs).toBe(60 * 60 * 1000);
+    expect(directorControl.stagnationThresholdPct).toBe(0.02);
+    expect(directorControl.recentDeathSafetyMs).toBe(30 * 60 * 1000);
+  });
+
+  test('rejects an illegal cadence, intervention and swing-target shape', () => {
+    const zeroCadence = freshConfig();
+    zeroCadence.directorControl.cadenceMs = 0;
+    expect(() => validateSimulationConfig(zeroCadence)).toThrow(/cadenceMs/);
+
+    const fractionalCadence = freshConfig();
+    fractionalCadence.directorControl.cadenceMs = 1500.5;
+    expect(() => validateSimulationConfig(fractionalCadence)).toThrow(/cadenceMs/);
+
+    // An intervention shorter than one decision tick is impossible.
+    const shortIntervention = freshConfig();
+    shortIntervention.directorControl.interventionDurationMs = { min: 30 * 1000, max: 10 * 60 * 1000 };
+    expect(() => validateSimulationConfig(shortIntervention)).toThrow(/interventionDurationMs/);
+
+    const invertedSwing = freshConfig();
+    invertedSwing.directorControl.normalSwingTargetMs = { min: 14 * 60 * 1000, max: 8 * 60 * 1000 };
+    expect(() => validateSimulationConfig(invertedSwing)).toThrow(/min < max/);
+  });
+
+  test('rejects illegal golden/demon durations and stagnation/death-safety bounds', () => {
+    const invertedGolden = freshConfig();
+    invertedGolden.directorControl.goldenDurationMs = { min: 30 * 60 * 1000, max: 10 * 60 * 1000 };
+    expect(() => validateSimulationConfig(invertedGolden)).toThrow(/min < max/);
+
+    const fractionalDemon = freshConfig();
+    fractionalDemon.directorControl.demonDurationMs = { min: 60000.5, max: 30 * 60 * 1000 };
+    expect(() => validateSimulationConfig(fractionalDemon)).toThrow(/positive integer/);
+
+    const zeroThreshold = freshConfig();
+    zeroThreshold.directorControl.stagnationThresholdPct = 0;
+    expect(() => validateSimulationConfig(zeroThreshold)).toThrow(/stagnationThresholdPct/);
+
+    const fullThreshold = freshConfig();
+    fullThreshold.directorControl.stagnationThresholdPct = 1;
+    expect(() => validateSimulationConfig(fullThreshold)).toThrow(/stagnationThresholdPct/);
+
+    const negativeSafety = freshConfig();
+    negativeSafety.directorControl.recentDeathSafetyMs = -1;
+    expect(() => validateSimulationConfig(negativeSafety)).toThrow(/recentDeathSafetyMs/);
+  });
+
+  test('Wave 1 overrides merge and freeze', () => {
+    const resolved = resolveSimulationConfig({
+      persistentEvents: { maxActivePerCoin: 4, maxActivePositivePerCoin: 3 },
+      directorControl: { cadenceMs: 30 * 1000, interventionDurationMs: { min: 60 * 1000, max: 5 * 60 * 1000 } }
+    });
+    expect(resolved.persistentEvents.maxActivePerCoin).toBe(4);
+    expect(resolved.persistentEvents.maxActivePositivePerCoin).toBe(3);
+    expect(resolved.directorControl.cadenceMs).toBe(30 * 1000);
+    expect(Object.isFrozen(resolved.persistentEvents)).toBe(true);
+    expect(Object.isFrozen(resolved.directorControl)).toBe(true);
+    // Untouched leaves keep the defaults.
+    expect(resolved.persistentEvents.maxNetModifier).toBe(0.06);
+    expect(resolved.directorControl.normalSwingTargetMs).toEqual({ min: 8 * 60 * 1000, max: 14 * 60 * 1000 });
   });
 });
