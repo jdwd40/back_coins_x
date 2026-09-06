@@ -153,10 +153,12 @@ function rowToControlState(row) {
   });
 }
 
-// Load the world's Director control state (null when none is committed yet).
-// Runs on the caller's client so it can participate in a surrounding
-// transaction.
-async function loadDirectorControlState(client, worldId) {
+// Internal locked read for the transactional upsert ONLY: the world's
+// Director control state under a FOR UPDATE row lock on the caller's
+// client. Ordinary reads MUST NOT use this — see loadDirectorControlState
+// below for the lock-free path. Validation on read stays: a corrupt
+// committed row fails loudly even inside the mutation.
+async function loadDirectorControlStateForUpdate(client, worldId) {
   const { rows } = await client.query(
     `SELECT world_id, mode, direction, intensity, started_at, ends_at,
             decision_index, reason,
@@ -165,6 +167,29 @@ async function loadDirectorControlState(client, worldId) {
        FROM director_control_state
       WHERE world_id = $1
       FOR UPDATE`,
+    [worldId]
+  );
+  return rows.length === 0 ? null : rowToControlState(rows[0]);
+}
+
+// Ordinary validated read: load the world's Director control state (null
+// when none is committed yet). This is a plain SELECT — it NEVER takes a
+// write lock (no FOR UPDATE), so it neither blocks behind nor contends
+// with a writer holding the state row. The row is validated on read: a
+// corrupt committed row fails loudly instead of silently driving decisions.
+// Runs on any queryable (pool or client), so it can participate in a
+// surrounding read transaction.
+async function loadDirectorControlState(queryable, worldId) {
+  if (!Number.isInteger(Number(worldId)) || Number(worldId) <= 0) {
+    throw new Error(`director control state worldId must be a positive integer; received ${String(worldId)}`);
+  }
+  const { rows } = await queryable.query(
+    `SELECT world_id, mode, direction, intensity, started_at, ends_at,
+            decision_index, reason,
+            golden_coin_id, golden_expires_at, demon_coin_id, demon_expires_at,
+            last_swing_direction, last_meaningful_movement_at
+       FROM director_control_state
+      WHERE world_id = $1`,
     [worldId]
   );
   return rows.length === 0 ? null : rowToControlState(rows[0]);
@@ -196,8 +221,32 @@ async function loadDirectorControlState(client, worldId) {
 // FK stays the authority; a missing world fails loudly here, before any
 // state write is attempted. Lock order is fixed: market_worlds, then
 // director_control_state — nothing else locks either row.
-async function upsertDirectorControlState(client, state) {
+//
+// Transaction ownership (mirroring models/persistentCoinEvents.model.js):
+// when handed anything exposing getClient (the connection pool/wrapper),
+// this function acquires ONE client, runs the complete locked
+// read/check/write in its own BEGIN/COMMIT transaction, rolls back on any
+// error and releases in finally. When handed an already-acquired client,
+// it participates in the caller's existing transaction and issues NO
+// nested BEGIN/COMMIT — the caller owns that transaction (and MUST hold
+// it open for the row locks to span the check and the write).
+async function upsertDirectorControlState(queryable, state) {
   assertDirectorControlState(state);
+  if (typeof queryable.getClient === 'function') {
+    const owned = await queryable.getClient();
+    try {
+      await owned.query('BEGIN');
+      await upsertDirectorControlState(owned, state);
+      await owned.query('COMMIT');
+      return;
+    } catch (error) {
+      await owned.query('ROLLBACK').catch(() => {});
+      throw error;
+    } finally {
+      owned.release();
+    }
+  }
+  const client = queryable;
   const { rows: worldRows } = await client.query(
     'SELECT world_id FROM market_worlds WHERE world_id = $1 FOR UPDATE',
     [state.worldId]
@@ -205,24 +254,14 @@ async function upsertDirectorControlState(client, state) {
   if (worldRows.length === 0) {
     throw new Error(`director control state worldId ${state.worldId} does not reference a provisioned market world; refusing to write control state for a missing world`);
   }
-  const { rows: existing } = await client.query(
-    `SELECT world_id, mode, direction, intensity, started_at, ends_at,
-            decision_index, reason,
-            golden_coin_id, golden_expires_at, demon_coin_id, demon_expires_at,
-            last_swing_direction, last_meaningful_movement_at
-       FROM director_control_state
-      WHERE world_id = $1
-      FOR UPDATE`,
-    [state.worldId]
-  );
-  if (existing.length > 0) {
-    const committed = Number(existing[0].decision_index);
+  const existing = await loadDirectorControlStateForUpdate(client, state.worldId);
+  if (existing !== null) {
+    const committed = existing.decisionIndex;
     if (state.decisionIndex < committed) {
       throw new Error(`director control state decisionIndex ${state.decisionIndex} is stale: the committed cursor is already at ${committed}; refusing to rewind`);
     }
     if (state.decisionIndex === committed) {
-      const current = rowToControlState(existing[0]);
-      if (sameControlPayload(current, state)) {
+      if (sameControlPayload(existing, state)) {
         return; // identical replay: no-op
       }
       throw new Error(`director control state decisionIndex ${state.decisionIndex} conflicts with the committed decision at that index; refusing to rewrite a committed decision`);
