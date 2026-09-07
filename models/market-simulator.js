@@ -67,6 +67,10 @@ const directorStateModel = require('./marketDirectorState.model');
 const { resolveSimulationConfig } = require('../game/simulationConfig');
 const persistentCoinDeath = require('../game/persistentCoinDeath');
 
+
+// Persistent provenance: only world-scoped writer ticks.
+const PERSISTENT_PH = "source = 'MARKET_TICK' AND cycle_id IS NULL";
+
 // Time range options for price history
 const TIME_RANGES = {
   '10M': 10 * 60 * 1000,        // 10 minutes in ms
@@ -363,6 +367,7 @@ class MarketSimulator {
         const windowOpenRows = await client.query(
           `SELECT price FROM price_history
             WHERE coin_id = $1 AND created_at >= $2 AND price > 0
+              AND ${PERSISTENT_PH}
             ORDER BY created_at ASC LIMIT 1`,
           [coin.coin_id, new Date(batchNowMs - windowMs).toISOString()]
         );
@@ -483,6 +488,7 @@ class MarketSimulator {
         const lookbackRows = await client.query(
           `SELECT price FROM price_history
             WHERE coin_id = $1 AND created_at <= $2 AND price > 0
+              AND ${PERSISTENT_PH}
             ORDER BY created_at DESC LIMIT 1`,
           [coin.coin_id, new Date(batchNowMs - marketDomain.PUBLIC_SIGNAL_LOOKBACK_MS).toISOString()]
         );

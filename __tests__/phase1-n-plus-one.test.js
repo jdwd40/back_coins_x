@@ -38,11 +38,11 @@ describe('Phase 1: N+1 Query Fix', () => {
       for (const coin of coins.rows) {
         // Add some price history
         await originalQuery(`
-          INSERT INTO price_history (coin_id, price, created_at)
+          INSERT INTO price_history (coin_id, price, created_at, source, cycle_id)
           VALUES 
-            ($1, 100.00, NOW() - INTERVAL '25 hours'),
-            ($1, 105.00, NOW() - INTERVAL '12 hours'),
-            ($1, 110.00, NOW() - INTERVAL '1 hour')
+            ($1, 100.00, NOW() - INTERVAL '25 hours', 'MARKET_TICK', NULL),
+            ($1, 105.00, NOW() - INTERVAL '12 hours', 'MARKET_TICK', NULL),
+            ($1, 110.00, NOW() - INTERVAL '1 hour', 'MARKET_TICK', NULL)
         `, [coin.coin_id]);
       }
 
@@ -78,10 +78,10 @@ describe('Phase 1: N+1 Query Fix', () => {
 
       // Insert known price history
       await originalQuery(`
-        INSERT INTO price_history (coin_id, price, created_at)
+        INSERT INTO price_history (coin_id, price, created_at, source, cycle_id)
         VALUES 
-          ($1, 100.00, NOW() - INTERVAL '25 hours'),
-          ($1, 120.00, NOW() - INTERVAL '1 hour')
+          ($1, 100.00, NOW() - INTERVAL '25 hours', 'MARKET_TICK', NULL),
+          ($1, 120.00, NOW() - INTERVAL '1 hour', 'MARKET_TICK', NULL)
       `, [testCoinId]);
 
       // Call selectAllCoins
@@ -129,10 +129,10 @@ describe('Phase 1: N+1 Query Fix', () => {
 
       // Insert only recent prices (no 24h old data)
       await originalQuery(`
-        INSERT INTO price_history (coin_id, price, created_at)
+        INSERT INTO price_history (coin_id, price, created_at, source, cycle_id)
         VALUES 
-          ($1, 100.00, NOW() - INTERVAL '2 hours'),
-          ($1, 105.00, NOW() - INTERVAL '1 hour')
+          ($1, 100.00, NOW() - INTERVAL '2 hours', 'MARKET_TICK', NULL),
+          ($1, 105.00, NOW() - INTERVAL '1 hour', 'MARKET_TICK', NULL)
       `, [testCoinId]);
 
       // Call selectAllCoins
@@ -186,10 +186,10 @@ describe('Phase 1: N+1 Query Fix', () => {
 
       // Add price history
       await db.query(`
-        INSERT INTO price_history (coin_id, price, created_at)
+        INSERT INTO price_history (coin_id, price, created_at, source, cycle_id)
         VALUES 
-          ($1, 100.00, NOW() - INTERVAL '25 hours'),
-          ($1, 110.00, NOW() - INTERVAL '1 hour')
+          ($1, 100.00, NOW() - INTERVAL '25 hours', 'MARKET_TICK', NULL),
+          ($1, 110.00, NOW() - INTERVAL '1 hour', 'MARKET_TICK', NULL)
       `, [testCoinId]);
 
       // Count queries

@@ -70,7 +70,7 @@ describe('Price History Redesign (v1 contract)', () => {
       ];
       for (const [cid, pr, ts] of inserts) {
         await db.query(
-          'INSERT INTO price_history (coin_id, price, created_at) VALUES ($1, $2, $3)',
+          `INSERT INTO price_history (coin_id, price, created_at, source, cycle_id) VALUES ($1, $2, $3, 'MARKET_TICK', NULL)`,
           [cid, pr, ts]
         );
       }
@@ -107,7 +107,7 @@ describe('Price History Redesign (v1 contract)', () => {
 
       await db.query('DELETE FROM price_history WHERE coin_id = $1', [coin.coin_id]);
       await db.query(
-        'INSERT INTO price_history (coin_id, price, created_at) VALUES ($1, $2, NOW() - INTERVAL \'30 seconds\')',
+        `INSERT INTO price_history (coin_id, price, created_at, source, cycle_id) VALUES ($1, $2, NOW() - INTERVAL '30 seconds', 'MARKET_TICK', NULL)`,
         [coin.coin_id, 101.25]
       );
 
@@ -142,8 +142,8 @@ describe('Price History Redesign (v1 contract)', () => {
 
         await db.query('DELETE FROM price_history WHERE coin_id = $1', [coin.coin_id]);
         await db.query(
-          `INSERT INTO price_history (coin_id, price, created_at)
-           VALUES ($1, $2, $3), ($1, $4, $5)`,
+          `INSERT INTO price_history (coin_id, price, created_at, source, cycle_id)
+           VALUES ($1, $2, $3, 'MARKET_TICK', NULL), ($1, $4, $5, 'MARKET_TICK', NULL)`,
           [coin.coin_id, 100.00, completedBucketTime, 101.00, currentBucketTime]
         );
 
@@ -254,7 +254,7 @@ describe('Price History Redesign (v1 contract)', () => {
       // case a: span < 2d -> 15m
       await db.query('DELETE FROM price_history WHERE coin_id = $1', [coin.coin_id]);
       await db.query(
-        'INSERT INTO price_history (coin_id, price, created_at) VALUES ($1, 100, $2), ($1, 101, $3)',
+        `INSERT INTO price_history (coin_id, price, created_at, source, cycle_id) VALUES ($1, 100, $2, 'MARKET_TICK', NULL), ($1, 101, $3, 'MARKET_TICK', NULL)`,
         [coin.coin_id, new Date(now - 12 * 3600 * 1000), new Date(now - 1 * 3600 * 1000)]
       );
       let res = await request(app).get(`/api/coins/${coin.coin_id}/price-history?range=ALL`).expect(200);
@@ -263,7 +263,7 @@ describe('Price History Redesign (v1 contract)', () => {
       // case b: 2-7d span -> 1h
       await db.query('DELETE FROM price_history WHERE coin_id = $1', [coin.coin_id]);
       await db.query(
-        'INSERT INTO price_history (coin_id, price, created_at) VALUES ($1, 100, $2), ($1, 101, $3)',
+        `INSERT INTO price_history (coin_id, price, created_at, source, cycle_id) VALUES ($1, 100, $2, 'MARKET_TICK', NULL), ($1, 101, $3, 'MARKET_TICK', NULL)`,
         [coin.coin_id, new Date(now - 5 * 24 * 3600 * 1000), new Date(now - 1 * 3600 * 1000)]
       );
       res = await request(app).get(`/api/coins/${coin.coin_id}/price-history?range=ALL`).expect(200);
@@ -272,7 +272,7 @@ describe('Price History Redesign (v1 contract)', () => {
       // case c: 7-31d span -> 6h
       await db.query('DELETE FROM price_history WHERE coin_id = $1', [coin.coin_id]);
       await db.query(
-        'INSERT INTO price_history (coin_id, price, created_at) VALUES ($1, 100, $2), ($1, 101, $3)',
+        `INSERT INTO price_history (coin_id, price, created_at, source, cycle_id) VALUES ($1, 100, $2, 'MARKET_TICK', NULL), ($1, 101, $3, 'MARKET_TICK', NULL)`,
         [coin.coin_id, new Date(now - 10 * 24 * 3600 * 1000), new Date(now - 1 * 3600 * 1000)]
       );
       res = await request(app).get(`/api/coins/${coin.coin_id}/price-history?range=ALL`).expect(200);

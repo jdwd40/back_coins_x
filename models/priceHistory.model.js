@@ -25,6 +25,9 @@ const RANGE_CONFIG = {
 
 const MAX_POINTS_BUDGET = 200;
 
+// Persistent provenance: only world-scoped writer ticks.
+const PERSISTENT_PH = "source = 'MARKET_TICK' AND cycle_id IS NULL";
+
 /**
  * Get price history using query-time bucketing on raw table.
  * Returns the new one-request contract with numeric values, chronological order,
@@ -48,7 +51,7 @@ exports.getPriceHistory = async (coinId, range) => {
   if (isAll) {
     // §2.2 ALL adaptive bucketing (exact)
     const oldestRes = await db.query(
-      'SELECT MIN(created_at) AS oldest FROM price_history WHERE coin_id = $1',
+      `SELECT MIN(created_at) AS oldest FROM price_history WHERE coin_id = $1 AND ${PERSISTENT_PH}`,
       [coinId]
     );
     const oldest = oldestRes.rows[0] ? oldestRes.rows[0].oldest : null;
@@ -112,6 +115,7 @@ exports.getPriceHistory = async (coinId, range) => {
       FROM price_history
       WHERE coin_id = $1
         AND created_at >= $2
+        AND ${PERSISTENT_PH}
       GROUP BY floor(extract(epoch from created_at) / $3)
       ORDER BY time ASC`,
       [coinId, oldest, bucketSeconds]
@@ -138,6 +142,7 @@ exports.getPriceHistory = async (coinId, range) => {
         FROM price_history
         WHERE coin_id = $1
           AND created_at >= NOW() - ($2 || ' milliseconds')::INTERVAL
+          AND ${PERSISTENT_PH}
         ORDER BY created_at ASC`,
         [coinId, lookbackMs]
       );
@@ -155,6 +160,7 @@ exports.getPriceHistory = async (coinId, range) => {
         FROM price_history
         WHERE coin_id = $1
           AND created_at >= NOW() - ($2 || ' milliseconds')::INTERVAL
+          AND ${PERSISTENT_PH}
         GROUP BY floor(extract(epoch from created_at) / $3)
         ORDER BY time ASC`,
         [coinId, lookbackMs, bucketSeconds]
