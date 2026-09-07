@@ -123,7 +123,8 @@ describe('Wave 2 adaptive Director: determinism contract', () => {
     for (const field of [
       'mode', 'direction', 'intensity', 'startedAt', 'endsAt', 'decisionIndex',
       'reason', 'goldenCoinId', 'goldenExpiresAt', 'demonCoinId', 'demonExpiresAt',
-      'lastSwingDirection', 'lastMeaningfulMovementAt', 'lastInterventionEndedAt'
+      'lastSwingDirection', 'lastMeaningfulMovementAt', 'lastInterventionEndedAt',
+      'lastInterventionMode'
     ]) {
       expect(state).toHaveProperty(field);
     }
@@ -726,14 +727,16 @@ describe('Wave 2 adaptive Director: idempotent re-evaluation', () => {
     test('a recent-death cluster remains independently capable of rescue over a mild market', () => {
     const { state } = evaluate({
     controlState: expiredNormal(),
-    observation: mildDeclineObservation(6, 1)
-      && makeObservation({
-        recentDeathCount: CONFIG.directorControl.deathClusterCount,
-        recentDeaths: [
-          { coinId: 40, diedAtMs: BASE_MS - 10 * MINUTE },
-          { coinId: 41, diedAtMs: BASE_MS - 20 * MINUTE }
-        ]
-      })
+    observation: {
+      // A mild-decline market (1/6 falling at -0.6%, shallow drawdown, no
+      // weak/distressed evidence) carrying a recent-death cluster.
+      ...mildDeclineObservation(6, 1),
+      recentDeathCount: CONFIG.directorControl.deathClusterCount,
+      recentDeaths: [
+        { coinId: 40, diedAtMs: BASE_MS - 10 * MINUTE },
+        { coinId: 41, diedAtMs: BASE_MS - 20 * MINUTE }
+      ]
+    }
     });
     expect(state.mode).toBe('RESCUE');
     });
@@ -748,6 +751,70 @@ describe('Wave 2 adaptive Director: idempotent re-evaluation', () => {
     const full = evaluate({ controlState: expiredNormal(), observation: substantialDeclineObservation(10, 10) });
     expect(full.state.mode).toBe('RESCUE');
     expect(full.state.intensity).toBeGreaterThan(small.state.intensity);
+    });
+
+    test('a corroborated 7/10 mild broad fall may rescue, but at modest intensity — not near-max', () => {
+    // The PR #36 wave-2 defect: 7/10 coins down ~0.6% with a 10% drawdown
+    // corroborates the falling breadth, so RESCUE is allowed — but the
+    // breadth component must be weighted by the STRENGTH of its
+    // corroboration, not by raw roster-scaled breadth (which yielded ~0.82).
+    const { state } = evaluate({
+    controlState: expiredNormal(),
+    observation: { ...mildDeclineObservation(10, 7), drawdownPct: 0.1 }
+    });
+    expect(state.mode).toBe('RESCUE');
+    expect(state.direction).toBe('POSITIVE');
+    expect(state.intensity).toBeGreaterThanOrEqual(0.4);
+    expect(state.intensity).toBeLessThan(0.7);
+    });
+
+    test('a substantially corroborated broad fall rescues with stronger intensity than a mildly corroborated one', () => {
+    const mild = evaluate({
+    controlState: expiredNormal(),
+    observation: { ...mildDeclineObservation(10, 7), drawdownPct: 0.1 }
+    });
+    const substantial = evaluate({
+    controlState: expiredNormal(),
+    observation: substantialDeclineObservation(10, 7)
+    });
+    expect(mild.state.mode).toBe('RESCUE');
+    expect(substantial.state.mode).toBe('RESCUE');
+    expect(substantial.state.intensity).toBeGreaterThan(mild.state.intensity);
+    });
+
+    test('one distressed coin does not corroborate a mild broad fall into a market rescue', () => {
+    // 5/6 coins drifting at -0.6% with ONE critically weak coin: a single
+    // distressed outlier must not justify whole-market rescue intensity —
+    // clustered distress has its own independent rescue path.
+    const coins = makeCoins().map((c, i) => ({
+    ...c,
+    condition: i === 0 ? -0.7 : -0.05,
+    movementPct: i < 5 ? -0.006 : 0.001
+    }));
+    const { state } = evaluate({
+    controlState: expiredNormal(),
+    observation: makeObservation({
+    coins,
+    breadth: { rising: 0, falling: 5, flat: 1 },
+    medianMovementPct: -0.006,
+    broadMovementPct: (5 * -0.006 + 0.001) / 6,
+    drawdownPct: 0.07,
+    weakCount: 1,
+    distressedCount: 1
+    })
+    });
+    expect(state.mode).toBe('NORMAL');
+    });
+
+    test('clustered distress still rescues independently (prolonged depression)', () => {
+    const { state } = evaluate({
+    controlState: expiredNormal(),
+    observation: makeObservation({
+    distressedCount: CONFIG.directorControl.deathClusterCount,
+    drawdownPct: 0.08
+    })
+    });
+    expect(state.mode).toBe('RESCUE');
     });
     });
 
@@ -980,6 +1047,112 @@ describe('Wave 2 adaptive Director: idempotent re-evaluation', () => {
     expect(state.mode).toBe('RESCUE');
     // The interrupted BUST ended NOW.
     expect(new Date(state.lastInterventionEndedAt).getTime()).toBe(BASE_MS);
+    });
+
+    test('a severe-drawdown emergency during a BOOM-created refractory rescues within the emergency latency, not the full refractory', () => {
+    // PR #36 wave-2 correction: an emergency NEWLY encountered during the
+    // ordinary refractory waits only the short emergency refractory. The
+    // BOOM ended 1m ago: at 1m the grace has not elapsed -> NORMAL...
+    const EMERGENCY_REFRACTORY_MS = 5 * MINUTE;
+    const boom = expiredIntervention();
+    const early = evaluate({ controlState: boom, observation: severeDeclineObservation() });
+    expect(early.state.mode).toBe('NORMAL');
+    expect(early.state.reason).toMatch(/refractory/i);
+    // ...but once the emergency refractory has elapsed the emergency
+    // interrupts the refractory NORMAL window mid-window.
+    const atGrace = evaluate({
+    nowMs: ENDED_MS + EMERGENCY_REFRACTORY_MS + MINUTE,
+    controlState: early.state,
+    observation: severeDeclineObservation()
+    });
+    expect(atGrace.changed).toBe(true);
+    expect(atGrace.state.mode).toBe('RESCUE');
+    expect(atGrace.state.direction).toBe('POSITIVE');
+    expect(atGrace.state.reason).toMatch(/emergency/i);
+    // Interrupting a NORMAL window does not move the intervention tracker.
+    expect(new Date(atGrace.state.lastInterventionEndedAt).getTime()).toBe(ENDED_MS);
+    expect(atGrace.state.lastInterventionMode).toBe('BOOM');
+    });
+
+    test('a death-cluster emergency during a BUST-created refractory rescues within the emergency latency', () => {
+    const bust = expiredIntervention({ mode: 'BUST', direction: 'NEGATIVE', lastSwingDirection: 'NEGATIVE' });
+    const early = evaluate({ controlState: bust, observation: deathClusterObservation() });
+    expect(early.state.mode).toBe('NORMAL');
+    const atGrace = evaluate({
+    nowMs: ENDED_MS + 6 * MINUTE,
+    controlState: early.state,
+    observation: deathClusterObservation()
+    });
+    expect(atGrace.state.mode).toBe('RESCUE');
+    expect(atGrace.state.direction).toBe('POSITIVE');
+    });
+
+    test('an ordinary rescue signal still waits out the full refractory even after the emergency latency', () => {
+    // Same shape as the emergency cases, but the signalled rescue is NOT an
+    // emergency (no death cluster, no severe drawdown): the emergency
+    // refractory never applies to ordinary triggers.
+    const boom = expiredIntervention();
+    const res = evaluate({
+    nowMs: ENDED_MS + 6 * MINUTE,
+    controlState: boom,
+    observation: ordinaryRescueObservation()
+    });
+    expect(res.state.mode).toBe('NORMAL');
+    expect(res.state.reason).toMatch(/refractory/i);
+    });
+
+    test('an emergency rescue committed under the grace cannot re-loop: its own ended window holds the full refractory', () => {
+    // BOOM ends -> the emergency rescues under the grace -> that RESCUE ends
+    // while the SAME emergency persists -> no immediate recommit: the full
+    // ordinary refractory applies (the emergency may not override the
+    // refractory its own ended window created).
+    const boom = expiredIntervention();
+    const first = evaluate({ controlState: boom, observation: severeDeclineObservation() });
+    const rescue = evaluate({
+    nowMs: ENDED_MS + 6 * MINUTE,
+    controlState: first.state,
+    observation: severeDeclineObservation()
+    });
+    expect(rescue.state.mode).toBe('RESCUE');
+    expect(rescue.state.lastInterventionMode).toBe('BOOM');
+    const rescueEndedMs = new Date(rescue.state.endsAt).getTime();
+    const afterEnd = evaluate({
+    nowMs: rescueEndedMs + MINUTE,
+    controlState: rescue.state,
+    observation: severeDeclineObservation()
+    });
+    expect(afterEnd.state.mode).toBe('NORMAL');
+    expect(afterEnd.state.reason).toMatch(/refractory/i);
+    expect(afterEnd.state.lastInterventionMode).toBe('RESCUE');
+    // Past the emergency latency the RESCUE-created refractory STILL holds.
+    const midRefractory = evaluate({
+    nowMs: rescueEndedMs + 6 * MINUTE,
+    controlState: afterEnd.state,
+    observation: severeDeclineObservation()
+    });
+    expect(midRefractory.state.mode).toBe('NORMAL');
+    // Once the full refractory elapses the persistent emergency rescues again.
+    const afterRefractory = evaluate({
+    nowMs: rescueEndedMs + REFRACTORY_MS + MINUTE,
+    controlState: midRefractory.state,
+    observation: severeDeclineObservation()
+    });
+    expect(afterRefractory.state.mode).toBe('RESCUE');
+    expect(afterRefractory.state.direction).toBe('POSITIVE');
+    });
+
+    test('a legacy committed state without lastInterventionMode (pre-migration-031 row) reads the refractory permissively for a new emergency', () => {
+    // Rows committed before migration 031 carry the refractory timestamp but
+    // no origin mode; the domain reads an unknown origin as non-RESCUE, so a
+    // newly encountered emergency still responds within the emergency
+    // latency after a restart/deploy.
+    const legacyNormal = makeCommitted({
+    endsAt: new Date(BASE_MS + 10 * MINUTE).toISOString(),
+    lastInterventionEndedAt: new Date(BASE_MS - 6 * MINUTE).toISOString()
+    });
+    const res = evaluate({ controlState: legacyNormal, observation: deathClusterObservation() });
+    expect(res.changed).toBe(true);
+    expect(res.state.mode).toBe('RESCUE');
     });
 
     test('long-horizon duty cycle: persistent flat/rescue/overheat/emergency conditions cannot chain interventions without NORMAL opportunities', () => {

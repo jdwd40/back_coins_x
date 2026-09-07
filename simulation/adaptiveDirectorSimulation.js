@@ -311,7 +311,7 @@ function runAdaptiveDirectorSimulation({ scenario, config = resolveSimulationCon
 // ---------------------------------------------------------------------------
 // PR #36 correction: deterministic acceptance profiles.
 //
-// Six 24-hour synthetic market narratives over 10 coins, each fabricated
+// Seven 24-hour synthetic market narratives over 10 coins, each fabricated
 // deterministically from (profile, seed, tick) — no Math.random, no wall
 // clock. The only randomness remains the domain's seeded stream (keyed by
 // worldSeed + decision cursor), so the 20-seed sweep varies every draw
@@ -322,6 +322,7 @@ const ACCEPTANCE_PROFILE_IDS = Object.freeze([
   'healthy-variable',
   'stagnation',
   'mild-decline',
+  'mild-decline-moving',
   'severe-decline',
   'sustained-overheat',
   'death-cluster'
@@ -383,11 +384,24 @@ function buildAcceptanceScenario(profile, seedIndex) {
       lastMeaningfulMovementAtMs = startMs;
     } else if (profile === 'mild-decline') {
       // 7/10 coins drifting at -0.6%: falling breadth with NO magnitude,
-      // drawdown, weak-condition or death corroboration.
+      // drawdown, weak-condition or death corroboration. The movement clock
+      // is stale (nothing moves meaningfully all day), so this profile also
+      // exercises the refractory-bounded stagnation swings a flat mild
+      // decline legitimately draws.
       movementOf = (coinId) => (coinId <= 7 ? -0.006 : 0.001) + 0.0005 * jitter(tickIndex, coinId, 3);
       drawdownPct = 0.08;
       conditionOf = () => -0.1;
       lastMeaningfulMovementAtMs = startMs;
+    } else if (profile === 'mild-decline-moving') {
+      // PR #36 wave-2 acceptance: the SAME mild broad decline (7/10 at
+      // -0.6%, no corroboration) but with ONGOING meaningful movement —
+      // the market is drifting, not stagnant, so the stagnation clock
+      // stays fresh and the day is predominantly NORMAL with zero rescue
+      // and no interventions at all.
+      movementOf = (coinId) => (coinId <= 7 ? -0.006 : 0.001) + 0.0005 * jitter(tickIndex, coinId, 7);
+      drawdownPct = 0.08;
+      conditionOf = () => -0.1;
+      lastMeaningfulMovementAtMs = nowMs - 2 * MINUTE_MS;
     } else if (profile === 'severe-decline') {
       // A sustained crash: 8/10 coins at -4%, 35% drawdown, weak and
       // critically weak clusters.

@@ -22,6 +22,7 @@ const {
   runAdaptiveDirectorSimulation,
   buildCanonicalScenario,
   runDeterministicAcceptance,
+  buildAcceptanceScenario,
   ACCEPTANCE_PROFILE_IDS
 } = require('../simulation/adaptiveDirectorSimulation');
 const { resolveSimulationConfig } = require('../game/simulationConfig');
@@ -119,9 +120,9 @@ describe('Wave 2 adaptive Director: deterministic acceptance sweep (PR #36 corre
   const acceptance = runDeterministicAcceptance({ seeds: 20, config: CONFIG });
   const MAX_INTERVENTION_MINUTES = CONFIG.directorControl.interventionDurationMs.max / 60000;
 
-  test('the sweep covers the six condition profiles over 20 seeds x 24 hours, reproducibly', () => {
+  test('the sweep covers the condition profiles over 20 seeds x 24 hours, reproducibly', () => {
     expect([...ACCEPTANCE_PROFILE_IDS].sort()).toEqual([
-      'death-cluster', 'healthy-variable', 'mild-decline',
+      'death-cluster', 'healthy-variable', 'mild-decline', 'mild-decline-moving',
       'severe-decline', 'stagnation', 'sustained-overheat'
     ]);
     expect(Object.keys(acceptance.profiles).sort()).toEqual([...ACCEPTANCE_PROFILE_IDS].sort());
@@ -165,6 +166,47 @@ describe('Wave 2 adaptive Director: deterministic acceptance sweep (PR #36 corre
       expect(run.rescueCount).toBe(0);
       expect(run.modeTimeFraction.RESCUE).toBe(0);
       expect(run.directInterventionTransitions).toBe(0);
+      // The stagnant mild decline legitimately draws bounded refractory-
+      // separated stagnation swings — but they never dominate the day.
+      const interventionFraction = run.modeTimeFraction.BOOM + run.modeTimeFraction.BUST;
+      expect(interventionFraction).toBeLessThanOrEqual(0.35);
+      expect(run.modeTimeFraction.NORMAL).toBeGreaterThanOrEqual(0.65);
+      expect(run.longestInterventionStreakMinutes).toBeLessThanOrEqual(MAX_INTERVENTION_MINUTES);
+    }
+  });
+
+  test('a mild MOVING decline is predominantly NORMAL with zero rescue and bounded intervention frequency on every seed', () => {
+    // PR #36 wave-2 acceptance: a mild decline with ONGOING meaningful
+    // movement (the stagnation clock stays fresh) is not stagnation: no
+    // rescue, no interventions at all, NORMAL all day, and the decision
+    // cadence stays inside the reviewable band.
+    for (const run of acceptance.profiles['mild-decline-moving'].seeds) {
+      expect(run.rescueCount).toBe(0);
+      expect(run.modeTimeFraction.RESCUE).toBe(0);
+      expect(run.modeTimeFraction.BOOM).toBe(0);
+      expect(run.modeTimeFraction.BUST).toBe(0);
+      expect(run.modeTimeFraction.NORMAL).toBe(1);
+      expect(run.directInterventionTransitions).toBe(0);
+      expect(run.longestInterventionStreakMinutes).toBe(0);
+      expect(run.decisionsPerHour).toBeLessThanOrEqual(15);
+    }
+  });
+
+  test('the mild moving-decline profile is not passing on a null/stale movement clock', () => {
+    // Distinct acceptance check: the profile's fabricated observations must
+    // carry a FRESH lastMeaningfulMovementAt at every sampled tick, so the
+    // predominantly-NORMAL verdict above cannot be an artifact of a frozen
+    // (or null) stagnation clock.
+    const scenario = buildAcceptanceScenario('mild-decline-moving', 0);
+    for (const tickIndex of [0, 60, 360, 720, 1080, 1439]) {
+      const nowMs = scenario.startMs + tickIndex * scenario.tickMs;
+      const observation = scenario.observationAt(tickIndex, nowMs);
+      expect(observation.lastMeaningfulMovementAtMs).not.toBeNull();
+      expect(nowMs - observation.lastMeaningfulMovementAtMs).toBeLessThanOrEqual(5 * 60000);
+      // The drift itself is the mild decline: 7/10 coins falling below the
+      // rescue corroboration magnitude.
+      expect(observation.breadth.falling).toBe(7);
+      expect(observation.liveCoinCount).toBe(10);
     }
   });
 

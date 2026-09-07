@@ -108,6 +108,39 @@ describe('Wave 1: Director control state round-trip and safe restart', () => {
     }))).rejects.toThrow(/lastInterventionEndedAt/);
   });
 
+  test('the last-intervention mode tracker (migration 031) round-trips and participates in the decision-cursor payload identity', async () => {
+    const world = await provisionedWorld();
+    const state = validState(world.worldId, {
+      lastInterventionEndedAt: new Date(BASE_MS - 30 * MINUTE).toISOString(),
+      lastInterventionMode: 'BOOM'
+    });
+    await control.upsertDirectorControlState(db, state);
+    const loaded = await control.loadDirectorControlState(db, world.worldId);
+    expect(loaded.lastInterventionMode).toBe('BOOM');
+    // Identical replay at the same cursor: a write-free no-op.
+    await control.upsertDirectorControlState(db, validState(world.worldId, {
+      lastInterventionEndedAt: new Date(BASE_MS - 30 * MINUTE).toISOString(),
+      lastInterventionMode: 'BOOM'
+    }));
+    // Same cursor with a DIFFERENT origin mode is a conflicting replay.
+    await expect(control.upsertDirectorControlState(db, validState(world.worldId, {
+      lastInterventionEndedAt: new Date(BASE_MS - 30 * MINUTE).toISOString(),
+      lastInterventionMode: 'RESCUE'
+    }))).rejects.toThrow(/conflicts/);
+    // A NEWER decision may clear the tracker (null persists as NULL).
+    await control.upsertDirectorControlState(db, validState(world.worldId, { decisionIndex: 4 }));
+    const cleared = await control.loadDirectorControlState(db, world.worldId);
+    expect(cleared.lastInterventionMode).toBeNull();
+    // A corrupt tracker fails loudly: unknown modes, and NORMAL (never an
+    // intervention) are rejected before SQL.
+    await expect(control.upsertDirectorControlState(db, validState(world.worldId, {
+      decisionIndex: 5, lastInterventionMode: 'SIDEWAYS'
+    }))).rejects.toThrow(/lastInterventionMode/);
+    await expect(control.upsertDirectorControlState(db, validState(world.worldId, {
+      decisionIndex: 5, lastInterventionMode: 'NORMAL'
+    }))).rejects.toThrow(/lastInterventionMode/);
+  });
+
   test('a restart reads the same committed state (durable, not in-memory)', async () => {
     const world = await provisionedWorld();
     const state = validState(world.worldId);

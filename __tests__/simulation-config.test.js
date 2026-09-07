@@ -673,6 +673,10 @@ describe('simulation config Director control PR #36 correction bounds', () => {
     expect(directorControl.rescueCorroborationDrawdownPct).toBe(0.1);
     // Roster size at which breadth severity reaches full weight.
     expect(directorControl.rescueBreadthSeverityRosterSize).toBe(4);
+    // Emergency refractory: a newly encountered death-cluster/severe-
+    // drawdown emergency during a non-RESCUE-created refractory responds
+    // within this shorter bounded latency.
+    expect(directorControl.emergencyRefractoryMs).toBe(5 * 60 * 1000);
   });
 
   test('rejects illegal stagnation-breadth and refractory bounds', () => {
@@ -693,6 +697,27 @@ describe('simulation config Director control PR #36 correction bounds', () => {
     const fractionalRefractory = freshConfig();
     fractionalRefractory.directorControl.interventionRefractoryMs = 1200000.5;
     expect(() => validateSimulationConfig(fractionalRefractory)).toThrow(/interventionRefractoryMs/);
+  });
+
+  test('rejects an illegal emergency refractory', () => {
+    const zeroEmergency = freshConfig();
+    zeroEmergency.directorControl.emergencyRefractoryMs = 0;
+    expect(() => validateSimulationConfig(zeroEmergency)).toThrow(/emergencyRefractoryMs/);
+
+    const fractionalEmergency = freshConfig();
+    fractionalEmergency.directorControl.emergencyRefractoryMs = 300000.5;
+    expect(() => validateSimulationConfig(fractionalEmergency)).toThrow(/emergencyRefractoryMs/);
+
+    // The emergency refractory must span at least one decision tick.
+    const belowCadence = freshConfig();
+    belowCadence.directorControl.emergencyRefractoryMs = 30 * 1000;
+    expect(() => validateSimulationConfig(belowCadence)).toThrow(/emergencyRefractoryMs/);
+
+    // An emergency refractory not shorter than the ordinary refractory is
+    // not an emergency policy at all.
+    const notShorter = freshConfig();
+    notShorter.directorControl.emergencyRefractoryMs = 20 * 60 * 1000;
+    expect(() => validateSimulationConfig(notShorter)).toThrow(/emergencyRefractoryMs/);
   });
 
   test('rejects illegal rescue corroboration/severity bounds', () => {

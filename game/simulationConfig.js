@@ -585,6 +585,19 @@ const DEFAULT_SIMULATION_CONFIG = {
     // refractory). Must span at least one full NORMAL swing window.
     interventionRefractoryMs: 20 * MINUTE_MS,
 
+    // PR #36 wave-2 correction — emergency refractory: a NEWLY encountered
+    // death-cluster/severe-drawdown emergency arising during the ordinary
+    // refractory waits only this shorter bounded latency before RESCUE may
+    // commit (interrupting the refractory NORMAL window if one stands).
+    // The exception never applies to a refractory created by an ended
+    // RESCUE window (tracked by director_control_state.last_intervention_mode,
+    // migration 031): an emergency can never override the refractory its
+    // own ended window created, so persistent emergencies keep bounded
+    // RESCUE duty and every ended window still yields a full NORMAL
+    // opportunity. Must span at least one decision tick and stay strictly
+    // below the ordinary refractory.
+    emergencyRefractoryMs: 5 * MINUTE_MS,
+
     // PR #36 correction — RESCUE corroboration: falling breadth alone never
     // rescues. The breadth trigger additionally requires meaningful
     // negative magnitude (median or broad movement at/below
@@ -1191,6 +1204,7 @@ function validateDirectorControl(name, directorControl) {
     'maxTargetPositivePerCoin', 'maxTargetNegativePerCoin',
     'stagnationSameDirectionProbability',
     'stagnationBreadthFraction', 'interventionRefractoryMs',
+    'emergencyRefractoryMs',
     'rescueCorroborationDeclinePct', 'rescueCorroborationDrawdownPct',
     'rescueBreadthSeverityRosterSize'
   ]);
@@ -1298,6 +1312,18 @@ function validateDirectorControl(name, directorControl) {
   // opportunity.
   if (directorControl.interventionRefractoryMs < directorControl.normalSwingTargetMs.max) {
     failConfig(`${name}.interventionRefractoryMs ${directorControl.interventionRefractoryMs} is below normalSwingTargetMs.max ${directorControl.normalSwingTargetMs.max} (the refractory must span at least one full NORMAL window)`);
+  }
+
+  requirePositiveInteger(`${name}.emergencyRefractoryMs`, directorControl.emergencyRefractoryMs);
+  // The emergency latency must span at least one decision tick, or an
+  // emergency could never be observed before it fired.
+  if (directorControl.emergencyRefractoryMs < directorControl.cadenceMs) {
+    failConfig(`${name}.emergencyRefractoryMs ${directorControl.emergencyRefractoryMs} is below the Director cadenceMs ${directorControl.cadenceMs} (the emergency refractory must span at least one decision tick)`);
+  }
+  // The emergency refractory must be strictly shorter than the ordinary
+  // refractory, or it is not an emergency policy at all.
+  if (directorControl.emergencyRefractoryMs >= directorControl.interventionRefractoryMs) {
+    failConfig(`${name}.emergencyRefractoryMs ${directorControl.emergencyRefractoryMs} must be shorter than interventionRefractoryMs ${directorControl.interventionRefractoryMs} (the emergency exception exists to answer sooner than the ordinary refractory)`);
   }
 
   requireFiniteNumber(`${name}.rescueCorroborationDeclinePct`, directorControl.rescueCorroborationDeclinePct);

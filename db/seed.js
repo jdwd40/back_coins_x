@@ -383,6 +383,16 @@ const seed = async (shouldEnd = false) => {
     );
     await db.query(directorRefractoryMigration);
 
+    console.log('📦 Applying Director refractory-origin migration (db/migrations/031_director_control_last_intervention_mode.sql)...');
+    // Director Coin Events Wave 2 (PR #36 wave-2 correction): the nullable
+    // last_intervention_mode refractory-origin tracker on
+    // director_control_state, sourced from the production migration only.
+    const directorInterventionModeMigration = require('fs').readFileSync(
+      require('path').join(__dirname, 'migrations', '031_director_control_last_intervention_mode.sql'),
+      'utf8'
+    );
+    await db.query(directorInterventionModeMigration);
+
     console.log('📦 Inserting coins data...');
     // Insert coins data
     const coinsData = require(process.env.NODE_ENV === 'test' 

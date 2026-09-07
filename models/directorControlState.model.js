@@ -7,7 +7,9 @@
 // (decision_index), the decision reason, the Golden/Demon assignments with
 // their expiries, the last broad swing direction, the stagnation tracking
 // timestamp and (migration 030, PR #36 correction) the
-// last_intervention_ended_at refractory tracker. A restarted runtime reads
+// last_intervention_ended_at refractory tracker, plus (migration 031,
+// PR #36 wave-2 correction) the last_intervention_mode refractory origin
+// mode the emergency-refractory policy reads. A restarted runtime reads
 // this one committed row and resumes safely; nothing is held in memory
 // across processes.
 //
@@ -70,7 +72,8 @@ function sameControlPayload(a, b) {
     sameNullableTimestamp(a.demonExpiresAt, b.demonExpiresAt) &&
     (a.lastSwingDirection ?? null) === (b.lastSwingDirection ?? null) &&
     sameNullableTimestamp(a.lastMeaningfulMovementAt, b.lastMeaningfulMovementAt) &&
-    sameNullableTimestamp(a.lastInterventionEndedAt, b.lastInterventionEndedAt);
+    sameNullableTimestamp(a.lastInterventionEndedAt, b.lastInterventionEndedAt) &&
+    (a.lastInterventionMode ?? null) === (b.lastInterventionMode ?? null);
 }
 
 function assertAssignment(coinId, expiresAt, label) {
@@ -129,6 +132,11 @@ function assertDirectorControlState(state) {
   }
   assertNullableTimestamp(state.lastMeaningfulMovementAt, 'lastMeaningfulMovementAt');
   assertNullableTimestamp(state.lastInterventionEndedAt, 'lastInterventionEndedAt');
+  if (state.lastInterventionMode !== null && state.lastInterventionMode !== undefined
+      && !['BOOM', 'BUST', 'RESCUE'].includes(state.lastInterventionMode)) {
+    // The refractory origin (migration 031) is always an INTERVENTION mode.
+    throw new Error(`director control state lastInterventionMode must be null or one of BOOM, BUST, RESCUE; received ${JSON.stringify(state.lastInterventionMode)}`);
+  }
   return state;
 }
 
@@ -154,7 +162,8 @@ function rowToControlState(row) {
     demonExpiresAt: row.demon_expires_at,
     lastSwingDirection: row.last_swing_direction,
     lastMeaningfulMovementAt: row.last_meaningful_movement_at,
-    lastInterventionEndedAt: row.last_intervention_ended_at === undefined ? null : row.last_intervention_ended_at
+    lastInterventionEndedAt: row.last_intervention_ended_at === undefined ? null : row.last_intervention_ended_at,
+    lastInterventionMode: row.last_intervention_mode === undefined ? null : row.last_intervention_mode
   });
 }
 
@@ -168,10 +177,11 @@ async function loadDirectorControlStateForUpdate(client, worldId) {
     `SELECT world_id, mode, direction, intensity, started_at, ends_at,
             decision_index, reason,
             golden_coin_id, golden_expires_at, demon_coin_id, demon_expires_at,
-            last_swing_direction, last_meaningful_movement_at, last_intervention_ended_at
+            last_swing_direction, last_meaningful_movement_at, last_intervention_ended_at,
+            last_intervention_mode
        FROM director_control_state
       WHERE world_id = $1
-      FOR UPDATE`,
+     FOR UPDATE`,
     [worldId]
   );
   return rows.length === 0 ? null : rowToControlState(rows[0]);
@@ -192,7 +202,8 @@ async function loadDirectorControlState(queryable, worldId) {
     `SELECT world_id, mode, direction, intensity, started_at, ends_at,
             decision_index, reason,
             golden_coin_id, golden_expires_at, demon_coin_id, demon_expires_at,
-            last_swing_direction, last_meaningful_movement_at, last_intervention_ended_at
+            last_swing_direction, last_meaningful_movement_at, last_intervention_ended_at,
+            last_intervention_mode
        FROM director_control_state
       WHERE world_id = $1`,
     [worldId]
@@ -277,8 +288,9 @@ async function upsertDirectorControlState(queryable, state) {
        world_id, mode, direction, intensity, started_at, ends_at,
        decision_index, reason,
        golden_coin_id, golden_expires_at, demon_coin_id, demon_expires_at,
-       last_swing_direction, last_meaningful_movement_at, last_intervention_ended_at
-     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+       last_swing_direction, last_meaningful_movement_at, last_intervention_ended_at,
+       last_intervention_mode
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
      ON CONFLICT (world_id) DO UPDATE SET
        mode                       = EXCLUDED.mode,
        direction                  = EXCLUDED.direction,
@@ -294,6 +306,7 @@ async function upsertDirectorControlState(queryable, state) {
        last_swing_direction       = EXCLUDED.last_swing_direction,
        last_meaningful_movement_at = EXCLUDED.last_meaningful_movement_at,
        last_intervention_ended_at = EXCLUDED.last_intervention_ended_at,
+       last_intervention_mode     = EXCLUDED.last_intervention_mode,
        updated_at                 = now()`,
     [
       state.worldId, state.mode, state.direction, state.intensity,
@@ -306,7 +319,8 @@ async function upsertDirectorControlState(queryable, state) {
       state.demonExpiresAt == null ? null : new Date(toMs(state.demonExpiresAt, 'demonExpiresAt')).toISOString(),
       state.lastSwingDirection ?? null,
       state.lastMeaningfulMovementAt == null ? null : new Date(toMs(state.lastMeaningfulMovementAt, 'lastMeaningfulMovementAt')).toISOString(),
-      state.lastInterventionEndedAt == null ? null : new Date(toMs(state.lastInterventionEndedAt, 'lastInterventionEndedAt')).toISOString()
+      state.lastInterventionEndedAt == null ? null : new Date(toMs(state.lastInterventionEndedAt, 'lastInterventionEndedAt')).toISOString(),
+      state.lastInterventionMode ?? null
     ]
   );
 }
