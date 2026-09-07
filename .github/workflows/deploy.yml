@@ -35,6 +35,8 @@ jobs:
             NODE_ENV=production npm run migrate
             echo "Verifying production game schema..."
             NODE_ENV=production npm run verify:game-schema
+            echo "Verifying persistent world identity..."
+            NODE_ENV=production npm run verify:persistent-world
             echo "Restarting PM2..."
             pm2 restart back_coins_x
             echo "Verifying backend health..."
@@ -48,4 +50,15 @@ jobs:
               sleep 2
             done
             echo "Backend health check passed"
+            echo "Verifying persistent signals..."
+            signals_attempt=1
+            until curl -sf --max-time 5 http://127.0.0.1:3000/api/persistent/signals | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{const j=JSON.parse(d); const data=j&&j.data?j.data:j; if(!data||!data.worldId){console.error("persistent signals missing worldId",j); process.exit(1);} const n=Array.isArray(data.coins)?data.coins.length:0; if(!(n>0)){console.error("persistent signals coins empty",data); process.exit(1);} console.log("persistent signals ok worldId="+data.worldId+" coins="+n);});'; do
+              if [ "$signals_attempt" -ge 5 ]; then
+                echo "Persistent signals check failed after PM2 restart."
+                exit 1
+              fi
+              signals_attempt=$((signals_attempt + 1))
+              sleep 2
+            done
+            echo "Persistent signals check passed"
             echo "Deployment complete"
