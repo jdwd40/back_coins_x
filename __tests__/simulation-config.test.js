@@ -547,3 +547,116 @@ describe('simulation config Director control (Director Coin Events Wave 1)', () 
     expect(resolved.directorControl.normalSwingTargetMs).toEqual({ min: 8 * 60 * 1000, max: 14 * 60 * 1000 });
   });
 });
+
+describe('simulation config Director control Wave 2 (adaptive decision bounds)', () => {
+  test('Wave 2 defaults carry the adaptive decision/observation bounds', () => {
+    const { directorControl } = DEFAULT_SIMULATION_CONFIG;
+    expect(directorControl.observationLookbackMs).toBe(30 * 60 * 1000);
+    expect(directorControl.breadthThresholdPct).toBe(0.005);
+    expect(directorControl.weakConditionThreshold).toBe(-0.3);
+    expect(directorControl.distressedConditionThreshold).toBe(-0.6);
+    expect(directorControl.rescueDrawdownPct).toBe(0.25);
+    expect(directorControl.rescueFallingBreadthFraction).toBe(0.7);
+    expect(directorControl.rescueWeakCount).toBe(3);
+    expect(directorControl.deathClusterCount).toBe(2);
+    expect(directorControl.deathClusterWindowMs).toBe(60 * 60 * 1000);
+    expect(directorControl.overheatRisePct).toBe(0.08);
+    expect(directorControl.overheatBreadthFraction).toBe(0.7);
+    expect(directorControl.maxTargetPositivePerCoin).toBe(2);
+    expect(directorControl.maxTargetNegativePerCoin).toBe(2);
+    expect(directorControl.stagnationSameDirectionProbability).toBe(0.25);
+  });
+
+  test('rejects illegal observation/breadth/condition bounds', () => {
+    const zeroLookback = freshConfig();
+    zeroLookback.directorControl.observationLookbackMs = 0;
+    expect(() => validateSimulationConfig(zeroLookback)).toThrow(/observationLookbackMs/);
+
+    // The observation cannot be shorter than one decision tick.
+    const shortLookback = freshConfig();
+    shortLookback.directorControl.observationLookbackMs = 30 * 1000;
+    expect(() => validateSimulationConfig(shortLookback)).toThrow(/observationLookbackMs/);
+
+    // The bounded lookback can never exceed the stagnation window (the
+    // stagnation verdict would be unobservable).
+    const longLookback = freshConfig();
+    longLookback.directorControl.observationLookbackMs = 2 * 60 * 60 * 1000;
+    expect(() => validateSimulationConfig(longLookback)).toThrow(/observationLookbackMs/);
+
+    const zeroBreadth = freshConfig();
+    zeroBreadth.directorControl.breadthThresholdPct = 0;
+    expect(() => validateSimulationConfig(zeroBreadth)).toThrow(/breadthThresholdPct/);
+
+    const positiveWeak = freshConfig();
+    positiveWeak.directorControl.weakConditionThreshold = 0.1;
+    expect(() => validateSimulationConfig(positiveWeak)).toThrow(/weakConditionThreshold/);
+
+    // Distressed must be strictly below weak (more distressed).
+    const invertedConditions = freshConfig();
+    invertedConditions.directorControl.distressedConditionThreshold = -0.1;
+    expect(() => validateSimulationConfig(invertedConditions)).toThrow(/distressedConditionThreshold/);
+  });
+
+  test('rejects illegal rescue/death-cluster/overheat bounds', () => {
+    const zeroDrawdown = freshConfig();
+    zeroDrawdown.directorControl.rescueDrawdownPct = 0;
+    expect(() => validateSimulationConfig(zeroDrawdown)).toThrow(/rescueDrawdownPct/);
+
+    const zeroBreadth = freshConfig();
+    zeroBreadth.directorControl.rescueFallingBreadthFraction = 0;
+    expect(() => validateSimulationConfig(zeroBreadth)).toThrow(/rescueFallingBreadthFraction/);
+
+    const zeroWeak = freshConfig();
+    zeroWeak.directorControl.rescueWeakCount = 0;
+    expect(() => validateSimulationConfig(zeroWeak)).toThrow(/rescueWeakCount/);
+
+    const singleDeath = freshConfig();
+    singleDeath.directorControl.deathClusterCount = 1;
+    expect(() => validateSimulationConfig(singleDeath)).toThrow(/deathClusterCount/);
+
+    const zeroClusterWindow = freshConfig();
+    zeroClusterWindow.directorControl.deathClusterWindowMs = 0;
+    expect(() => validateSimulationConfig(zeroClusterWindow)).toThrow(/deathClusterWindowMs/);
+
+    // Overheating must mean MORE than ordinary meaningful movement.
+    const lowOverheat = freshConfig();
+    lowOverheat.directorControl.overheatRisePct = 0.01;
+    expect(() => validateSimulationConfig(lowOverheat)).toThrow(/overheatRisePct/);
+
+    const zeroOverheatBreadth = freshConfig();
+    zeroOverheatBreadth.directorControl.overheatBreadthFraction = 0;
+    expect(() => validateSimulationConfig(zeroOverheatBreadth)).toThrow(/overheatBreadthFraction/);
+  });
+
+  test('rejects illegal event-target and anti-loop bounds', () => {
+    const zeroTarget = freshConfig();
+    zeroTarget.directorControl.maxTargetPositivePerCoin = 0;
+    expect(() => validateSimulationConfig(zeroTarget)).toThrow(/maxTargetPositivePerCoin/);
+
+    // Planned targets can never exceed the Wave 1 active-event caps.
+    const overCap = freshConfig();
+    overCap.directorControl.maxTargetNegativePerCoin = 5;
+    expect(() => validateSimulationConfig(overCap)).toThrow(/maxTargetNegativePerCoin/);
+
+    // A repeat probability of 1 would make same-direction loops certain.
+    const certainRepeat = freshConfig();
+    certainRepeat.directorControl.stagnationSameDirectionProbability = 1;
+    expect(() => validateSimulationConfig(certainRepeat)).toThrow(/stagnationSameDirectionProbability/);
+
+    const negativeRepeat = freshConfig();
+    negativeRepeat.directorControl.stagnationSameDirectionProbability = -0.1;
+    expect(() => validateSimulationConfig(negativeRepeat)).toThrow(/stagnationSameDirectionProbability/);
+  });
+
+  test('Wave 2 overrides merge and freeze alongside Wave 1 keys', () => {
+    const resolved = resolveSimulationConfig({
+      directorControl: { observationLookbackMs: 20 * 60 * 1000, maxTargetPositivePerCoin: 3 }
+    });
+    expect(resolved.directorControl.observationLookbackMs).toBe(20 * 60 * 1000);
+    expect(resolved.directorControl.maxTargetPositivePerCoin).toBe(3);
+    expect(Object.isFrozen(resolved.directorControl)).toBe(true);
+    // Untouched Wave 1 and Wave 2 leaves keep the defaults.
+    expect(resolved.directorControl.cadenceMs).toBe(60 * 1000);
+    expect(resolved.directorControl.rescueDrawdownPct).toBe(0.25);
+  });
+});
