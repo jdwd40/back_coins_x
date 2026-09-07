@@ -58,13 +58,22 @@ describe('Wave 2 adaptive Director control-layer simulation', () => {
     expect(report.summary.totalDecisions).toBeLessThanOrEqual(110);
     expect(report.summary.decisionsPerHour).toBeLessThanOrEqual(15);
 
-    // RESCUE during the crash, and no BUST overlapping the crash window.
+    // RESCUE fires promptly at the crash onset (the severe-drawdown
+    // emergency interrupts the active window immediately), and no BUST is
+    // committed inside the crash window. Bounded emergency correction: an
+    // ended emergency window yields a NORMAL refractory opportunity even
+    // while the crash persists, so later decisions starting inside the
+    // crash window MAY be NORMAL refractory windows — never BUST.
     expect(report.summary.rescueCount).toBeGreaterThanOrEqual(1);
+    const crashOnset = report.decisions.filter((d) =>
+      d.startedAtMs >= report.scenario.crashStartMs && d.startedAtMs < report.scenario.crashStartMs + 2 * 60000);
+    expect(crashOnset.length).toBeGreaterThanOrEqual(1);
+    expect(crashOnset[0].mode).toBe('RESCUE');
     const crash = report.decisions.filter((d) =>
       d.startedAtMs >= report.scenario.crashStartMs && d.startedAtMs < report.scenario.crashEndMs);
     expect(crash.length).toBeGreaterThanOrEqual(1);
     for (const decision of crash) {
-      expect(decision.mode).toBe('RESCUE');
+      expect(decision.mode).not.toBe('BUST');
     }
 
     // Return to NORMAL after recovery.
@@ -159,11 +168,25 @@ describe('Wave 2 adaptive Director: deterministic acceptance sweep (PR #36 corre
     }
   });
 
-  test('severe decline holds the emergency RESCUE while the emergency persists, in bounded windows', () => {
+  test('severe decline rescues recurrently but never continuously: bounded emergency windows separated by NORMAL opportunities', () => {
     for (const run of acceptance.profiles['severe-decline'].seeds) {
+      // Nonzero rescue: the persistent severe-drawdown emergency keeps
+      // triggering — rescue itself is not weakened.
       expect(run.rescueCount).toBeGreaterThan(0);
-      expect(run.modeTimeFraction.RESCUE).toBeGreaterThanOrEqual(0.9);
-      // Every emergency recommit is still one bounded window.
+      expect(run.modeTimeFraction.RESCUE).toBeGreaterThan(0);
+      // Never 100% continuous rescue: an emergency cannot override the
+      // refractory its own ended window created, so every emergency window
+      // is followed by a bounded NORMAL opportunity.
+      expect(run.modeTimeFraction.RESCUE).toBeLessThanOrEqual(0.5);
+      expect(run.modeTimeFraction.NORMAL).toBeGreaterThanOrEqual(0.5);
+      // No intervention->intervention transition without a NORMAL window
+      // between; each RESCUE occupancy streak is one bounded window.
+      expect(run.directInterventionTransitions).toBe(0);
+      expect(run.longestRescueStreakMinutes).toBeLessThanOrEqual(MAX_INTERVENTION_MINUTES);
+      // The NORMAL opportunities are genuine refractory spans, not token
+      // one-tick gaps.
+      expect(run.averageNormalRunLengthMinutes).toBeGreaterThanOrEqual(15);
+      // Every emergency window is still one bounded window.
       expect(run.averageInterventionDurationMinutes).toBeLessThanOrEqual(MAX_INTERVENTION_MINUTES);
       expect(run.averageInterventionDurationMinutes).toBeGreaterThanOrEqual(
         CONFIG.directorControl.interventionDurationMs.min / 60000
@@ -188,9 +211,11 @@ describe('Wave 2 adaptive Director: deterministic acceptance sweep (PR #36 corre
       // The cluster spans hours 4-8 of 24: RESCUE is confined to it.
       expect(run.modeTimeFraction.RESCUE).toBeLessThanOrEqual(0.3);
       expect(run.modeTimeFraction.NORMAL).toBeGreaterThanOrEqual(0.7);
-      // The longest continuous RESCUE streak is bounded by the cluster
-      // span plus one bounded window's tail.
-      expect(run.longestRescueStreakMinutes).toBeLessThanOrEqual(4 * 60 + MAX_INTERVENTION_MINUTES);
+      // Bounded recurrence: every emergency window is separated from the
+      // next by a NORMAL refractory opportunity, and each RESCUE occupancy
+      // streak is one bounded window — never a continuous chain.
+      expect(run.directInterventionTransitions).toBe(0);
+      expect(run.longestRescueStreakMinutes).toBeLessThanOrEqual(MAX_INTERVENTION_MINUTES);
     }
   });
 

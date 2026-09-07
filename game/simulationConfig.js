@@ -575,11 +575,14 @@ const DEFAULT_SIMULATION_CONFIG = {
     stagnationBreadthFraction: 0.5,
 
     // PR #36 correction — post-intervention refractory: after any
-    // BOOM/BUST/RESCUE window ends, ordinary triggers (stagnation swings,
-    // ordinary RESCUE, overheat corrections) are held to bounded NORMAL
-    // windows until this much time has passed. Continued conditions may
-    // trigger again afterwards; a death-cluster emergency overrides. Must
-    // span at least one full NORMAL swing window.
+    // BOOM/BUST/RESCUE window ends, triggers (stagnation swings, RESCUE —
+    // ordinary or emergency — and overheat corrections) are held to
+    // bounded NORMAL windows until this much time has passed. Continued
+    // conditions may trigger again afterwards; even a death-cluster or
+    // severe-drawdown emergency waits out the refractory its own ended
+    // window created (the emergency exception is interrupting a currently
+    // ACTIVE non-RESCUE window, which only ever exists outside the
+    // refractory). Must span at least one full NORMAL swing window.
     interventionRefractoryMs: 20 * MINUTE_MS,
 
     // PR #36 correction — RESCUE corroboration: falling breadth alone never

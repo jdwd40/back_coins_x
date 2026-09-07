@@ -52,15 +52,23 @@
 //     distress is retained to its committed expiry rather than recommitted
 //     every tick).
 //   * Post-intervention refractory (PR #36 correction): after any
-//     BOOM/BUST/RESCUE window ends, ordinary triggers (stagnation swings,
-//     ordinary RESCUE, overheat corrections) are held to bounded NORMAL
-//     windows until interventionRefractoryMs has passed — persistent
-//     flatness, an unchanged rescue signal or sustained overheat can never
-//     chain interventions without a NORMAL opportunity. Continued
-//     conditions may trigger again once the refractory elapses. A
-//     death-cluster or severe-drawdown emergency overrides the refractory,
-//     boundedly. The tracker (lastInterventionEndedAt) is persisted in the
-//     committed state, so the policy is deterministic and restart-safe.
+//     BOOM/BUST/RESCUE window ends, triggers (stagnation swings, RESCUE —
+//     ordinary OR emergency — and overheat corrections) are held to
+//     bounded NORMAL windows until interventionRefractoryMs has passed.
+//     Persistent flatness, an unchanged rescue signal, sustained overheat
+//     and even a persistent death-cluster/severe-drawdown emergency can
+//     never chain interventions without a NORMAL opportunity: an emergency
+//     may NOT override the refractory its own ended window created.
+//     Continued conditions — emergencies included — trigger again once the
+//     refractory elapses, so severe-decline rescue keeps recurring after
+//     bounded gaps. The emergency exception is the EARLY INTERRUPT of a
+//     currently active non-RESCUE window: every intervention is committed
+//     only outside the refractory and the tracker does not advance while a
+//     window stands, so an active non-RESCUE window never coexists with an
+//     active refractory and a newly encountered emergency still interrupts
+//     it immediately. The tracker (lastInterventionEndedAt) is persisted
+//     in the committed state, so the policy is deterministic and
+//     restart-safe.
 //   * Overheating (a broad rise of at least overheatRisePct over the whole
 //     bounded lookback with at least overheatBreadthFraction of live coins
 //     rising — sustained AND extreme by construction) allows a bounded
@@ -338,7 +346,9 @@ function resolveRoles({ committed, nowMs, observation, config, draws }) {
 // critically weak coin or a recent death). Severe drawdown, clustered
 // weakness, distressed clusters and death clusters remain INDEPENDENTLY
 // capable of rescue. The death-cluster and severe-drawdown verdicts are
-// also the emergencies that may override the post-intervention refractory. Severity is normalised:
+// the emergencies: newly encountered they interrupt a currently active
+// non-RESCUE window, but like every trigger they wait out the refractory
+// once their own window has ended. Severity is normalised:
 // the breadth component is roster-scaled (small rosters cannot reach
 // maximum severity from breadth alone).
 function rescueSignals(observation, config) {
@@ -363,9 +373,10 @@ function rescueSignals(observation, config) {
   const prolongedDepression = observation.distressedCount >= dc.deathClusterCount;
   const signalled = severeDrawdown || broadFall || tooWeak || deathCluster || prolongedDepression;
   // The genuine emergencies — a persistent death cluster or a severe broad
-  // drawdown — may override the ordinary post-intervention refractory,
-  // boundedly. Ordinary rescue signals (corroborated breadth, weak/
-  // distressed clusters) always wait out the refractory.
+  // drawdown. The emergency classification no longer overrides the
+  // post-intervention refractory (an emergency may not chain its own
+  // recommit); it is retained for reason/suppression reporting and for the
+  // interrupt-exception documentation at the retention guard.
   const emergency = deathCluster || severeDrawdown;
   const magnitudeSeverity = Math.max(
     0,
@@ -463,11 +474,25 @@ function evaluateAdaptiveDirectorDecision({
   // BOOM/BUST/RESCUE window ended: carried from the committed state, and
   // advanced to the committed expiry when an intervention window has now
   // elapsed (an EARLY rescue interrupt below stamps nowMs instead). While
-  // nowMs < lastInterventionEndedAt + interventionRefractoryMs, ordinary
-  // triggers (stagnation swings, ordinary rescue, overheat corrections)
-  // are held to bounded NORMAL windows; continued conditions may trigger
-  // again once the refractory elapses; a death-cluster or severe-drawdown
-  // emergency overrides it, boundedly.
+  // nowMs < lastInterventionEndedAt + interventionRefractoryMs, ALL
+  // triggers (stagnation swings, overheat corrections and RESCUE —
+  // ordinary or emergency) are held to bounded NORMAL windows; continued
+  // conditions may trigger again once the refractory elapses.
+  //
+  // The severe-drawdown/death-cluster emergency does NOT override this
+  // refractory: permitting that let a persistent emergency recommit RESCUE
+  // at every expiry forever (the PR #36 severe-decline defect — 100%
+  // RESCUE duty, direct intervention->intervention transitions every
+  // window). The emergency exception is instead exactly the EARLY
+  // INTERRUPT below: a signalled rescue (emergency or ordinary) interrupts
+  // a currently active non-RESCUE window whenever the refractory is
+  // inactive. That preserves the intended emergency behaviour on every
+  // reachable state — an active non-RESCUE window never coexists with an
+  // active refractory (interventions are only committed outside the
+  // refractory and the tracker does not advance while a window stands),
+  // so a newly encountered emergency still interrupts immediately — while
+  // an ended emergency window always yields one bounded NORMAL
+  // opportunity before rescue can recur.
   const committedEndsMs = committed === null ? null : toMs(committed.endsAt, 'endsAt');
   const carriedLastInterventionEndedMs = committed === null
     ? null
@@ -482,7 +507,7 @@ function evaluateAdaptiveDirectorDecision({
   }
   const cooldownActive = lastInterventionEndedMs !== null
     && nowMs < lastInterventionEndedMs + dc.interventionRefractoryMs;
-  const rescueOverride = rescue.signalled && (rescue.emergency || !cooldownActive);
+  const rescueOverride = rescue.signalled && !cooldownActive;
 
   const roleFields = {
     goldenCoinId: roles.goldenCoinId,
@@ -495,9 +520,10 @@ function evaluateAdaptiveDirectorDecision({
   // RESCUE is the ONLY early interrupt — and only while not already in
   // RESCUE (an active RESCUE under ongoing distress is retained to its
   // committed expiry — no per-tick recommit churn) and only when the
-  // refractory permits it (an ordinary rescue waits out the refractory
-  // NORMAL window; a death-cluster or severe-drawdown emergency never
-  // waits); everything else
+  // refractory permits it (a rescue — ordinary or emergency — waits out
+  // the refractory NORMAL window; on reachable states an active
+  // non-RESCUE window implies an inactive refractory, so a newly
+  // encountered emergency still interrupts immediately); everything else
   // waits for the committed window to elapse. A role rotation while the
   // window stands commits a same-window decision at the next cursor.
   if (committed !== null && nowMs < committedEndsMs
@@ -564,10 +590,10 @@ function evaluateAdaptiveDirectorDecision({
     };
   }
 
-  // Ordinary triggers suppressed by the refractory (recorded for the
-  // refractory reason below).
+  // Ordinary and emergency triggers suppressed by the refractory
+  // (recorded for the refractory reason below).
   const suppressed = [];
-  if (rescue.signalled) suppressed.push('ordinary rescue');
+  if (rescue.signalled) suppressed.push(rescue.emergency ? 'emergency rescue' : 'ordinary rescue');
 
   if (overheated) {
     if (!cooldownActive) {

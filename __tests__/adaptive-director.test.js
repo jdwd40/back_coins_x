@@ -793,6 +793,28 @@ describe('Wave 2 adaptive Director: idempotent re-evaluation', () => {
     });
     }
 
+    // A persistent severe broad drawdown — the severe-decline emergency.
+    function severeDeclineObservation() {
+    return makeObservation({
+    breadth: { rising: 0, falling: 5, flat: 1 },
+    medianMovementPct: -0.05,
+    broadMovementPct: -0.045,
+    drawdownPct: 0.35,
+    coins: makeCoins().map((c) => ({ ...c, movementPct: -0.04 }))
+    });
+    }
+
+    // A persistent death cluster — the death-cluster emergency.
+    function deathClusterObservation() {
+    return makeObservation({
+    recentDeathCount: CONFIG.directorControl.deathClusterCount,
+    recentDeaths: [
+      { coinId: 40, diedAtMs: BASE_MS - 5 * MINUTE },
+      { coinId: 41, diedAtMs: BASE_MS - 8 * MINUTE }
+    ]
+    });
+    }
+
     function overheatObservation() {
     return makeObservation({
     broadMovementPct: 0.12,
@@ -863,21 +885,48 @@ describe('Wave 2 adaptive Director: idempotent re-evaluation', () => {
     expect(after.state.intensity).toBeLessThanOrEqual(0.6);
     });
 
-    test('a death-cluster emergency overrides the refractory, boundedly', () => {
+    test('an emergency RESCUE does not override its own refractory at expiry: a bounded NORMAL opportunity, then rescue recurs', () => {
+    // PR #36 refractory correction: the severe-drawdown and death-cluster
+    // emergencies remain capable of rescue, but once an emergency window has
+    // ENDED its persisted refractory holds even the emergency to a bounded
+    // NORMAL opportunity — no permanent RESCUE loop.
     const rescue = expiredIntervention({ mode: 'RESCUE', direction: 'POSITIVE' });
-    const emergency = makeObservation({
-    recentDeathCount: CONFIG.directorControl.deathClusterCount,
-    recentDeaths: [
-      { coinId: 40, diedAtMs: BASE_MS - 5 * MINUTE },
-      { coinId: 41, diedAtMs: BASE_MS - 8 * MINUTE }
-    ]
+    for (const emergency of [severeDeclineObservation(), deathClusterObservation()]) {
+    // The emergency window ended 1m ago with the emergency still live:
+    // the next decision is a NORMAL refractory window, not a fresh RESCUE.
+    const first = evaluate({ controlState: rescue, observation: emergency });
+    expect(first.state.mode).toBe('NORMAL');
+    expect(first.state.reason).toMatch(/refractory/i);
+    // Mid-refractory and mid-window the NORMAL opportunity stands unchanged
+    // even though the emergency persists.
+    const mid = evaluate({
+    nowMs: BASE_MS + 2 * MINUTE,
+    controlState: first.state,
+    observation: emergency
     });
-    const { state } = evaluate({ controlState: rescue, observation: emergency });
-    expect(state.mode).toBe('RESCUE');
-    // Bounded: one bounded window, never an unbounded chain commitment.
-    const duration = new Date(state.endsAt).getTime() - new Date(state.startedAt).getTime();
+    expect(mid.changed).toBe(false);
+    expect(mid.state.mode).toBe('NORMAL');
+    // Still inside the refractory after the first NORMAL window elapsed:
+    // another bounded NORMAL window, not a recommit.
+    const lateRefractory = evaluate({
+    nowMs: ENDED_MS + REFRACTORY_MS - MINUTE,
+    controlState: first.state,
+    observation: emergency
+    });
+    expect(lateRefractory.state.mode).toBe('NORMAL');
+    // Once the bounded refractory has elapsed the emergency DOES recur —
+    // rescue is weakened in no way, only bounded.
+    const after = evaluate({
+    nowMs: ENDED_MS + REFRACTORY_MS + MINUTE,
+    controlState: lateRefractory.state,
+    observation: emergency
+    });
+    expect(after.state.mode).toBe('RESCUE');
+    expect(after.state.direction).toBe('POSITIVE');
+    const duration = new Date(after.state.endsAt).getTime() - new Date(after.state.startedAt).getTime();
     expect(duration).toBeGreaterThanOrEqual(CONFIG.directorControl.interventionDurationMs.min);
     expect(duration).toBeLessThanOrEqual(CONFIG.directorControl.interventionDurationMs.max);
+    }
     });
 
     test('an ordinary rescue cannot interrupt the refractory NORMAL window mid-window', () => {
@@ -893,34 +942,56 @@ describe('Wave 2 adaptive Director: idempotent re-evaluation', () => {
     expect(mid.state.mode).toBe('NORMAL');
     });
 
-    test('a death-cluster emergency still interrupts an active intervention even inside the refractory', () => {
+    test('an emergency cannot interrupt the refractory NORMAL window mid-window', () => {
+    // The exact PR #36 defect path: an emergency RESCUE ended, the NORMAL
+    // refractory opportunity opened, and the SAME persisted emergency must
+    // not interrupt that window mid-window (that would be a permanent
+    // RESCUE loop with 1-minute NORMAL gaps).
+    const rescue = expiredIntervention({ mode: 'RESCUE', direction: 'POSITIVE' });
+    for (const emergency of [severeDeclineObservation(), deathClusterObservation()]) {
+    const first = evaluate({ controlState: rescue, observation: emergency });
+    expect(first.state.mode).toBe('NORMAL');
+    const mid = evaluate({
+    nowMs: BASE_MS + 2 * MINUTE,
+    controlState: first.state,
+    observation: emergency
+    });
+    expect(mid.changed).toBe(false);
+    expect(mid.state.mode).toBe('NORMAL');
+    }
+    });
+
+    test('a newly encountered death-cluster emergency interrupts an active non-RESCUE intervention window', () => {
+    // The intended emergency exception remains: an emergency encountered
+    // while an intervention window is ACTIVE interrupts it immediately.
+    // (An active intervention can never coexist with an active refractory —
+    // every intervention is committed only outside the refractory and the
+    // tracker does not advance while the window stands — so on every
+    // reachable state the refractory is inactive here.)
     const bust = makeCommitted({
     mode: 'BUST',
     direction: 'NEGATIVE',
     intensity: 0.5,
     endsAt: new Date(BASE_MS + 5 * MINUTE).toISOString(),
-    lastInterventionEndedAt: new Date(BASE_MS - 10 * MINUTE).toISOString()
+    lastInterventionEndedAt: new Date(BASE_MS - 30 * MINUTE).toISOString()
     });
-    const emergency = makeObservation({
-    recentDeathCount: CONFIG.directorControl.deathClusterCount,
-    recentDeaths: [
-      { coinId: 40, diedAtMs: BASE_MS - 5 * MINUTE },
-      { coinId: 41, diedAtMs: BASE_MS - 8 * MINUTE }
-    ]
-    });
-    const { state, changed } = evaluate({ controlState: bust, observation: emergency });
+    const { state, changed } = evaluate({ controlState: bust, observation: deathClusterObservation() });
     expect(changed).toBe(true);
     expect(state.mode).toBe('RESCUE');
     // The interrupted BUST ended NOW.
     expect(new Date(state.lastInterventionEndedAt).getTime()).toBe(BASE_MS);
     });
 
-    test('long-horizon duty cycle: persistent flat/rescue/overheat conditions cannot chain interventions without NORMAL opportunities', () => {
+    test('long-horizon duty cycle: persistent flat/rescue/overheat/emergency conditions cannot chain interventions without NORMAL opportunities', () => {
     const HOURS = 12;
     const scenarios = [
     ['stagnation', stagnantObservation()],
     ['ordinary rescue', ordinaryRescueObservation()],
-    ['overheat', overheatObservation()]
+    ['overheat', overheatObservation()],
+    // The PR #36 defect profiles: a PERSISTENT emergency must still leave
+    // bounded NORMAL opportunities — nonzero rescue, never continuous.
+    ['severe drawdown emergency', severeDeclineObservation()],
+    ['death-cluster emergency', deathClusterObservation()]
     ];
     for (const [label, observation] of scenarios) {
       let committed = null;
