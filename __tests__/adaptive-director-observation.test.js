@@ -127,9 +127,12 @@ describe('Wave 2 observation: persisted-source definition and boundedness', () =
     expect(obs.distressedCount).toBe(1);
     expect(obs.recentDeathCount).toBe(0);
     expect(obs.recentDeaths).toEqual([]);
-    // Meaningful movement: coin 1's +3.0% at BASE-12m and coin 3's -2.0%
-    // at BASE-5m qualify; the latest wins.
-    expect(obs.lastMeaningfulMovementAtMs).toBe(BASE_MS - 5 * MINUTE);
+    // Meaningful movement is MARKET-WIDE (PR #36 correction): a configured
+    // breadth of live coins must have moved meaningfully. Here only 2 of 6
+    // live coins moved meaningfully (coin 1 at BASE-12m, coin 3 at
+    // BASE-5m), below the required breadth of ceil(0.5 x 6) = 3, so the
+    // market clock is NOT refreshed by the minority.
+    expect(obs.lastMeaningfulMovementAtMs).toBeNull();
   });
 
   test('ticks outside the bounded lookback or before the world epoch contribute nothing', async () => {
@@ -261,5 +264,122 @@ describe('Wave 2 observation: persisted-source definition and boundedness', () =
     expect((await db.query('SELECT count(*)::int AS n FROM persistent_coin_events')).rows[0].n).toBe(0);
     const prices = await db.query('SELECT coin_id, current_price FROM coins WHERE coin_id BETWEEN 1 AND 6 ORDER BY coin_id');
     expect(prices.rows.map((r) => Number(r.current_price))).toEqual([1.9, 1.8, 1.9, 1.5, 2.0, 1.9]);
+  });
+});
+
+describe('Wave 2 observation: market-wide breadth-aware stagnation (PR #36 correction)', () => {
+  // The corrected stagnation clock is a MARKET-LEVEL statistic: a useful
+  // breadth of LIVE coins (ceil(stagnationBreadthFraction x liveCoinCount))
+  // must each have moved meaningfully (per-coin consecutive-tick delta at
+  // or above stagnationThresholdPct) inside the bounded lookback for the
+  // market clock to refresh, and the refreshed instant is the time the
+  // breadth was crossed (the k-th largest per-coin last-meaningful time),
+  // never the latest tick of any one coin.
+  beforeEach(() => {
+    assertDisposableTestDatabase();
+  });
+
+  const TEN_COINS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+  async function tenCoinRoster(world) {
+    for (const coinId of TEN_COINS) {
+      await openCoinState(world, coinId);
+      await setPrice(coinId, 1.9);
+    }
+  }
+
+  // A flat coin: two in-window ticks well below BOTH the 2% meaningful
+  // threshold and the 0.5% breadth threshold (+0.4%).
+  async function flatCoin(coinId) {
+    await tick(coinId, 1.0, BASE_MS - 20 * MINUTE);
+    await tick(coinId, 1.004, BASE_MS - 3 * MINUTE);
+  }
+
+  // A coin whose last meaningful move (+3%) lands at atMs.
+  async function moverCoin(coinId, atMs) {
+    await tick(coinId, 1.0, BASE_MS - 25 * MINUTE);
+    await tick(coinId, 1.03, atMs);
+  }
+
+  test('1/10 moving and 9/10 flat does NOT refresh the market clock (stagnation remains possible)', async () => {
+    const world = await provisionedWorld();
+    await tenCoinRoster(world);
+    await moverCoin(1, BASE_MS - 3 * MINUTE);
+    for (const coinId of TEN_COINS.slice(1)) await flatCoin(coinId);
+    const obs = await buildAdaptiveDirectorObservation(db, { world, nowMs: BASE_MS, config: CONFIG });
+    expect(obs.liveCoinCount).toBe(10);
+    // One mover out of ten is below the required breadth of 5: no refresh.
+    expect(obs.lastMeaningfulMovementAtMs).toBeNull();
+  });
+
+  test('majority movement refreshes the clock at the breadth-crossing time, not the latest single tick', async () => {
+    const world = await provisionedWorld();
+    await tenCoinRoster(world);
+    // Five movers (exactly the required breadth) at staggered times.
+    await moverCoin(1, BASE_MS - 14 * MINUTE);
+    await moverCoin(2, BASE_MS - 10 * MINUTE);
+    await moverCoin(3, BASE_MS - 6 * MINUTE);
+    await moverCoin(4, BASE_MS - 4 * MINUTE);
+    await moverCoin(5, BASE_MS - 2 * MINUTE);
+    for (const coinId of TEN_COINS.slice(5)) await flatCoin(coinId);
+    const obs = await buildAdaptiveDirectorObservation(db, { world, nowMs: BASE_MS, config: CONFIG });
+    // The market moved when the FIFTH coin crossed the threshold
+    // (BASE-14m) — the latest single tick (BASE-2m) is not the verdict.
+    expect(obs.lastMeaningfulMovementAtMs).toBe(BASE_MS - 14 * MINUTE);
+  });
+
+  test('a mixed noisy roster counts only meaningful per-coin movement', async () => {
+    const world = await provisionedWorld();
+    await tenCoinRoster(world);
+    // Three genuinely meaningful movers.
+    await moverCoin(1, BASE_MS - 8 * MINUTE);
+    await moverCoin(2, BASE_MS - 7 * MINUTE);
+    await moverCoin(3, BASE_MS - 6 * MINUTE);
+    // Seven noisy coins: every consecutive delta is 1.5-1.9% — real noise,
+    // but below the 2% meaningful threshold, so noise never counts.
+    for (const coinId of TEN_COINS.slice(3)) {
+      await tick(coinId, 1.0, BASE_MS - 25 * MINUTE);
+      await tick(coinId, 1.015, BASE_MS - 12 * MINUTE);
+      await tick(coinId, 0.996, BASE_MS - 4 * MINUTE);
+    }
+    const obs = await buildAdaptiveDirectorObservation(db, { world, nowMs: BASE_MS, config: CONFIG });
+    // 3 of 10 < required 5: the noisy majority cannot refresh the clock.
+    expect(obs.lastMeaningfulMovementAtMs).toBeNull();
+  });
+
+  test('a single volatile ZIP outlier with constant large ticks never resets the market clock', async () => {
+    const world = await provisionedWorld();
+    await tenCoinRoster(world);
+    // One hyper-volatile coin: +/-3% every three minutes right up to BASE-1m.
+    let price = 1.0;
+    for (let minutesAgo = 28; minutesAgo >= 1; minutesAgo -= 3) {
+      await tick(1, price, BASE_MS - minutesAgo * MINUTE);
+      price = price === 1.0 ? 1.031 : 1.0;
+    }
+    for (const coinId of TEN_COINS.slice(1)) await flatCoin(coinId);
+    const obs = await buildAdaptiveDirectorObservation(db, { world, nowMs: BASE_MS, config: CONFIG });
+    expect(obs.coins[0].archetype).toBe('ZIP');
+    expect(obs.lastMeaningfulMovementAtMs).toBeNull();
+  });
+
+  test('a naturally moving healthy market refreshes the clock (non-stagnant)', async () => {
+    const world = await provisionedWorld();
+    await tenCoinRoster(world);
+    // Six of ten coins moved meaningfully, all recently — a healthy,
+    // naturally moving market.
+    await moverCoin(1, BASE_MS - 9 * MINUTE);
+    await moverCoin(2, BASE_MS - 7 * MINUTE);
+    await moverCoin(3, BASE_MS - 6 * MINUTE);
+    await moverCoin(4, BASE_MS - 5 * MINUTE);
+    await moverCoin(5, BASE_MS - 4 * MINUTE);
+    await moverCoin(6, BASE_MS - 2 * MINUTE);
+    for (const coinId of TEN_COINS.slice(6)) await flatCoin(coinId);
+    const obs = await buildAdaptiveDirectorObservation(db, { world, nowMs: BASE_MS, config: CONFIG });
+    // Breadth 6 >= required 5; the crossing time is the 5th-largest mover
+    // time: descending -2, -4, -5, -6, -7, -9 -> BASE-7m.
+    expect(obs.lastMeaningfulMovementAtMs).toBe(BASE_MS - 7 * MINUTE);
+    // Seven minutes ago is far inside the 60-minute stagnation window: a
+    // healthy market is never stagnant.
+    expect(BASE_MS - obs.lastMeaningfulMovementAtMs).toBeLessThan(CONFIG.directorControl.stagnationWindowMs);
   });
 });

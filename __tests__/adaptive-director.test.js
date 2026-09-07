@@ -96,6 +96,7 @@ function makeCommitted(overrides = {}) {
     demonExpiresAt: null,
     lastSwingDirection: 'NEGATIVE',
     lastMeaningfulMovementAt: new Date(BASE_MS - 5 * MINUTE).toISOString(),
+    lastInterventionEndedAt: null,
     ...overrides
   };
 }
@@ -122,7 +123,7 @@ describe('Wave 2 adaptive Director: determinism contract', () => {
     for (const field of [
       'mode', 'direction', 'intensity', 'startedAt', 'endsAt', 'decisionIndex',
       'reason', 'goldenCoinId', 'goldenExpiresAt', 'demonCoinId', 'demonExpiresAt',
-      'lastSwingDirection', 'lastMeaningfulMovementAt'
+      'lastSwingDirection', 'lastMeaningfulMovementAt', 'lastInterventionEndedAt'
     ]) {
       expect(state).toHaveProperty(field);
     }
@@ -228,9 +229,12 @@ describe('Wave 2 adaptive Director: NORMAL discipline and stagnation', () => {
   });
 
   test('stagnation swings never loop pathologically in one direction', () => {
-    // Chain 40 consecutive stagnation decisions (each carrying the last
-    // swing direction forward): the anti-loop confirmation roll must flip
-    // direction at least once. Deterministic for this fixed seed set.
+    // Chain stagnation evaluations (each carrying the last swing direction
+    // forward), stepping one minute past every committed window. Under the
+    // PR #36 refractory the swings are separated by bounded NORMAL windows;
+    // across the refractory-separated swings the anti-loop confirmation
+    // roll must still flip direction at least once. Deterministic for this
+    // fixed seed set.
     let committed = null;
     const directions = [];
     let nowMs = BASE_MS;
@@ -241,7 +245,7 @@ describe('Wave 2 adaptive Director: NORMAL discipline and stagnation', () => {
       breadth: { rising: 0, falling: 0, flat: 6 },
       coins: makeCoins().map((c) => ({ ...c, movementPct: 0 }))
     });
-    for (let i = 0; i < 40; i++) {
+    for (let i = 0; i < 120; i++) {
       const { state } = evaluate({
         nowMs,
         controlState: committed,
@@ -629,5 +633,404 @@ describe('Wave 2 adaptive Director: idempotent re-evaluation', () => {
     expect(state.decisionIndex).toBe(0);
     expect(state.mode).toBe('NORMAL');
     expect(state.lastSwingDirection).toBeNull();
-  });
-});
+    });
+    });
+
+    describe('Wave 2 adaptive Director: RESCUE trigger tightening (PR #36 correction)', () => {
+    const expiredNormal = () => makeCommitted({ endsAt: new Date(BASE_MS - MINUTE).toISOString() });
+
+    // A mild-decline roster: fallingCount coins at -0.6% (below the 2%
+    // corroboration level), the rest flat; shallow drawdown; no weak,
+    // distressed or death evidence.
+    function mildDeclineObservation(liveCount, fallingCount) {
+    const coins = [];
+    for (let i = 1; i <= liveCount; i++) {
+    coins.push({
+      coinId: i, archetype: 'ZIP', condition: -0.05, currentPrice: 1, peakReference: 1.04,
+      structuralReference: 1, movementPct: i <= fallingCount ? -0.006 : 0.001
+    });
+    }
+    return makeObservation({
+    coins,
+    liveCoinCount: liveCount,
+    breadth: { rising: 0, falling: fallingCount, flat: liveCount - fallingCount },
+    medianMovementPct: -0.006,
+    broadMovementPct: (fallingCount * -0.006 + (liveCount - fallingCount) * 0.001) / liveCount,
+    drawdownPct: 0.04
+    });
+    }
+
+    // A substantial-decline roster: fallingCount coins at -3%.
+    function substantialDeclineObservation(liveCount, fallingCount) {
+    const coins = [];
+    for (let i = 1; i <= liveCount; i++) {
+    coins.push({
+      coinId: i, archetype: 'ZIP', condition: -0.1, currentPrice: 1, peakReference: 1.06,
+      structuralReference: 1, movementPct: i <= fallingCount ? -0.03 : 0.001
+    });
+    }
+    return makeObservation({
+    coins,
+    liveCoinCount: liveCount,
+    breadth: { rising: 0, falling: fallingCount, flat: liveCount - fallingCount },
+    medianMovementPct: -0.03,
+    broadMovementPct: (fallingCount * -0.03 + (liveCount - fallingCount) * 0.001) / liveCount,
+    drawdownPct: 0.06
+    });
+    }
+
+    test('falling breadth alone does not rescue: 2/2 mildly down stays NORMAL', () => {
+    const { state } = evaluate({ controlState: expiredNormal(), observation: mildDeclineObservation(2, 2) });
+    expect(state.mode).toBe('NORMAL');
+    });
+
+    test('a 3-coin mild decline does not rescue', () => {
+    const { state } = evaluate({ controlState: expiredNormal(), observation: mildDeclineObservation(3, 3) });
+    expect(state.mode).toBe('NORMAL');
+    });
+
+    test('7/10 mild decline without corroboration stays NORMAL', () => {
+    const { state } = evaluate({ controlState: expiredNormal(), observation: mildDeclineObservation(10, 7) });
+    expect(state.mode).toBe('NORMAL');
+    });
+
+    test('7/10 substantial decline corroborates the falling breadth: RESCUE allowed', () => {
+    const { state } = evaluate({ controlState: expiredNormal(), observation: substantialDeclineObservation(10, 7) });
+    expect(state.mode).toBe('RESCUE');
+    expect(state.direction).toBe('POSITIVE');
+    expect(state.intensity).toBeGreaterThanOrEqual(0.4);
+    expect(state.intensity).toBeLessThanOrEqual(1);
+    expect(state.reason).toMatch(/^rescue: /);
+    });
+
+    test('severe drawdown remains independently capable of rescue', () => {
+    const { state } = evaluate({
+    controlState: expiredNormal(),
+    observation: makeObservation({ drawdownPct: 0.3 })
+    });
+    expect(state.mode).toBe('RESCUE');
+    });
+
+    test('a weak/distressed cluster remains independently capable of rescue', () => {
+    const { state } = evaluate({
+    controlState: expiredNormal(),
+    observation: makeObservation({
+      weakCount: CONFIG.directorControl.rescueWeakCount,
+      distressedCount: 1,
+      drawdownPct: 0.08
+    })
+    });
+    expect(state.mode).toBe('RESCUE');
+    });
+
+    test('a recent-death cluster remains independently capable of rescue over a mild market', () => {
+    const { state } = evaluate({
+    controlState: expiredNormal(),
+    observation: mildDeclineObservation(6, 1)
+      && makeObservation({
+        recentDeathCount: CONFIG.directorControl.deathClusterCount,
+        recentDeaths: [
+          { coinId: 40, diedAtMs: BASE_MS - 10 * MINUTE },
+          { coinId: 41, diedAtMs: BASE_MS - 20 * MINUTE }
+        ]
+      })
+    });
+    expect(state.mode).toBe('RESCUE');
+    });
+
+    test('small rosters cannot reach maximum severity from breadth alone', () => {
+    // 2/2 substantially down: corroborated by magnitude, so RESCUE fires —
+    // but the breadth component is roster-scaled (2 < 4), so severity stays
+    // below the maximum the same evidence produces on a full roster.
+    const small = evaluate({ controlState: expiredNormal(), observation: substantialDeclineObservation(2, 2) });
+    expect(small.state.mode).toBe('RESCUE');
+    expect(small.state.intensity).toBeLessThan(1);
+    const full = evaluate({ controlState: expiredNormal(), observation: substantialDeclineObservation(10, 10) });
+    expect(full.state.mode).toBe('RESCUE');
+    expect(full.state.intensity).toBeGreaterThan(small.state.intensity);
+    });
+    });
+
+    describe('Wave 2 adaptive Director: intervention hysteresis/refractory (PR #36 correction)', () => {
+    const REFRACTORY_MS = CONFIG.directorControl.interventionRefractoryMs;
+    const ENDED_MS = BASE_MS - MINUTE; // the prior intervention ended 1m ago
+
+    function expiredIntervention(overrides = {}) {
+      return makeCommitted({
+        mode: 'BOOM',
+        direction: 'POSITIVE',
+        intensity: 0.5,
+        startedAt: new Date(BASE_MS - 11 * MINUTE).toISOString(),
+        endsAt: new Date(ENDED_MS).toISOString(),
+        lastSwingDirection: 'POSITIVE',
+        // The stagnation clock is stale: no market-wide meaningful movement
+        // for hours, so the stagnation trigger is live at the expiry.
+        lastMeaningfulMovementAt: new Date(BASE_MS - 10 * 60 * MINUTE).toISOString(),
+        ...overrides
+      });
+    }
+
+    function stagnantObservation() {
+    return makeObservation({
+    lastMeaningfulMovementAtMs: BASE_MS - 10 * 60 * MINUTE,
+    broadMovementPct: 0,
+    medianMovementPct: 0,
+    breadth: { rising: 0, falling: 0, flat: 6 },
+    coins: makeCoins().map((c) => ({ ...c, movementPct: 0 }))
+    });
+    }
+
+    // Falling breadth corroborated by meaningful negative magnitude and a
+    // corroborating drawdown — but NOT an emergency: no death cluster, no
+    // severe drawdown.
+    function ordinaryRescueObservation() {
+    return makeObservation({
+    breadth: { rising: 0, falling: 5, flat: 1 },
+    medianMovementPct: -0.035,
+    broadMovementPct: -0.03,
+    drawdownPct: 0.12,
+    coins: makeCoins().map((c) => ({ ...c, movementPct: -0.03 }))
+    });
+    }
+
+    function overheatObservation() {
+    return makeObservation({
+    broadMovementPct: 0.12,
+    medianMovementPct: 0.11,
+    breadth: { rising: 5, falling: 0, flat: 1 },
+    drawdownPct: 0
+    });
+    }
+
+    test('an expired stagnation swing does not recommit immediately: a bounded NORMAL refractory window opens', () => {
+    const { state, changed } = evaluate({ controlState: expiredIntervention(), observation: stagnantObservation() });
+    expect(changed).toBe(true);
+    expect(state.mode).toBe('NORMAL');
+    expect(state.reason).toMatch(/refractory/i);
+    expect(new Date(state.lastInterventionEndedAt).getTime()).toBe(ENDED_MS);
+    const duration = new Date(state.endsAt).getTime() - new Date(state.startedAt).getTime();
+    expect(duration).toBeGreaterThanOrEqual(CONFIG.directorControl.normalSwingTargetMs.min);
+    expect(duration).toBeLessThanOrEqual(CONFIG.directorControl.normalSwingTargetMs.max);
+    });
+
+    test('continued stagnation triggers a swing again only after the refractory elapses', () => {
+    const first = evaluate({ controlState: expiredIntervention(), observation: stagnantObservation() });
+    expect(first.state.mode).toBe('NORMAL');
+    // Still inside the refractory: another NORMAL window, not a swing.
+    const midRefractory = evaluate({
+    nowMs: ENDED_MS + REFRACTORY_MS - MINUTE,
+    controlState: first.state,
+    observation: stagnantObservation()
+    });
+    expect(midRefractory.state.mode).toBe('NORMAL');
+    // Continued conditions MAY eventually trigger again (once both the
+    // refractory and the current NORMAL window have elapsed).
+    const afterRefractory = evaluate({
+      nowMs: Math.max(
+        new Date(midRefractory.state.endsAt).getTime(),
+        ENDED_MS + REFRACTORY_MS
+      ) + MINUTE,
+      controlState: midRefractory.state,
+      observation: stagnantObservation()
+    });
+    expect(['BOOM', 'BUST']).toContain(afterRefractory.state.mode);
+    });
+
+    test('an unchanged ordinary RESCUE does not recommit at expiry, but may return after the refractory', () => {
+    const rescue = expiredIntervention({ mode: 'RESCUE', direction: 'POSITIVE' });
+    const first = evaluate({ controlState: rescue, observation: ordinaryRescueObservation() });
+    expect(first.state.mode).toBe('NORMAL');
+    expect(first.state.reason).toMatch(/refractory/i);
+    const after = evaluate({
+    nowMs: ENDED_MS + REFRACTORY_MS + MINUTE,
+    controlState: first.state,
+    observation: ordinaryRescueObservation()
+    });
+    expect(after.state.mode).toBe('RESCUE');
+    expect(after.state.direction).toBe('POSITIVE');
+    });
+
+    test('sustained overheat does not recommit BUST at every expiry', () => {
+    const bust = expiredIntervention({ mode: 'BUST', direction: 'NEGATIVE', lastSwingDirection: 'NEGATIVE' });
+    const first = evaluate({ controlState: bust, observation: overheatObservation() });
+    expect(first.state.mode).toBe('NORMAL');
+    const after = evaluate({
+    nowMs: ENDED_MS + REFRACTORY_MS + MINUTE,
+    controlState: first.state,
+    observation: overheatObservation()
+    });
+    expect(after.state.mode).toBe('BUST');
+    expect(after.state.intensity).toBeLessThanOrEqual(0.6);
+    });
+
+    test('a death-cluster emergency overrides the refractory, boundedly', () => {
+    const rescue = expiredIntervention({ mode: 'RESCUE', direction: 'POSITIVE' });
+    const emergency = makeObservation({
+    recentDeathCount: CONFIG.directorControl.deathClusterCount,
+    recentDeaths: [
+      { coinId: 40, diedAtMs: BASE_MS - 5 * MINUTE },
+      { coinId: 41, diedAtMs: BASE_MS - 8 * MINUTE }
+    ]
+    });
+    const { state } = evaluate({ controlState: rescue, observation: emergency });
+    expect(state.mode).toBe('RESCUE');
+    // Bounded: one bounded window, never an unbounded chain commitment.
+    const duration = new Date(state.endsAt).getTime() - new Date(state.startedAt).getTime();
+    expect(duration).toBeGreaterThanOrEqual(CONFIG.directorControl.interventionDurationMs.min);
+    expect(duration).toBeLessThanOrEqual(CONFIG.directorControl.interventionDurationMs.max);
+    });
+
+    test('an ordinary rescue cannot interrupt the refractory NORMAL window mid-window', () => {
+    const rescue = expiredIntervention({ mode: 'RESCUE', direction: 'POSITIVE' });
+    const first = evaluate({ controlState: rescue, observation: ordinaryRescueObservation() });
+    expect(first.state.mode).toBe('NORMAL');
+    const mid = evaluate({
+    nowMs: BASE_MS + 2 * MINUTE,
+    controlState: first.state,
+    observation: ordinaryRescueObservation()
+    });
+    expect(mid.changed).toBe(false);
+    expect(mid.state.mode).toBe('NORMAL');
+    });
+
+    test('a death-cluster emergency still interrupts an active intervention even inside the refractory', () => {
+    const bust = makeCommitted({
+    mode: 'BUST',
+    direction: 'NEGATIVE',
+    intensity: 0.5,
+    endsAt: new Date(BASE_MS + 5 * MINUTE).toISOString(),
+    lastInterventionEndedAt: new Date(BASE_MS - 10 * MINUTE).toISOString()
+    });
+    const emergency = makeObservation({
+    recentDeathCount: CONFIG.directorControl.deathClusterCount,
+    recentDeaths: [
+      { coinId: 40, diedAtMs: BASE_MS - 5 * MINUTE },
+      { coinId: 41, diedAtMs: BASE_MS - 8 * MINUTE }
+    ]
+    });
+    const { state, changed } = evaluate({ controlState: bust, observation: emergency });
+    expect(changed).toBe(true);
+    expect(state.mode).toBe('RESCUE');
+    // The interrupted BUST ended NOW.
+    expect(new Date(state.lastInterventionEndedAt).getTime()).toBe(BASE_MS);
+    });
+
+    test('long-horizon duty cycle: persistent flat/rescue/overheat conditions cannot chain interventions without NORMAL opportunities', () => {
+    const HOURS = 12;
+    const scenarios = [
+    ['stagnation', stagnantObservation()],
+    ['ordinary rescue', ordinaryRescueObservation()],
+    ['overheat', overheatObservation()]
+    ];
+    for (const [label, observation] of scenarios) {
+      let committed = null;
+      let nowMs = BASE_MS;
+      const modes = [];
+      const decisions = [];
+      for (let i = 0; i < HOURS * 60; i++) {
+        const { state, changed } = evaluate({
+          nowMs,
+          controlState: committed,
+          observation,
+          worldSeed: `wave2-duty-${label}`
+        });
+        modes.push(state.mode);
+        if (changed) decisions.push({ mode: state.mode, startedAt: state.startedAt });
+        committed = state;
+        nowMs += MINUTE;
+      }
+      const interventionTicks = modes.filter((mode) => mode !== 'NORMAL').length;
+      const duty = interventionTicks / modes.length;
+      // Bounded duty cycle: interventions never dominate the horizon...
+      expect(duty).toBeLessThanOrEqual(0.5);
+      // ...but continued conditions DO eventually retrigger.
+      expect(duty).toBeGreaterThan(0);
+      // No direct intervention->intervention transition without a NORMAL
+      // opportunity. Collapse same-window recommits (role rotations share
+      // the window's startedAt) before comparing adjacent decisions.
+      const windows = decisions.filter((d, i) => i === 0 || d.startedAt !== decisions[i - 1].startedAt);
+      for (let i = 1; i < windows.length; i++) {
+        if (windows[i].mode !== 'NORMAL' && windows[i - 1].mode !== 'NORMAL') {
+          throw new Error(`${label}: direct ${windows[i - 1].mode} -> ${windows[i].mode} transition at decision ${i}`);
+        }
+      }
+    }
+    });
+    });
+
+    describe('Wave 2 adaptive Director: Demon retention revalidation under recent-death safety (PR #36 correction)', () => {
+    function committedWithRoles() {
+    const genesis = evaluate();
+    expect(genesis.state.demonCoinId).not.toBeNull();
+    return {
+    ...genesis.state,
+    goldenExpiresAt: new Date(BASE_MS + 60 * MINUTE).toISOString(),
+    demonExpiresAt: new Date(BASE_MS + 60 * MINUTE).toISOString()
+    };
+    }
+
+    const safetyDeaths = () => ({ recentDeathCount: 1, recentDeaths: [{ coinId: 44, diedAtMs: BASE_MS + MINUTE }] });
+
+    test('a retained Demon that became critically weak rotates out while safety is active', () => {
+    const committed = committedWithRoles();
+    const demonId = committed.demonCoinId;
+    const coins = makeCoins().map((c) => (c.coinId === demonId ? { ...c, condition: -0.8 } : c));
+    const { state, changed } = evaluate({
+    nowMs: BASE_MS + 2 * MINUTE,
+    controlState: committed,
+    observation: makeObservation({ coins, ...safetyDeaths() })
+    });
+    expect(changed).toBe(true);
+    expect(state.demonCoinId).not.toBe(demonId);
+    // Safe candidates exist, so the rotated Demon is a safe target.
+    expect(state.demonCoinId).not.toBeNull();
+    const holder = coins.find((c) => c.coinId === state.demonCoinId);
+    expect(holder.condition).toBeGreaterThan(CONFIG.directorControl.distressedConditionThreshold);
+    // Golden retention is untouched.
+    expect(state.goldenCoinId).toBe(committed.goldenCoinId);
+    // Same window, next decision cursor.
+    expect(state.endsAt).toBe(committed.endsAt);
+    expect(state.decisionIndex).toBe(committed.decisionIndex + 1);
+    });
+
+    test('a retained Demon that was freshly replaced rotates out while safety is active', () => {
+    const committed = committedWithRoles();
+    const demonId = committed.demonCoinId;
+    const { state } = evaluate({
+    nowMs: BASE_MS + 2 * MINUTE,
+    controlState: committed,
+    observation: makeObservation({
+      ...safetyDeaths(),
+      recentReplacements: [{ coinId: demonId, createdAtMs: BASE_MS + MINUTE }]
+    })
+    });
+    expect(state.demonCoinId).not.toBe(demonId);
+    });
+
+    test('a retained Demon that is merely LOSING is kept: the role stays dangerous', () => {
+    const committed = committedWithRoles();
+    const demonId = committed.demonCoinId;
+    // Deeply negative movement but a HEALTHY condition: not unsafe.
+    const coins = makeCoins().map((c) => (c.coinId === demonId ? { ...c, movementPct: -0.09 } : c));
+    const { state, changed } = evaluate({
+    nowMs: BASE_MS + 2 * MINUTE,
+    controlState: committed,
+    observation: makeObservation({ coins, ...safetyDeaths() })
+    });
+    expect(changed).toBe(false);
+    expect(state.demonCoinId).toBe(demonId);
+    });
+
+    test('outside the safety window a critically weak Demon is still retained (role identity preserved)', () => {
+    const committed = committedWithRoles();
+    const demonId = committed.demonCoinId;
+    const coins = makeCoins().map((c) => (c.coinId === demonId ? { ...c, condition: -0.8 } : c));
+    const { state, changed } = evaluate({
+    nowMs: BASE_MS + 2 * MINUTE,
+    controlState: committed,
+    observation: makeObservation({ coins })
+    });
+    expect(changed).toBe(false);
+    expect(state.demonCoinId).toBe(demonId);
+    });
+    });

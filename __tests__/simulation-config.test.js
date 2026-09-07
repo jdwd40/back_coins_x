@@ -660,3 +660,59 @@ describe('simulation config Director control Wave 2 (adaptive decision bounds)',
     expect(resolved.directorControl.rescueDrawdownPct).toBe(0.25);
   });
 });
+
+describe('simulation config Director control PR #36 correction bounds', () => {
+  test('the correction defaults carry the documented stagnation/refractory/rescue bounds', () => {
+    const { directorControl } = DEFAULT_SIMULATION_CONFIG;
+    // Market-wide stagnation breadth: half of live coins must move.
+    expect(directorControl.stagnationBreadthFraction).toBe(0.5);
+    // Post-intervention refractory: at least one full NORMAL window.
+    expect(directorControl.interventionRefractoryMs).toBe(20 * 60 * 1000);
+    // Falling-breadth corroboration levels.
+    expect(directorControl.rescueCorroborationDeclinePct).toBe(0.02);
+    expect(directorControl.rescueCorroborationDrawdownPct).toBe(0.1);
+    // Roster size at which breadth severity reaches full weight.
+    expect(directorControl.rescueBreadthSeverityRosterSize).toBe(4);
+  });
+
+  test('rejects illegal stagnation-breadth and refractory bounds', () => {
+    const zeroBreadth = freshConfig();
+    zeroBreadth.directorControl.stagnationBreadthFraction = 0;
+    expect(() => validateSimulationConfig(zeroBreadth)).toThrow(/stagnationBreadthFraction/);
+
+    const overBreadth = freshConfig();
+    overBreadth.directorControl.stagnationBreadthFraction = 1.1;
+    expect(() => validateSimulationConfig(overBreadth)).toThrow(/stagnationBreadthFraction/);
+
+    // A refractory shorter than the longest NORMAL swing window could pass
+    // without a single full NORMAL opportunity.
+    const shortRefractory = freshConfig();
+    shortRefractory.directorControl.interventionRefractoryMs = 5 * 60 * 1000;
+    expect(() => validateSimulationConfig(shortRefractory)).toThrow(/interventionRefractoryMs/);
+
+    const fractionalRefractory = freshConfig();
+    fractionalRefractory.directorControl.interventionRefractoryMs = 1200000.5;
+    expect(() => validateSimulationConfig(fractionalRefractory)).toThrow(/interventionRefractoryMs/);
+  });
+
+  test('rejects illegal rescue corroboration/severity bounds', () => {
+    const zeroDecline = freshConfig();
+    zeroDecline.directorControl.rescueCorroborationDeclinePct = 0;
+    expect(() => validateSimulationConfig(zeroDecline)).toThrow(/rescueCorroborationDeclinePct/);
+
+    // Corroboration below the breadth noise threshold would be noise itself.
+    const noisyDecline = freshConfig();
+    noisyDecline.directorControl.rescueCorroborationDeclinePct = 0.001;
+    expect(() => validateSimulationConfig(noisyDecline)).toThrow(/rescueCorroborationDeclinePct/);
+
+    // Corroborating drawdown at/above the severe level would duplicate the
+    // independent severe-drawdown trigger.
+    const severeOverlap = freshConfig();
+    severeOverlap.directorControl.rescueCorroborationDrawdownPct = 0.25;
+    expect(() => validateSimulationConfig(severeOverlap)).toThrow(/rescueCorroborationDrawdownPct/);
+
+    const zeroRoster = freshConfig();
+    zeroRoster.directorControl.rescueBreadthSeverityRosterSize = 0;
+    expect(() => validateSimulationConfig(zeroRoster)).toThrow(/rescueBreadthSeverityRosterSize/);
+  });
+});

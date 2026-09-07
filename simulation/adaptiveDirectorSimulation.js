@@ -156,6 +156,20 @@ function buildCanonicalScenario() {
 // cadence. Committed decisions are threaded exactly as the runtime would
 // (the computed state becomes the next tick's controlState). Returns the
 // full decision log plus a review summary.
+//
+// PR #36 correction metrics (hyperactivity/inertia/hysteresis review):
+//   * modeTimeFraction — share of the horizon spent in each mode (per-tick
+//     occupancy, not committed-window sums);
+//   * longestInterventionStreakMinutes / longestRescueStreakMinutes —
+//     longest continuous non-NORMAL / RESCUE occupancy;
+//   * directInterventionTransitions — adjacent committed WINDOWS (same-
+//     window role-rotation recommits collapsed) that move intervention ->
+//     intervention with no NORMAL window between;
+//   * averageNormalRunLengthMinutes — mean length of maximal NORMAL
+//     occupancy runs (the refractory/NORMAL opportunities);
+//   * averageInterventionDurationMinutes — mean committed intervention
+//     window length;
+//   * goldenRotationsPerHour / demonRotationsPerHour.
 function runAdaptiveDirectorSimulation({ scenario, config = resolveSimulationConfig() } = {}) {
   if (!scenario || typeof scenario.observationAt !== 'function') {
     throw new Error('adaptive director simulation requires a scenario with observationAt(tickIndex, nowMs)');
@@ -164,6 +178,7 @@ function runAdaptiveDirectorSimulation({ scenario, config = resolveSimulationCon
 
   let committed = null;
   const decisions = [];
+  const tickModes = [];
   const modeDurationsMs = { NORMAL: 0, BOOM: 0, BUST: 0, RESCUE: 0 };
   const modeCounts = { NORMAL: 0, BOOM: 0, BUST: 0, RESCUE: 0 };
   let goldenRotations = 0;
@@ -198,8 +213,65 @@ function runAdaptiveDirectorSimulation({ scenario, config = resolveSimulationCon
         reason: state.reason
       });
     }
+    tickModes.push(state.mode);
     committed = state;
   }
+
+  const horizonHours = (ticks * tickMs) / (60 * MINUTE_MS);
+  const tickMinutes = tickMs / MINUTE_MS;
+
+  // Per-tick occupancy.
+  const modeTimeFraction = { NORMAL: 0, BOOM: 0, BUST: 0, RESCUE: 0 };
+  for (const mode of tickModes) modeTimeFraction[mode] += 1;
+  for (const mode of Object.keys(modeTimeFraction)) modeTimeFraction[mode] /= ticks;
+
+  // Streaks (ticks -> minutes).
+  const longestStreak = (predicate) => {
+    let longest = 0;
+    let current = 0;
+    for (const mode of tickModes) {
+      if (predicate(mode)) {
+        current += 1;
+        if (current > longest) longest = current;
+      } else {
+        current = 0;
+      }
+    }
+    return longest * tickMinutes;
+  };
+  const longestInterventionStreakMinutes = longestStreak((mode) => mode !== 'NORMAL');
+  const longestRescueStreakMinutes = longestStreak((mode) => mode === 'RESCUE');
+
+  // Committed intervention WINDOWS (collapse same-window recommits).
+  const windows = decisions.filter((d, i) => i === 0 || d.startedAtMs !== decisions[i - 1].startedAtMs);
+  let directInterventionTransitions = 0;
+  for (let i = 1; i < windows.length; i++) {
+    if (windows[i].mode !== 'NORMAL' && windows[i - 1].mode !== 'NORMAL') {
+      directInterventionTransitions += 1;
+    }
+  }
+
+  // NORMAL run lengths (ticks -> minutes).
+  const normalRuns = [];
+  let run = 0;
+  for (const mode of tickModes) {
+    if (mode === 'NORMAL') {
+      run += 1;
+    } else if (run > 0) {
+      normalRuns.push(run);
+      run = 0;
+    }
+  }
+  if (run > 0) normalRuns.push(run);
+  const averageNormalRunLengthMinutes = normalRuns.length === 0
+    ? 0
+    : (normalRuns.reduce((sum, n) => sum + n, 0) / normalRuns.length) * tickMinutes;
+
+  const interventionWindows = windows.filter((d) => d.mode !== 'NORMAL');
+  const averageInterventionDurationMinutes = interventionWindows.length === 0
+    ? 0
+    : interventionWindows.reduce((sum, d) => sum + (d.endsAtMs - d.startedAtMs), 0)
+      / interventionWindows.length / 60000;
 
   const modesSeen = Object.keys(modeCounts).filter((mode) => modeCounts[mode] > 0);
   return {
@@ -215,27 +287,249 @@ function runAdaptiveDirectorSimulation({ scenario, config = resolveSimulationCon
     },
     summary: {
       totalTicks: ticks,
-      horizonHours: (ticks * tickMs) / (60 * MINUTE_MS),
+      horizonHours,
       totalDecisions: decisions.length,
-      decisionsPerHour: decisions.length / ((ticks * tickMs) / (60 * MINUTE_MS)),
+      decisionsPerHour: decisions.length / horizonHours,
       modeCounts,
       modeDurationsMs,
       modesSeen,
       rescueCount: modeCounts.RESCUE,
       goldenRotations,
-      demonRotations
+      demonRotations,
+      goldenRotationsPerHour: goldenRotations / horizonHours,
+      demonRotationsPerHour: demonRotations / horizonHours,
+      modeTimeFraction,
+      longestInterventionStreakMinutes,
+      longestRescueStreakMinutes,
+      directInterventionTransitions,
+      averageNormalRunLengthMinutes,
+      averageInterventionDurationMinutes
     }
   };
 }
 
+// ---------------------------------------------------------------------------
+// PR #36 correction: deterministic acceptance profiles.
+//
+// Six 24-hour synthetic market narratives over 10 coins, each fabricated
+// deterministically from (profile, seed, tick) — no Math.random, no wall
+// clock. The only randomness remains the domain's seeded stream (keyed by
+// worldSeed + decision cursor), so the 20-seed sweep varies every draw
+// without tuning to any one seed.
+// ---------------------------------------------------------------------------
+
+const ACCEPTANCE_PROFILE_IDS = Object.freeze([
+  'healthy-variable',
+  'stagnation',
+  'mild-decline',
+  'severe-decline',
+  'sustained-overheat',
+  'death-cluster'
+]);
+
+const ACCEPTANCE_COINS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+const ACCEPTANCE_MACRO = Object.freeze({
+  regime: 'BULL',
+  regimeIndex: 3,
+  intensity: 0.5,
+  environment: {
+    structuralBias: 0.02, volatilityScale: 1, positiveEventBias: 0,
+    negativeEventBias: 0, eventSeverityScale: 1,
+    crashProbabilityModifier: 1, recoveryModifier: 1, collapseRiskModifier: 1
+  }
+});
+
+// Build the 24-hour scenario for one acceptance profile and seed.
+function buildAcceptanceScenario(profile, seedIndex) {
+  if (!ACCEPTANCE_PROFILE_IDS.includes(profile)) {
+    throw new Error(`unknown acceptance profile ${JSON.stringify(profile)}; expected one of ${ACCEPTANCE_PROFILE_IDS.join(', ')}`);
+  }
+  const startMs = Date.parse('2026-09-01T00:00:00.000Z');
+  const tickMs = MINUTE_MS;
+  const ticks = 24 * 60;
+
+  // Deterministic per-coin jitter in [-1, 1] from (tick, coinId, seedIndex)
+  // — a pure hash, not Math.random.
+  const jitter = (tick, coinId, salt) => {
+    let h = (tick * 2654435761) ^ (coinId * 40503) ^ ((seedIndex + 1) * 1597334677) ^ (salt * 2246822519);
+    h = Math.imul(h ^ (h >>> 15), 0x2c1b3c6d);
+    h = Math.imul(h ^ (h >>> 12), 0x297a2d39);
+    return (((h ^ (h >>> 15)) >>> 0) % 2000) / 1000 - 1;
+  };
+
+  function observationAt(tickIndex, nowMs) {
+    const hour = tickIndex / 60;
+    let movementOf;
+    let drawdownPct;
+    let conditionOf;
+    let lastMeaningfulMovementAtMs;
+    let recentDeathCount = 0;
+    let recentDeaths = [];
+    let recentReplacements = [];
+
+    if (profile === 'healthy-variable') {
+      // Variable healthy movement: a deterministic majority always moves
+      // meaningfully; direction/magnitude vary per coin and tick.
+      movementOf = (coinId) => 0.012 * jitter(tickIndex, coinId, 1) + 0.018 * (coinId % 2 === 0 ? 1 : -1);
+      drawdownPct = 0.05;
+      conditionOf = () => 0.05;
+      lastMeaningfulMovementAtMs = nowMs - 3 * MINUTE_MS;
+    } else if (profile === 'stagnation') {
+      // Persistent flatness: nothing moves meaningfully all day.
+      movementOf = (coinId) => 0.001 * jitter(tickIndex, coinId, 2);
+      drawdownPct = 0.06;
+      conditionOf = () => 0;
+      lastMeaningfulMovementAtMs = startMs;
+    } else if (profile === 'mild-decline') {
+      // 7/10 coins drifting at -0.6%: falling breadth with NO magnitude,
+      // drawdown, weak-condition or death corroboration.
+      movementOf = (coinId) => (coinId <= 7 ? -0.006 : 0.001) + 0.0005 * jitter(tickIndex, coinId, 3);
+      drawdownPct = 0.08;
+      conditionOf = () => -0.1;
+      lastMeaningfulMovementAtMs = startMs;
+    } else if (profile === 'severe-decline') {
+      // A sustained crash: 8/10 coins at -4%, 35% drawdown, weak and
+      // critically weak clusters.
+      movementOf = (coinId) => (coinId <= 8 ? -0.04 : 0.002) + 0.002 * jitter(tickIndex, coinId, 4);
+      drawdownPct = 0.35;
+      conditionOf = (coinId) => (coinId <= 2 ? -0.7 : coinId <= 6 ? -0.4 : -0.1);
+      lastMeaningfulMovementAtMs = nowMs - 2 * MINUTE_MS;
+    } else if (profile === 'sustained-overheat') {
+      // A sustained broad rally: +12% broad with 8/10 rising.
+      movementOf = (coinId) => (coinId <= 8 ? 0.12 : 0.004) + 0.003 * jitter(tickIndex, coinId, 5);
+      drawdownPct = 0;
+      conditionOf = () => 0.3;
+      lastMeaningfulMovementAtMs = nowMs - 2 * MINUTE_MS;
+    } else {
+      // death-cluster: a rolling fresh death cluster during hours 4-8,
+      // otherwise a calm market.
+      movementOf = (coinId) => 0.008 * jitter(tickIndex, coinId, 6);
+      drawdownPct = 0.07;
+      conditionOf = () => 0;
+      lastMeaningfulMovementAtMs = nowMs - 4 * MINUTE_MS;
+      if (hour >= 4 && hour < 8) {
+        recentDeathCount = 2;
+        recentDeaths = [
+          { coinId: 40, diedAtMs: nowMs - 10 * MINUTE_MS },
+          { coinId: 41, diedAtMs: nowMs - 25 * MINUTE_MS }
+        ];
+        recentReplacements = [{ coinId: 9, createdAtMs: nowMs - 12 * MINUTE_MS }];
+      }
+    }
+
+    const coins = ACCEPTANCE_COINS.map((coinId) => ({
+      coinId,
+      archetype: 'ZIP',
+      condition: conditionOf(coinId),
+      currentPrice: 1,
+      peakReference: 1 / (1 - drawdownPct),
+      structuralReference: 1,
+      movementPct: movementOf(coinId)
+    }));
+
+    const breadthThresholdPct = 0.005;
+    const breadth = { rising: 0, falling: 0, flat: 0 };
+    for (const coin of coins) {
+      if (Math.abs(coin.movementPct) < breadthThresholdPct) breadth.flat += 1;
+      else if (coin.movementPct > 0) breadth.rising += 1;
+      else breadth.falling += 1;
+    }
+    const movements = coins.map((coin) => coin.movementPct).sort((a, b) => a - b);
+    const mid = Math.floor(movements.length / 2);
+    const medianMovementPct = movements.length % 2 === 1
+      ? movements[mid]
+      : (movements[mid - 1] + movements[mid]) / 2;
+
+    return {
+      liveCoinCount: coins.length,
+      coins,
+      breadth,
+      medianMovementPct,
+      broadMovementPct: movements.reduce((sum, value) => sum + value, 0) / movements.length,
+      drawdownPct,
+      weakCount: coins.filter((coin) => coin.condition <= -0.3).length,
+      distressedCount: coins.filter((coin) => coin.condition <= -0.6).length,
+      recentDeathCount,
+      recentDeaths,
+      recentReplacements,
+      lastMeaningfulMovementAtMs,
+      macro: ACCEPTANCE_MACRO
+    };
+  }
+
+  return {
+    worldSeed: `wave2-acceptance:${profile}:${seedIndex}`,
+    startMs,
+    tickMs,
+    ticks,
+    observationAt
+  };
+}
+
+// The deterministic acceptance sweep: every profile x seeds. Returns
+// per-profile runs and an aggregate (min/max/mean over seeds) of the
+// review metrics. Fully reproducible.
+function runDeterministicAcceptance({ seeds = 20, config = resolveSimulationConfig() } = {}) {
+  const profiles = {};
+  for (const profile of ACCEPTANCE_PROFILE_IDS) {
+    const runs = [];
+    for (let seedIndex = 0; seedIndex < seeds; seedIndex++) {
+      runs.push(runAdaptiveDirectorSimulation({
+        scenario: buildAcceptanceScenario(profile, seedIndex),
+        config
+      }).summary);
+    }
+    const metricKeys = [
+      'decisionsPerHour', 'rescueCount', 'directInterventionTransitions',
+      'longestInterventionStreakMinutes', 'longestRescueStreakMinutes',
+      'averageNormalRunLengthMinutes', 'averageInterventionDurationMinutes',
+      'goldenRotationsPerHour', 'demonRotationsPerHour'
+    ];
+    const aggregate = {};
+    for (const key of metricKeys) {
+      const values = runs.map((summary) => summary[key]);
+      aggregate[key] = {
+        min: Math.min(...values),
+        max: Math.max(...values),
+        mean: values.reduce((sum, value) => sum + value, 0) / values.length
+      };
+    }
+    const modeTimeFraction = {};
+    for (const mode of ['NORMAL', 'BOOM', 'BUST', 'RESCUE']) {
+      const values = runs.map((summary) => summary.modeTimeFraction[mode]);
+      modeTimeFraction[mode] = {
+        min: Math.min(...values),
+        max: Math.max(...values),
+        mean: values.reduce((sum, value) => sum + value, 0) / values.length
+      };
+    }
+    profiles[profile] = { seeds: runs, aggregate, modeTimeFraction };
+  }
+  return { profiles, seedCount: seeds, horizonHours: 24 };
+}
+
 module.exports = {
   buildCanonicalScenario,
-  runAdaptiveDirectorSimulation
+  runAdaptiveDirectorSimulation,
+  buildAcceptanceScenario,
+  runDeterministicAcceptance,
+  ACCEPTANCE_PROFILE_IDS
 };
 
-// CLI: node simulation/adaptiveDirectorSimulation.js
+// CLI: node simulation/adaptiveDirectorSimulation.js [--acceptance]
 if (require.main === module) {
-  const report = runAdaptiveDirectorSimulation({ scenario: buildCanonicalScenario() });
-  // eslint-disable-next-line no-console
-  console.log(JSON.stringify(report.summary, null, 2));
+  if (process.argv.includes('--acceptance')) {
+    const acceptance = runDeterministicAcceptance({});
+    const printable = {};
+    for (const [profile, data] of Object.entries(acceptance.profiles)) {
+      printable[profile] = { aggregate: data.aggregate, modeTimeFraction: data.modeTimeFraction };
+    }
+    // eslint-disable-next-line no-console
+    console.log(JSON.stringify({ seedCount: acceptance.seedCount, horizonHours: acceptance.horizonHours, profiles: printable }, null, 2));
+  } else {
+    const report = runAdaptiveDirectorSimulation({ scenario: buildCanonicalScenario() });
+    // eslint-disable-next-line no-console
+    console.log(JSON.stringify(report.summary, null, 2));
+  }
 }

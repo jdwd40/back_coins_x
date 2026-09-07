@@ -563,7 +563,38 @@ const DEFAULT_SIMULATION_CONFIG = {
     // broad swing direction, the repeat stands only when a second
     // confirmation roll lands below this probability; otherwise the swing
     // flips. Strictly below 1 so same-direction loops can never be certain.
-    stagnationSameDirectionProbability: 0.25
+    stagnationSameDirectionProbability: 0.25,
+
+    // PR #36 correction — market-wide breadth-aware stagnation: the market
+    // clock refreshes only when at least this fraction of LIVE coins each
+    // moved meaningfully (per-coin consecutive-tick delta at/above
+    // stagnationThresholdPct) inside the bounded lookback; the refreshed
+    // instant is the breadth-crossing time (the k-th largest per-coin
+    // last-meaningful time), never the latest tick of any one coin. One
+    // outlier can never reset the market clock.
+    stagnationBreadthFraction: 0.5,
+
+    // PR #36 correction — post-intervention refractory: after any
+    // BOOM/BUST/RESCUE window ends, ordinary triggers (stagnation swings,
+    // ordinary RESCUE, overheat corrections) are held to bounded NORMAL
+    // windows until this much time has passed. Continued conditions may
+    // trigger again afterwards; a death-cluster emergency overrides. Must
+    // span at least one full NORMAL swing window.
+    interventionRefractoryMs: 20 * MINUTE_MS,
+
+    // PR #36 correction — RESCUE corroboration: falling breadth alone never
+    // rescues. The breadth trigger additionally requires meaningful
+    // negative magnitude (median or broad movement at/below
+    // -rescueCorroborationDeclinePct), a corroborating drawdown
+    // (at/above rescueCorroborationDrawdownPct, below the independently
+    // severe level), or health evidence (a critically weak coin or a
+    // recent death). Must exceed the breadth noise threshold.
+    rescueCorroborationDeclinePct: 0.02,
+    rescueCorroborationDrawdownPct: 0.1,
+    // Roster size at which the falling-breadth severity component reaches
+    // full weight: smaller rosters scale it by live/this, so a 2-coin
+    // roster can never reach maximum severity from breadth alone.
+    rescueBreadthSeverityRosterSize: 4
   }
 };
 
@@ -1155,7 +1186,10 @@ function validateDirectorControl(name, directorControl) {
     'deathClusterCount', 'deathClusterWindowMs',
     'overheatRisePct', 'overheatBreadthFraction',
     'maxTargetPositivePerCoin', 'maxTargetNegativePerCoin',
-    'stagnationSameDirectionProbability'
+    'stagnationSameDirectionProbability',
+    'stagnationBreadthFraction', 'interventionRefractoryMs',
+    'rescueCorroborationDeclinePct', 'rescueCorroborationDrawdownPct',
+    'rescueBreadthSeverityRosterSize'
   ]);
 
   requirePositiveInteger(`${name}.cadenceMs`, directorControl.cadenceMs);
@@ -1248,6 +1282,41 @@ function validateDirectorControl(name, directorControl) {
   if (directorControl.stagnationSameDirectionProbability < 0 || directorControl.stagnationSameDirectionProbability >= 1) {
     failConfig(`${name}.stagnationSameDirectionProbability must be a probability in [0, 1) (1 would make same-direction loops certain); received ${directorControl.stagnationSameDirectionProbability}`);
   }
+
+  // PR #36 correction bounds.
+  requireFiniteNumber(`${name}.stagnationBreadthFraction`, directorControl.stagnationBreadthFraction);
+  if (directorControl.stagnationBreadthFraction <= 0 || directorControl.stagnationBreadthFraction > 1) {
+    failConfig(`${name}.stagnationBreadthFraction must be a fraction in (0, 1]; received ${directorControl.stagnationBreadthFraction}`);
+  }
+
+  requirePositiveInteger(`${name}.interventionRefractoryMs`, directorControl.interventionRefractoryMs);
+  // The refractory must span at least one full NORMAL swing window, or an
+  // intervention could recommit without a single complete NORMAL
+  // opportunity.
+  if (directorControl.interventionRefractoryMs < directorControl.normalSwingTargetMs.max) {
+    failConfig(`${name}.interventionRefractoryMs ${directorControl.interventionRefractoryMs} is below normalSwingTargetMs.max ${directorControl.normalSwingTargetMs.max} (the refractory must span at least one full NORMAL window)`);
+  }
+
+  requireFiniteNumber(`${name}.rescueCorroborationDeclinePct`, directorControl.rescueCorroborationDeclinePct);
+  if (directorControl.rescueCorroborationDeclinePct <= 0 || directorControl.rescueCorroborationDeclinePct >= 1) {
+    failConfig(`${name}.rescueCorroborationDeclinePct must be a fraction in (0, 1); received ${directorControl.rescueCorroborationDeclinePct}`);
+  }
+  // Corroboration must mean more than breadth noise.
+  if (directorControl.rescueCorroborationDeclinePct < directorControl.breadthThresholdPct) {
+    failConfig(`${name}.rescueCorroborationDeclinePct ${directorControl.rescueCorroborationDeclinePct} is below breadthThresholdPct ${directorControl.breadthThresholdPct} (noise cannot corroborate a rescue)`);
+  }
+
+  requireFiniteNumber(`${name}.rescueCorroborationDrawdownPct`, directorControl.rescueCorroborationDrawdownPct);
+  if (directorControl.rescueCorroborationDrawdownPct <= 0 || directorControl.rescueCorroborationDrawdownPct >= 1) {
+    failConfig(`${name}.rescueCorroborationDrawdownPct must be a fraction in (0, 1); received ${directorControl.rescueCorroborationDrawdownPct}`);
+  }
+  // A corroborating drawdown must sit strictly below the independently
+  // severe level, or the two triggers would duplicate.
+  if (directorControl.rescueCorroborationDrawdownPct >= directorControl.rescueDrawdownPct) {
+    failConfig(`${name}.rescueCorroborationDrawdownPct ${directorControl.rescueCorroborationDrawdownPct} must be below rescueDrawdownPct ${directorControl.rescueDrawdownPct} (severe drawdown rescues independently)`);
+  }
+
+  requirePositiveInteger(`${name}.rescueBreadthSeverityRosterSize`, directorControl.rescueBreadthSeverityRosterSize);
 }
 
 // Validate a COMPLETE simulation config: every section and every leaf must

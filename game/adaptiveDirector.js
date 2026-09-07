@@ -42,12 +42,25 @@
 //     last swing direction stands only when a confirmation roll clears
 //     stagnationSameDirectionProbability; otherwise it flips.
 //   * RESCUE (POSITIVE) is favoured by any of: severe broad drawdown, a
-//     falling breadth fraction, too many weak coins, a persistent death
-//     cluster, or prolonged depression (clustered critically weak
-//     condition). RESCUE suppresses BUST entirely and is the ONLY
-//     condition that interrupts an active intervention early (and an
-//     active RESCUE under ongoing distress is retained to its committed
-//     expiry rather than recommitted every tick).
+//     CORROBORATED falling breadth fraction (breadth combined with
+//     meaningful negative magnitude, corroborating drawdown, or
+//     weak/distressed/recent-death health evidence — falling breadth alone
+//     never rescues), too many weak coins, a persistent death cluster, or
+//     prolonged depression (clustered critically weak condition). RESCUE
+//     suppresses BUST entirely and is the ONLY condition that interrupts an
+//     active intervention early (and an active RESCUE under ongoing
+//     distress is retained to its committed expiry rather than recommitted
+//     every tick).
+//   * Post-intervention refractory (PR #36 correction): after any
+//     BOOM/BUST/RESCUE window ends, ordinary triggers (stagnation swings,
+//     ordinary RESCUE, overheat corrections) are held to bounded NORMAL
+//     windows until interventionRefractoryMs has passed — persistent
+//     flatness, an unchanged rescue signal or sustained overheat can never
+//     chain interventions without a NORMAL opportunity. Continued
+//     conditions may trigger again once the refractory elapses. A
+//     death-cluster or severe-drawdown emergency overrides the refractory,
+//     boundedly. The tracker (lastInterventionEndedAt) is persisted in the
+//     committed state, so the policy is deterministic and restart-safe.
 //   * Overheating (a broad rise of at least overheatRisePct over the whole
 //     bounded lookback with at least overheatBreadthFraction of live coins
 //     rising — sustained AND extreme by construction) allows a bounded
@@ -191,6 +204,9 @@ function assertControlState(state) {
   if (!Number.isInteger(state.decisionIndex) || state.decisionIndex < 0) {
     throw new Error(`adaptive director control state decisionIndex must be a non-negative integer; received ${String(state.decisionIndex)}`);
   }
+  if (state.lastInterventionEndedAt !== null && state.lastInterventionEndedAt !== undefined) {
+    toMs(state.lastInterventionEndedAt, 'lastInterventionEndedAt');
+  }
   return state;
 }
 
@@ -248,9 +264,22 @@ function resolveRoles({ committed, nowMs, observation, config, draws }) {
     && nullableToMs(committed.goldenExpiresAt) > nowMs
     ? Number(committed.goldenCoinId)
     : null;
+  // PR #36 correction: while the recent-death safety window is active, a
+  // retained Demon is REVALIDATED against replacement and
+  // critical-condition safety — a Demon that was freshly replaced or has
+  // become critically weak is unsafe to target and rotates out. A Demon
+  // that is merely LOSING (negative movement, healthy condition) is kept:
+  // the role stays dangerous.
+  const committedDemonCoin = committed && committed.demonCoinId !== null && committed.demonCoinId !== undefined
+    ? eligible.find((coin) => Number(coin.coinId) === Number(committed.demonCoinId))
+    : undefined;
+  const retainedDemonUnsafe = safetyActive && committedDemonCoin !== undefined
+    && (replacedIds.has(Number(committedDemonCoin.coinId))
+      || committedDemonCoin.condition <= dc.distressedConditionThreshold);
   const retainedDemonId = committed && committed.demonCoinId !== null && committed.demonCoinId !== undefined
     && eligibleIds.has(Number(committed.demonCoinId))
     && nullableToMs(committed.demonExpiresAt) > nowMs
+    && !retainedDemonUnsafe
     ? Number(committed.demonCoinId)
     : null;
 
@@ -300,12 +329,31 @@ function resolveRoles({ committed, nowMs, observation, config, draws }) {
 
 // The RESCUE signal set and its bounded severity. Every trigger is
 // documented against the observation fields it reads.
+//
+// PR #36 correction: falling breadth ALONE never rescues. The breadth
+// trigger (broadFall) additionally requires corroboration — meaningful
+// negative magnitude (median or broad movement at/below
+// -rescueCorroborationDeclinePct), a corroborating drawdown
+// (at/above rescueCorroborationDrawdownPct), or health evidence (a
+// critically weak coin or a recent death). Severe drawdown, clustered
+// weakness, distressed clusters and death clusters remain INDEPENDENTLY
+// capable of rescue. The death-cluster and severe-drawdown verdicts are
+// also the emergencies that may override the post-intervention refractory. Severity is normalised:
+// the breadth component is roster-scaled (small rosters cannot reach
+// maximum severity from breadth alone).
 function rescueSignals(observation, config) {
   const dc = config.directorControl;
   const live = observation.liveCoinCount;
   const fallingFraction = live === 0 ? 0 : observation.breadth.falling / live;
   const severeDrawdown = observation.drawdownPct >= dc.rescueDrawdownPct;
-  const broadFall = live > 0 && fallingFraction >= dc.rescueFallingBreadthFraction;
+  const magnitudeCorroborated =
+    (observation.medianMovementPct !== null && observation.medianMovementPct <= -dc.rescueCorroborationDeclinePct)
+    || (observation.broadMovementPct !== null && observation.broadMovementPct <= -dc.rescueCorroborationDeclinePct);
+  const corroborated = magnitudeCorroborated
+    || observation.drawdownPct >= dc.rescueCorroborationDrawdownPct
+    || observation.distressedCount >= 1
+    || observation.recentDeathCount >= 1;
+  const broadFall = live > 0 && fallingFraction >= dc.rescueFallingBreadthFraction && corroborated;
   const tooWeak = observation.weakCount >= dc.rescueWeakCount;
   const deathCluster = observation.recentDeathCount >= dc.deathClusterCount;
   // Prolonged depression: clustered critically weak CONDITION. Condition is
@@ -314,14 +362,25 @@ function rescueSignals(observation, config) {
   // single bad tick.
   const prolongedDepression = observation.distressedCount >= dc.deathClusterCount;
   const signalled = severeDrawdown || broadFall || tooWeak || deathCluster || prolongedDepression;
+  // The genuine emergencies — a persistent death cluster or a severe broad
+  // drawdown — may override the ordinary post-intervention refractory,
+  // boundedly. Ordinary rescue signals (corroborated breadth, weak/
+  // distressed clusters) always wait out the refractory.
+  const emergency = deathCluster || severeDrawdown;
+  const magnitudeSeverity = Math.max(
+    0,
+    observation.medianMovementPct === null ? 0 : -observation.medianMovementPct,
+    observation.broadMovementPct === null ? 0 : -observation.broadMovementPct
+  ) / (2 * dc.rescueCorroborationDeclinePct);
   const severity = Math.min(1, Math.max(
     observation.drawdownPct / (2 * dc.rescueDrawdownPct),
-    fallingFraction,
+    fallingFraction * Math.min(1, live / dc.rescueBreadthSeverityRosterSize),
+    magnitudeSeverity,
     observation.weakCount / (2 * dc.rescueWeakCount),
     observation.recentDeathCount / (2 * dc.deathClusterCount),
     observation.distressedCount / (2 * dc.deathClusterCount)
   ));
-  return { signalled, severity, severeDrawdown, broadFall, tooWeak, deathCluster, prolongedDepression };
+  return { signalled, severity, emergency, severeDrawdown, broadFall, tooWeak, deathCluster, prolongedDepression };
 }
 
 // The overheating verdict: a broad rise of at least overheatRisePct across
@@ -399,6 +458,32 @@ function evaluateAdaptiveDirectorDecision({
   const stagnant = effectiveMeaningfulMs !== null
     && nowMs - effectiveMeaningfulMs >= dc.stagnationWindowMs;
 
+  // --- Post-intervention refractory tracking (PR #36 correction) --------
+  // lastInterventionEndedAt is the most recent instant a committed
+  // BOOM/BUST/RESCUE window ended: carried from the committed state, and
+  // advanced to the committed expiry when an intervention window has now
+  // elapsed (an EARLY rescue interrupt below stamps nowMs instead). While
+  // nowMs < lastInterventionEndedAt + interventionRefractoryMs, ordinary
+  // triggers (stagnation swings, ordinary rescue, overheat corrections)
+  // are held to bounded NORMAL windows; continued conditions may trigger
+  // again once the refractory elapses; a death-cluster or severe-drawdown
+  // emergency overrides it, boundedly.
+  const committedEndsMs = committed === null ? null : toMs(committed.endsAt, 'endsAt');
+  const carriedLastInterventionEndedMs = committed === null
+    ? null
+    : nullableToMs(committed.lastInterventionEndedAt);
+  const committedInterventionActive = committed !== null
+    && committed.mode !== 'NORMAL' && nowMs < committedEndsMs;
+  let lastInterventionEndedMs = carriedLastInterventionEndedMs;
+  if (committed !== null && committed.mode !== 'NORMAL' && !committedInterventionActive) {
+    lastInterventionEndedMs = lastInterventionEndedMs === null
+      ? committedEndsMs
+      : Math.max(lastInterventionEndedMs, committedEndsMs);
+  }
+  const cooldownActive = lastInterventionEndedMs !== null
+    && nowMs < lastInterventionEndedMs + dc.interventionRefractoryMs;
+  const rescueOverride = rescue.signalled && (rescue.emergency || !cooldownActive);
+
   const roleFields = {
     goldenCoinId: roles.goldenCoinId,
     goldenExpiresAt: roles.goldenExpiresAt,
@@ -407,13 +492,16 @@ function evaluateAdaptiveDirectorDecision({
   };
 
   // --- Retention: the committed decision stands --------------------------
-  // RESCUE is the ONLY early interrupt, and only while not already in
+  // RESCUE is the ONLY early interrupt — and only while not already in
   // RESCUE (an active RESCUE under ongoing distress is retained to its
-  // committed expiry — no per-tick recommit churn); everything else waits
-  // for the committed window to elapse. A role rotation while the window
-  // stands commits a same-window decision at the next cursor.
-  if (committed !== null && nowMs < toMs(committed.endsAt, 'endsAt')
-      && !(rescue.signalled && committed.mode !== 'RESCUE')) {
+  // committed expiry — no per-tick recommit churn) and only when the
+  // refractory permits it (an ordinary rescue waits out the refractory
+  // NORMAL window; a death-cluster or severe-drawdown emergency never
+  // waits); everything else
+  // waits for the committed window to elapse. A role rotation while the
+  // window stands commits a same-window decision at the next cursor.
+  if (committed !== null && nowMs < committedEndsMs
+      && !(rescueOverride && committed.mode !== 'RESCUE')) {
     if (!roles.rotated) {
       // Nothing changed: identical replay at the committed cursor.
       return { state: committed, changed: false };
@@ -429,27 +517,34 @@ function evaluateAdaptiveDirectorDecision({
         reason: 'role rotation: a Golden/Demon assignment expired or left the eligible set',
         ...roleFields,
         lastSwingDirection: committed.lastSwingDirection ?? null,
-        lastMeaningfulMovementAt: iso(nextMeaningfulMs)
+        lastMeaningfulMovementAt: iso(nextMeaningfulMs),
+        lastInterventionEndedAt: carriedLastInterventionEndedMs === null ? null : iso(carriedLastInterventionEndedMs)
       },
       changed: true
     };
+  }
+
+  // An active intervention interrupted by a rescue override ends NOW.
+  if (committedInterventionActive) {
+    lastInterventionEndedMs = nowMs;
   }
 
   // --- New decision ------------------------------------------------------
   const base = {
     decisionIndex: nextIndex,
     ...roleFields,
-    lastMeaningfulMovementAt: iso(nextMeaningfulMs)
+    lastMeaningfulMovementAt: iso(nextMeaningfulMs),
+    lastInterventionEndedAt: lastInterventionEndedMs === null ? null : iso(lastInterventionEndedMs)
   };
 
   const interventionDurationMs = Math.round(
     dc.interventionDurationMs.min + (dc.interventionDurationMs.max - dc.interventionDurationMs.min) * draws.duration
   );
 
-  if (rescue.signalled) {
+  if (rescueOverride) {
     const causes = [];
     if (rescue.severeDrawdown) causes.push(`broad drawdown ${Math.round(observation.drawdownPct * 100)}% >= ${Math.round(dc.rescueDrawdownPct * 100)}%`);
-    if (rescue.broadFall) causes.push(`${observation.breadth.falling}/${observation.liveCoinCount} coins falling`);
+    if (rescue.broadFall) causes.push(`${observation.breadth.falling}/${observation.liveCoinCount} coins falling (corroborated)`);
     if (rescue.tooWeak) causes.push(`${observation.weakCount} weak coins`);
     if (rescue.deathCluster) causes.push(`death cluster of ${observation.recentDeathCount}`);
     if (rescue.prolongedDepression) causes.push(`${observation.distressedCount} critically weak coins (prolonged depression)`);
@@ -469,23 +564,31 @@ function evaluateAdaptiveDirectorDecision({
     };
   }
 
+  // Ordinary triggers suppressed by the refractory (recorded for the
+  // refractory reason below).
+  const suppressed = [];
+  if (rescue.signalled) suppressed.push('ordinary rescue');
+
   if (overheated) {
-    // Bounded negative correction: severity-scaled, hard-capped at 0.6.
-    const excess = Math.min(1, observation.broadMovementPct / dc.overheatRisePct - 1);
-    const intensity = Math.min(0.6, 0.3 + 0.2 * excess + 0.1 * draws.intensity);
-    return {
-      state: {
-        mode: 'BUST',
-        direction: 'NEGATIVE',
-        intensity,
-        startedAt: iso(nowMs),
-        endsAt: iso(nowMs + interventionDurationMs),
-        ...base,
-        reason: `overheat correction: broad rise ${Math.round(observation.broadMovementPct * 100)}% with ${observation.breadth.rising}/${observation.liveCoinCount} coins rising`,
-        lastSwingDirection: 'NEGATIVE'
-      },
-      changed: true
-    };
+    if (!cooldownActive) {
+      // Bounded negative correction: severity-scaled, hard-capped at 0.6.
+      const excess = Math.min(1, observation.broadMovementPct / dc.overheatRisePct - 1);
+      const intensity = Math.min(0.6, 0.3 + 0.2 * excess + 0.1 * draws.intensity);
+      return {
+        state: {
+          mode: 'BUST',
+          direction: 'NEGATIVE',
+          intensity,
+          startedAt: iso(nowMs),
+          endsAt: iso(nowMs + interventionDurationMs),
+          ...base,
+          reason: `overheat correction: broad rise ${Math.round(observation.broadMovementPct * 100)}% with ${observation.breadth.rising}/${observation.liveCoinCount} coins rising`,
+          lastSwingDirection: 'NEGATIVE'
+        },
+        changed: true
+      };
+    }
+    suppressed.push('overheat correction');
   }
 
   if (committed === null) {
@@ -513,7 +616,7 @@ function evaluateAdaptiveDirectorDecision({
     };
   }
 
-  if (stagnant) {
+  if (stagnant && !cooldownActive) {
     // Bounded stagnation swing. Direction: seeded draw biased by health
     // (drawdown favours a reviving positive swing) and the macro regime's
     // structural bias, clamped away from certainty. Anti-loop: a repeat of
@@ -541,12 +644,17 @@ function evaluateAdaptiveDirectorDecision({
       changed: true
     };
   }
+  if (stagnant) suppressed.push('stagnation swing');
 
-  // Healthy market, window elapsed: re-commit NORMAL with a fresh swing
-  // target window. No intervention is forced.
+  // Healthy market (or refractory): re-commit NORMAL with a fresh swing
+  // target window. No intervention is forced; triggers suppressed by the
+  // post-intervention refractory are recorded in the reason.
   const windowMs = Math.round(
     dc.normalSwingTargetMs.min + (dc.normalSwingTargetMs.max - dc.normalSwingTargetMs.min) * draws.normalWindow
   );
+  const reason = suppressed.length === 0
+    ? 'normal swing window'
+    : `refractory: ${suppressed.join(' + ')} held to NORMAL; ${committed.mode} ended ${Math.round((nowMs - lastInterventionEndedMs) / 60000)}m ago (refractory ${Math.round(dc.interventionRefractoryMs / 60000)}m)`;
   return {
     state: {
       mode: 'NORMAL',
@@ -555,7 +663,7 @@ function evaluateAdaptiveDirectorDecision({
       startedAt: iso(nowMs),
       endsAt: iso(nowMs + windowMs),
       ...base,
-      reason: 'normal swing window',
+      reason,
       lastSwingDirection: committed.lastSwingDirection ?? null
     },
     changed: true

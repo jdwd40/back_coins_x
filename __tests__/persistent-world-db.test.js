@@ -22,6 +22,8 @@ const MIGRATION_026 = '026_create_persistent_economy.sql';
 const MIGRATION_027 = '027_create_persistent_bot_debt.sql';
 const MIGRATION_028 = '028_create_persistent_bot_ticks.sql';
 const MIGRATION_029 = '029_create_persistent_coin_events.sql';
+// 030 alters director_control_state (dropped by the CASCADE chain below).
+const MIGRATION_030 = '030_director_control_refractory.sql';
 const WORLD_SEED = 'stage2-world-seed';
 
 async function provisionedWorld() {
@@ -76,7 +78,7 @@ describe('Stage 2: tracked production migration 024', () => {
     await db.query('DROP TABLE IF EXISTS market_director_state CASCADE');
     await db.query('DROP TABLE IF EXISTS market_coin_state CASCADE');
     await db.query('DROP TABLE IF EXISTS market_worlds CASCADE');
-    await db.query('DELETE FROM schema_migrations WHERE migration = ANY($1)', [[MIGRATION_024, MIGRATION_025, MIGRATION_026, MIGRATION_027, MIGRATION_028, MIGRATION_029]]);
+    await db.query('DELETE FROM schema_migrations WHERE migration = ANY($1)', [[MIGRATION_024, MIGRATION_025, MIGRATION_026, MIGRATION_027, MIGRATION_028, MIGRATION_029, MIGRATION_030]]);
     const result = await runMigrations({ log: () => {} });
     expect(result.applied).toContain(MIGRATION_024);
     expect(result.applied).toContain(MIGRATION_025);

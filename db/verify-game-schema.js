@@ -2050,6 +2050,7 @@ async function verifyDirectorControlState(q, problems) {
     ['demon_expires_at', TS, 'YES'],
     ['last_swing_direction', 'character varying', 'YES'],
     ['last_meaningful_movement_at', TS, 'YES'],
+    ['last_intervention_ended_at', TS, 'YES'],
     ['created_at', TS, 'NO'],
     ['updated_at', TS, 'NO']
   ], [

@@ -22,9 +22,14 @@
 //       fewer than two in-window ticks); breadth counts coins at/above
 //       breadthThresholdPct (null movement counts as flat); the median and
 //       broad (mean) movement use only coins with an observed movement;
-//       lastMeaningfulMovementAtMs is the latest tick whose per-coin delta
-//       from that coin's previous in-window tick reaches
-//       stagnationThresholdPct (null when no in-window delta qualifies).
+//       lastMeaningfulMovementAtMs is the MARKET-WIDE breadth-aware clock
+//       (PR #36 correction): per LIVE coin, the latest in-window tick whose
+//       delta from that coin's previous in-window tick reaches
+//       stagnationThresholdPct; the market clock is the breadth-crossing
+//       time — the k-th largest of those per-coin instants with
+//       k = max(1, ceil(stagnationBreadthFraction x liveCoinCount)) — or
+//       null when fewer than k live coins moved meaningfully (a single
+//       outlier never resets the market clock).
 //   * drawdownPct — mean over live coins of
 //       max(0, 1 - coins.current_price / market_coin_state.peak_reference)
 //       (the DECAYING peak reference, migration 024 — never an all-time
@@ -106,7 +111,10 @@ function reduceSnapshot({ coinRows, tickRows, deathRows, replacementRows, macro,
   }
 
   const movementByCoin = new Map();
-  let lastMeaningfulMovementAtMs = null;
+  // Per-coin last-meaningful-movement instants (LIVE coins only): the
+  // latest in-window tick whose delta from that coin's previous in-window
+  // tick reaches stagnationThresholdPct.
+  const lastMeaningfulByCoin = new Map();
   for (const [coinId, ticks] of ticksByCoin) {
     if (ticks.length >= 2) {
       const first = ticks[0].price;
@@ -118,8 +126,8 @@ function reduceSnapshot({ coinRows, tickRows, deathRows, replacementRows, macro,
     for (let i = 1; i < ticks.length; i++) {
       const previous = ticks[i - 1].price;
       if (previous > 0 && Math.abs(ticks[i].price / previous - 1) >= dc.stagnationThresholdPct) {
-        if (lastMeaningfulMovementAtMs === null || ticks[i].atMs > lastMeaningfulMovementAtMs) {
-          lastMeaningfulMovementAtMs = ticks[i].atMs;
+        if (!lastMeaningfulByCoin.has(coinId) || ticks[i].atMs > lastMeaningfulByCoin.get(coinId)) {
+          lastMeaningfulByCoin.set(coinId, ticks[i].atMs);
         }
       }
     }
@@ -147,6 +155,24 @@ function reduceSnapshot({ coinRows, tickRows, deathRows, replacementRows, macro,
   }
 
   const movements = coins.map((coin) => coin.movementPct).filter((value) => value !== null);
+
+  // Market-wide breadth-aware stagnation clock (PR #36 correction): the
+  // market refreshes only when a useful breadth of LIVE coins —
+  // ceil(stagnationBreadthFraction x liveCoinCount) — each moved
+  // meaningfully inside the lookback. The refreshed instant is the
+  // breadth-crossing time (the k-th largest per-coin last-meaningful
+  // time), never the latest tick of any one coin; when fewer than k live
+  // coins moved meaningfully the market did not move (null) and one
+  // volatile outlier can never reset the clock.
+  const requiredMeaningfulMovers = Math.max(1, Math.ceil(dc.stagnationBreadthFraction * coins.length));
+  const liveMeaningfulTimes = coins
+    .map((coin) => lastMeaningfulByCoin.get(coin.coinId))
+    .filter((atMs) => atMs !== undefined)
+    .sort((a, b) => b - a);
+  const lastMeaningfulMovementAtMs = liveMeaningfulTimes.length >= requiredMeaningfulMovers
+    ? liveMeaningfulTimes[requiredMeaningfulMovers - 1]
+    : null;
+
   const drawdownPct = coins.length === 0
     ? 0
     : coins.reduce((sum, coin) => sum + Math.max(0, 1 - coin.currentPrice / coin.peakReference), 0) / coins.length;

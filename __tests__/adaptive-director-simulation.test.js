@@ -20,7 +20,9 @@ const fs = require('fs');
 const path = require('path');
 const {
   runAdaptiveDirectorSimulation,
-  buildCanonicalScenario
+  buildCanonicalScenario,
+  runDeterministicAcceptance,
+  ACCEPTANCE_PROFILE_IDS
 } = require('../simulation/adaptiveDirectorSimulation');
 const { resolveSimulationConfig } = require('../game/simulationConfig');
 
@@ -98,5 +100,121 @@ describe('Wave 2 adaptive Director control-layer simulation', () => {
     // Durations by mode are reported for review.
     expect(report.summary.modeDurationsMs.NORMAL).toBeGreaterThan(0);
     expect(report.summary.modeDurationsMs.RESCUE).toBeGreaterThan(0);
+  });
+});
+
+describe('Wave 2 adaptive Director: deterministic acceptance sweep (PR #36 correction)', () => {
+  jest.setTimeout(120000);
+  // 20 deterministic seeds x 24 simulated hours over the six condition
+  // profiles. Assertions hold for EVERY seed (never tuned to one).
+  const acceptance = runDeterministicAcceptance({ seeds: 20, config: CONFIG });
+  const MAX_INTERVENTION_MINUTES = CONFIG.directorControl.interventionDurationMs.max / 60000;
+
+  test('the sweep covers the six condition profiles over 20 seeds x 24 hours, reproducibly', () => {
+    expect([...ACCEPTANCE_PROFILE_IDS].sort()).toEqual([
+      'death-cluster', 'healthy-variable', 'mild-decline',
+      'severe-decline', 'stagnation', 'sustained-overheat'
+    ]);
+    expect(Object.keys(acceptance.profiles).sort()).toEqual([...ACCEPTANCE_PROFILE_IDS].sort());
+    for (const data of Object.values(acceptance.profiles)) {
+      expect(data.seeds).toHaveLength(20);
+      for (const run of data.seeds) expect(run.horizonHours).toBe(24);
+    }
+    expect(runDeterministicAcceptance({ seeds: 20, config: CONFIG })).toEqual(acceptance);
+  });
+
+  test('healthy/variable markets stay NORMAL all day with no rescue and no interventions', () => {
+    for (const run of acceptance.profiles['healthy-variable'].seeds) {
+      expect(run.modeTimeFraction.NORMAL).toBe(1);
+      expect(run.rescueCount).toBe(0);
+      expect(run.directInterventionTransitions).toBe(0);
+      expect(run.longestInterventionStreakMinutes).toBe(0);
+    }
+  });
+
+  test('persistent stagnation produces refractory-bounded swings with NORMAL opportunities on every seed', () => {
+    for (const run of acceptance.profiles.stagnation.seeds) {
+      // No direct intervention->intervention transition without NORMAL.
+      expect(run.directInterventionTransitions).toBe(0);
+      // Bounded duty cycle: swings recur (continued conditions retrigger)
+      // but never dominate.
+      const interventionFraction = run.modeTimeFraction.BOOM + run.modeTimeFraction.BUST;
+      expect(interventionFraction).toBeGreaterThan(0);
+      expect(interventionFraction).toBeLessThanOrEqual(0.35);
+      expect(run.modeTimeFraction.NORMAL).toBeGreaterThanOrEqual(0.65);
+      // No intervention streak exceeds one bounded window; every gap is a
+      // genuine NORMAL run of at least the refractory span.
+      expect(run.longestInterventionStreakMinutes).toBeLessThanOrEqual(MAX_INTERVENTION_MINUTES);
+      expect(run.averageNormalRunLengthMinutes).toBeGreaterThanOrEqual(
+        CONFIG.directorControl.interventionRefractoryMs / 60000
+      );
+    }
+  });
+
+  test('mild decline never rescues on any seed (falling breadth alone is not a rescue)', () => {
+    for (const run of acceptance.profiles['mild-decline'].seeds) {
+      expect(run.rescueCount).toBe(0);
+      expect(run.modeTimeFraction.RESCUE).toBe(0);
+      expect(run.directInterventionTransitions).toBe(0);
+    }
+  });
+
+  test('severe decline holds the emergency RESCUE while the emergency persists, in bounded windows', () => {
+    for (const run of acceptance.profiles['severe-decline'].seeds) {
+      expect(run.rescueCount).toBeGreaterThan(0);
+      expect(run.modeTimeFraction.RESCUE).toBeGreaterThanOrEqual(0.9);
+      // Every emergency recommit is still one bounded window.
+      expect(run.averageInterventionDurationMinutes).toBeLessThanOrEqual(MAX_INTERVENTION_MINUTES);
+      expect(run.averageInterventionDurationMinutes).toBeGreaterThanOrEqual(
+        CONFIG.directorControl.interventionDurationMs.min / 60000
+      );
+    }
+  });
+
+  test('sustained overheat produces refractory-bounded BUST corrections, never a chain', () => {
+    for (const run of acceptance.profiles['sustained-overheat'].seeds) {
+      expect(run.directInterventionTransitions).toBe(0);
+      expect(run.modeCounts.BUST).toBeGreaterThan(0);
+      expect(run.modeTimeFraction.BUST).toBeGreaterThan(0);
+      expect(run.modeTimeFraction.BUST).toBeLessThanOrEqual(0.35);
+      expect(run.modeTimeFraction.NORMAL).toBeGreaterThanOrEqual(0.65);
+      expect(run.longestInterventionStreakMinutes).toBeLessThanOrEqual(MAX_INTERVENTION_MINUTES);
+    }
+  });
+
+  test('a death cluster drives bounded emergency RESCUE only while the emergency persists', () => {
+    for (const run of acceptance.profiles['death-cluster'].seeds) {
+      expect(run.rescueCount).toBeGreaterThan(0);
+      // The cluster spans hours 4-8 of 24: RESCUE is confined to it.
+      expect(run.modeTimeFraction.RESCUE).toBeLessThanOrEqual(0.3);
+      expect(run.modeTimeFraction.NORMAL).toBeGreaterThanOrEqual(0.7);
+      // The longest continuous RESCUE streak is bounded by the cluster
+      // span plus one bounded window's tail.
+      expect(run.longestRescueStreakMinutes).toBeLessThanOrEqual(4 * 60 + MAX_INTERVENTION_MINUTES);
+    }
+  });
+
+  test('the aggregate review metrics are reported for controller review', () => {
+    const printable = {};
+    for (const [profile, data] of Object.entries(acceptance.profiles)) {
+      printable[profile] = { aggregate: data.aggregate, modeTimeFraction: data.modeTimeFraction };
+    }
+    // eslint-disable-next-line no-console
+    console.log('adaptive Director acceptance (20 seeds x 24h):', JSON.stringify(printable));
+    for (const data of Object.values(acceptance.profiles)) {
+      for (const key of [
+        'decisionsPerHour', 'rescueCount', 'directInterventionTransitions',
+        'longestInterventionStreakMinutes', 'longestRescueStreakMinutes',
+        'averageNormalRunLengthMinutes', 'averageInterventionDurationMinutes',
+        'goldenRotationsPerHour', 'demonRotationsPerHour'
+      ]) {
+        expect(data.aggregate[key]).toHaveProperty('min');
+        expect(data.aggregate[key]).toHaveProperty('max');
+        expect(data.aggregate[key]).toHaveProperty('mean');
+      }
+      // Roles keep rotating on every profile.
+      expect(data.aggregate.goldenRotationsPerHour.max).toBeGreaterThan(0);
+      expect(data.aggregate.demonRotationsPerHour.max).toBeGreaterThan(0);
+    }
   });
 });
