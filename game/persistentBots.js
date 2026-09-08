@@ -55,6 +55,10 @@ const {
 } = require('./gameConstants');
 const { createBotRandom, ensureBotsProvisioned } = require('./botService');
 
+
+// Persistent provenance: only world-scoped writer ticks.
+const PERSISTENT_PH = "source = 'MARKET_TICK' AND cycle_id IS NULL";
+
 class PersistentBotError extends Error {
   constructor(message, status) {
     super(message);
@@ -152,6 +156,7 @@ async function buildPublicPersistentMarketState({ world, account, nowMs, queryab
       `SELECT price FROM (
          SELECT price, created_at FROM price_history
          WHERE coin_id = $1
+           AND ${PERSISTENT_PH}
          ORDER BY created_at DESC
          LIMIT $2
        ) recent
