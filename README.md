@@ -71,7 +71,7 @@ JWT_SECRET=your-dev-secret   # used for both sign and verify (see shared config)
 ```
 
 
-Persistent world first-time ops (provision once; deploy never auto-creates): see `docs/persistent-world-ops.md`.
+Persistent world first-ever deploy is fail-closed (verify fails with zero worlds until one-time provision); see `docs/persistent-world-ops.md`.
 
 For production deployment on VPS, also set (JWT_SECRET is mandatory in prod):
 ```
