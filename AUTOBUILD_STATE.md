@@ -2,6 +2,7 @@
 
 ## Current Execution
 
+- **Deploy gate:** production deploy runs `verify:persistent-world` before PM2 (fail-closed on first-ever deploy with zero worlds; provision once per docs/persistent-world-ops.md) and checks `/api/persistent/signals` for non-null worldId. No auto-provision on deploy/server.
 - **Current stage:** Stage 8 COMPLETE (persistent bots + bot-only debt); Stage 9 next (Stage 7 persistent path is satisfied by construction — no Power/position-cap/round inputs exist in the persistent economy or its new frontend; old-surface retirement stays Stage 13 debt until the old deployed frontend is replaced)
 - **Current work unit:** S8-01/S8-02 done; focused persistent regression green (8 suites, 130/130: persistent-api, persistent-economy-db, persistent-debt-db, persistent-bots-db, persistent-world-db, market-persistent-writer, persistent-signals, users); schema verifier PASS through 028; frontend gates green (unit 241/241, UI contract, lint 0/6, build); `git diff --check` clean in both repos
 - **Status:** CHECKPOINT — uncommitted working-tree checkpoint (no commits/pushes permitted or made)

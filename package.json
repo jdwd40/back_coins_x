@@ -13,6 +13,8 @@
     "seed": "node db/seed.js",
     "migrate": "node db/migrate.js",
     "verify:game-schema": "node db/verify-game-schema.js",
+    "verify:persistent-world": "node db/verify-persistent-world.js",
+    "provision:persistent-world": "node db/provision-persistent-world.js",
     "simulate": "node simulation/run.js",
     "simulate:power": "node simulation/run.js --mode power",
     "simulate:v2-3": "node simulation/run.js --mode v2-3",
