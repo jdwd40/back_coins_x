@@ -25,6 +25,9 @@ const TIME_RANGES = {
   'ALL': null                    // No time limit
 };
 
+// Persistent provenance: only world-scoped writer ticks.
+const PERSISTENT_PH = "source = 'MARKET_TICK' AND cycle_id IS NULL";
+
 /**
  * Format coin data for response
  */
@@ -66,6 +69,7 @@ async function get24HourPriceChange(coinId) {
       SELECT price, created_at
       FROM price_history
       WHERE coin_id = $1
+        AND ${PERSISTENT_PH}
       ORDER BY created_at DESC
       LIMIT 1
     `, [coinId]);
@@ -84,6 +88,7 @@ async function get24HourPriceChange(coinId) {
       FROM price_history
       WHERE coin_id = $1
       AND created_at <= $2
+        AND ${PERSISTENT_PH}
       ORDER BY created_at DESC
       LIMIT 1
     `, [coinId, twentyFourHoursAgo.toISOString()]);
@@ -97,6 +102,7 @@ async function get24HourPriceChange(coinId) {
         SELECT price, created_at
         FROM price_history
         WHERE coin_id = $1
+          AND ${PERSISTENT_PH}
         ORDER BY created_at ASC
         LIMIT 1
       `, [coinId]);
@@ -130,6 +136,7 @@ exports.selectAllCoins = async () => {
         price AS current_price,
         created_at
       FROM price_history
+      WHERE ${PERSISTENT_PH}
       ORDER BY coin_id, created_at DESC
     ),
     old_prices_24h AS (
@@ -138,6 +145,7 @@ exports.selectAllCoins = async () => {
         price AS old_price
       FROM price_history
       WHERE created_at <= NOW() - INTERVAL '24 hours'
+        AND ${PERSISTENT_PH}
       ORDER BY coin_id, created_at DESC
     ),
     earliest_prices AS (
@@ -145,6 +153,7 @@ exports.selectAllCoins = async () => {
         coin_id,
         price AS earliest_price
       FROM price_history
+      WHERE ${PERSISTENT_PH}
       ORDER BY coin_id, created_at ASC
     )
     SELECT 
