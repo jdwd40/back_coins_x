@@ -603,8 +603,9 @@ const DEFAULT_SIMULATION_CONFIG = {
     // negative magnitude (median or broad movement at/below
     // -rescueCorroborationDeclinePct), a corroborating drawdown
     // (at/above rescueCorroborationDrawdownPct, below the independently
-    // severe level), or health evidence (a critically weak coin or a
-    // recent death). Must exceed the breadth noise threshold.
+    // severe level), or a recent death. A single critically weak coin does
+    // NOT corroborate breadth (clustered distress has its own path).
+    // Must exceed the breadth noise threshold.
     rescueCorroborationDeclinePct: 0.02,
     rescueCorroborationDrawdownPct: 0.1,
     // Roster size at which the falling-breadth severity component reaches
