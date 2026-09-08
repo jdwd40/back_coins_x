@@ -54,7 +54,11 @@ describe('Wave 1: tracked production migration 029', () => {
 
     await db.query('DROP TABLE IF EXISTS persistent_coin_events CASCADE');
     await db.query('DROP TABLE IF EXISTS director_control_state CASCADE');
-    await db.query('DELETE FROM schema_migrations WHERE migration = $1', [MIGRATION_029]);
+    // 030/031 add columns to director_control_state: dropping the table
+    // must also un-track 030/031 so the replay rebuilds the full current
+    // shape.
+    await db.query('DELETE FROM schema_migrations WHERE migration = ANY($1)',
+      [[MIGRATION_029, '030_director_control_refractory.sql', '031_director_control_last_intervention_mode.sql']]);
     const result = await runMigrations({ log: () => {} });
     expect(result.applied).toContain(MIGRATION_029);
 

@@ -515,7 +515,103 @@ const DEFAULT_SIMULATION_CONFIG = {
     stagnationThresholdPct: 0.02,
     // Safety window after a recent persistent coin death during which the
     // Director must not target the freshly replaced coin.
-    recentDeathSafetyMs: 30 * MINUTE_MS
+    recentDeathSafetyMs: 30 * MINUTE_MS,
+
+    // Director Coin Events Wave 2: adaptive Director decision/observation
+    // bounds. These bound the adaptive decision domain, the bounded
+    // current-market observation and the pure event-count planning seam —
+    // validated tunables, still NOT wired into live pricing or automatic
+    // event generation.
+    //
+    // Bounded observation lookback: all current-market movement/breadth
+    // evidence is read from at most this far back (fixed bounded queries;
+    // never a world-age walk). Must span at least one decision tick and
+    // never exceed the stagnation window (a stagnation verdict beyond the
+    // lookback would be unobservable).
+    observationLookbackMs: 30 * MINUTE_MS,
+    // Per-coin rising/falling/flat breadth threshold over the observation
+    // lookback: |movement| at or above this fraction counts as moving.
+    breadthThresholdPct: 0.005,
+    // Persistent-condition health bands (condition lives in [-1, 1],
+    // migration 024): at or below weak a coin counts as weak; at or below
+    // distressed it counts as critically weak. Distressed is strictly more
+    // negative than weak.
+    weakConditionThreshold: -0.3,
+    distressedConditionThreshold: -0.6,
+    // RESCUE triggers: approximate broad-market drawdown at/above this
+    // fraction, or a falling breadth fraction at/above this, or at least
+    // this many weak coins, or a death cluster (below), all favour RESCUE.
+    rescueDrawdownPct: 0.25,
+    rescueFallingBreadthFraction: 0.7,
+    rescueWeakCount: 3,
+    // A death cluster: at least this many persistent deaths within
+    // deathClusterWindowMs.
+    deathClusterCount: 2,
+    deathClusterWindowMs: 60 * MINUTE_MS,
+    // Overheating: a broad rise at/above this fraction over the bounded
+    // lookback with at least this fraction of live coins rising. Must
+    // exceed the ordinary meaningful-movement threshold so healthy rises
+    // never trigger a correction.
+    overheatRisePct: 0.08,
+    overheatBreadthFraction: 0.7,
+    // Event-count planning caps: planned per-coin positive/negative target
+    // counts never exceed these, and these never exceed the Wave 1
+    // persistentEvents per-direction active caps (cross-section check).
+    maxTargetPositivePerCoin: 2,
+    maxTargetNegativePerCoin: 2,
+    // Anti-loop bound: when a stagnation swing draw would repeat the last
+    // broad swing direction, the repeat stands only when a second
+    // confirmation roll lands below this probability; otherwise the swing
+    // flips. Strictly below 1 so same-direction loops can never be certain.
+    stagnationSameDirectionProbability: 0.25,
+
+    // PR #36 correction — market-wide breadth-aware stagnation: the market
+    // clock refreshes only when at least this fraction of LIVE coins each
+    // moved meaningfully (per-coin consecutive-tick delta at/above
+    // stagnationThresholdPct) inside the bounded lookback; the refreshed
+    // instant is the breadth-crossing time (the k-th largest per-coin
+    // last-meaningful time), never the latest tick of any one coin. One
+    // outlier can never reset the market clock.
+    stagnationBreadthFraction: 0.5,
+
+    // PR #36 correction — post-intervention refractory: after any
+    // BOOM/BUST/RESCUE window ends, triggers (stagnation swings, RESCUE —
+    // ordinary or emergency — and overheat corrections) are held to
+    // bounded NORMAL windows until this much time has passed. Continued
+    // conditions may trigger again afterwards; even a death-cluster or
+    // severe-drawdown emergency waits out the refractory its own ended
+    // window created (the emergency exception is interrupting a currently
+    // ACTIVE non-RESCUE window, which only ever exists outside the
+    // refractory). Must span at least one full NORMAL swing window.
+    interventionRefractoryMs: 20 * MINUTE_MS,
+
+    // PR #36 wave-2 correction — emergency refractory: a NEWLY encountered
+    // death-cluster/severe-drawdown emergency arising during the ordinary
+    // refractory waits only this shorter bounded latency before RESCUE may
+    // commit (interrupting the refractory NORMAL window if one stands).
+    // The exception never applies to a refractory created by an ended
+    // RESCUE window (tracked by director_control_state.last_intervention_mode,
+    // migration 031): an emergency can never override the refractory its
+    // own ended window created, so persistent emergencies keep bounded
+    // RESCUE duty and every ended window still yields a full NORMAL
+    // opportunity. Must span at least one decision tick and stay strictly
+    // below the ordinary refractory.
+    emergencyRefractoryMs: 5 * MINUTE_MS,
+
+    // PR #36 correction — RESCUE corroboration: falling breadth alone never
+    // rescues. The breadth trigger additionally requires meaningful
+    // negative magnitude (median or broad movement at/below
+    // -rescueCorroborationDeclinePct), a corroborating drawdown
+    // (at/above rescueCorroborationDrawdownPct, below the independently
+    // severe level), or a recent death. A single critically weak coin does
+    // NOT corroborate breadth (clustered distress has its own path).
+    // Must exceed the breadth noise threshold.
+    rescueCorroborationDeclinePct: 0.02,
+    rescueCorroborationDrawdownPct: 0.1,
+    // Roster size at which the falling-breadth severity component reaches
+    // full weight: smaller rosters scale it by live/this, so a 2-coin
+    // roster can never reach maximum severity from breadth alone.
+    rescueBreadthSeverityRosterSize: 4
   }
 };
 
@@ -1095,12 +1191,23 @@ function validatePersistentEvents(name, persistentEvents) {
   }
 }
 
-// Director Coin Events Wave 1: Director short-term control placeholders.
+// Director Coin Events Wave 1+2: Director short-term control bounds.
 function validateDirectorControl(name, directorControl) {
   requireExactKeys(name, directorControl, [
     'cadenceMs', 'interventionDurationMs', 'normalSwingTargetMs',
     'goldenDurationMs', 'demonDurationMs', 'stagnationWindowMs',
-    'stagnationThresholdPct', 'recentDeathSafetyMs'
+    'stagnationThresholdPct', 'recentDeathSafetyMs',
+    'observationLookbackMs', 'breadthThresholdPct',
+    'weakConditionThreshold', 'distressedConditionThreshold',
+    'rescueDrawdownPct', 'rescueFallingBreadthFraction', 'rescueWeakCount',
+    'deathClusterCount', 'deathClusterWindowMs',
+    'overheatRisePct', 'overheatBreadthFraction',
+    'maxTargetPositivePerCoin', 'maxTargetNegativePerCoin',
+    'stagnationSameDirectionProbability',
+    'stagnationBreadthFraction', 'interventionRefractoryMs',
+    'emergencyRefractoryMs',
+    'rescueCorroborationDeclinePct', 'rescueCorroborationDrawdownPct',
+    'rescueBreadthSeverityRosterSize'
   ]);
 
   requirePositiveInteger(`${name}.cadenceMs`, directorControl.cadenceMs);
@@ -1130,6 +1237,116 @@ function validateDirectorControl(name, directorControl) {
   if (!Number.isInteger(directorControl.recentDeathSafetyMs) || directorControl.recentDeathSafetyMs < 0) {
     failConfig(`${name}.recentDeathSafetyMs must be a non-negative integer; received ${directorControl.recentDeathSafetyMs}`);
   }
+
+  // Wave 2: adaptive decision/observation bounds.
+  requirePositiveInteger(`${name}.observationLookbackMs`, directorControl.observationLookbackMs);
+  if (directorControl.observationLookbackMs < directorControl.cadenceMs) {
+    failConfig(`${name}.observationLookbackMs ${directorControl.observationLookbackMs} is below the Director cadenceMs ${directorControl.cadenceMs}`);
+  }
+  if (directorControl.observationLookbackMs > directorControl.stagnationWindowMs) {
+    failConfig(`${name}.observationLookbackMs ${directorControl.observationLookbackMs} exceeds stagnationWindowMs ${directorControl.stagnationWindowMs} (stagnation beyond the lookback would be unobservable)`);
+  }
+
+  requireFiniteNumber(`${name}.breadthThresholdPct`, directorControl.breadthThresholdPct);
+  if (directorControl.breadthThresholdPct <= 0 || directorControl.breadthThresholdPct >= 1) {
+    failConfig(`${name}.breadthThresholdPct must be a fraction in (0, 1); received ${directorControl.breadthThresholdPct}`);
+  }
+
+  for (const key of ['weakConditionThreshold', 'distressedConditionThreshold']) {
+    requireFiniteNumber(`${name}.${key}`, directorControl[key]);
+    if (directorControl[key] <= -1 || directorControl[key] > 0) {
+      failConfig(`${name}.${key} must be a condition level in (-1, 0]; received ${directorControl[key]}`);
+    }
+  }
+  if (!(directorControl.distressedConditionThreshold < directorControl.weakConditionThreshold)) {
+    failConfig(`${name}.distressedConditionThreshold ${directorControl.distressedConditionThreshold} must be strictly below weakConditionThreshold ${directorControl.weakConditionThreshold} (distressed is more severe)`);
+  }
+
+  requireFiniteNumber(`${name}.rescueDrawdownPct`, directorControl.rescueDrawdownPct);
+  if (directorControl.rescueDrawdownPct <= 0 || directorControl.rescueDrawdownPct >= 1) {
+    failConfig(`${name}.rescueDrawdownPct must be a fraction in (0, 1); received ${directorControl.rescueDrawdownPct}`);
+  }
+  requireFiniteNumber(`${name}.rescueFallingBreadthFraction`, directorControl.rescueFallingBreadthFraction);
+  if (directorControl.rescueFallingBreadthFraction <= 0 || directorControl.rescueFallingBreadthFraction > 1) {
+    failConfig(`${name}.rescueFallingBreadthFraction must be a fraction in (0, 1]; received ${directorControl.rescueFallingBreadthFraction}`);
+  }
+  requirePositiveInteger(`${name}.rescueWeakCount`, directorControl.rescueWeakCount);
+
+  requireFiniteNumber(`${name}.deathClusterCount`, directorControl.deathClusterCount);
+  if (!Number.isInteger(directorControl.deathClusterCount) || directorControl.deathClusterCount < 2) {
+    failConfig(`${name}.deathClusterCount must be an integer of at least 2 (one death is not a cluster); received ${directorControl.deathClusterCount}`);
+  }
+  requirePositiveInteger(`${name}.deathClusterWindowMs`, directorControl.deathClusterWindowMs);
+
+  requireFiniteNumber(`${name}.overheatRisePct`, directorControl.overheatRisePct);
+  if (directorControl.overheatRisePct <= 0 || directorControl.overheatRisePct >= 1) {
+    failConfig(`${name}.overheatRisePct must be a fraction in (0, 1); received ${directorControl.overheatRisePct}`);
+  }
+  // Overheating must mean strictly more than ordinary meaningful movement,
+  // or every healthy swing would read as overheating.
+  if (directorControl.overheatRisePct <= directorControl.stagnationThresholdPct) {
+    failConfig(`${name}.overheatRisePct ${directorControl.overheatRisePct} must exceed stagnationThresholdPct ${directorControl.stagnationThresholdPct} (ordinary healthy movement is not overheating)`);
+  }
+  requireFiniteNumber(`${name}.overheatBreadthFraction`, directorControl.overheatBreadthFraction);
+  if (directorControl.overheatBreadthFraction <= 0 || directorControl.overheatBreadthFraction > 1) {
+    failConfig(`${name}.overheatBreadthFraction must be a fraction in (0, 1]; received ${directorControl.overheatBreadthFraction}`);
+  }
+
+  for (const key of ['maxTargetPositivePerCoin', 'maxTargetNegativePerCoin']) {
+    requirePositiveInteger(`${name}.${key}`, directorControl[key]);
+  }
+
+  requireFiniteNumber(`${name}.stagnationSameDirectionProbability`, directorControl.stagnationSameDirectionProbability);
+  if (directorControl.stagnationSameDirectionProbability < 0 || directorControl.stagnationSameDirectionProbability >= 1) {
+    failConfig(`${name}.stagnationSameDirectionProbability must be a probability in [0, 1) (1 would make same-direction loops certain); received ${directorControl.stagnationSameDirectionProbability}`);
+  }
+
+  // PR #36 correction bounds.
+  requireFiniteNumber(`${name}.stagnationBreadthFraction`, directorControl.stagnationBreadthFraction);
+  if (directorControl.stagnationBreadthFraction <= 0 || directorControl.stagnationBreadthFraction > 1) {
+    failConfig(`${name}.stagnationBreadthFraction must be a fraction in (0, 1]; received ${directorControl.stagnationBreadthFraction}`);
+  }
+
+  requirePositiveInteger(`${name}.interventionRefractoryMs`, directorControl.interventionRefractoryMs);
+  // The refractory must span at least one full NORMAL swing window, or an
+  // intervention could recommit without a single complete NORMAL
+  // opportunity.
+  if (directorControl.interventionRefractoryMs < directorControl.normalSwingTargetMs.max) {
+    failConfig(`${name}.interventionRefractoryMs ${directorControl.interventionRefractoryMs} is below normalSwingTargetMs.max ${directorControl.normalSwingTargetMs.max} (the refractory must span at least one full NORMAL window)`);
+  }
+
+  requirePositiveInteger(`${name}.emergencyRefractoryMs`, directorControl.emergencyRefractoryMs);
+  // The emergency latency must span at least one decision tick, or an
+  // emergency could never be observed before it fired.
+  if (directorControl.emergencyRefractoryMs < directorControl.cadenceMs) {
+    failConfig(`${name}.emergencyRefractoryMs ${directorControl.emergencyRefractoryMs} is below the Director cadenceMs ${directorControl.cadenceMs} (the emergency refractory must span at least one decision tick)`);
+  }
+  // The emergency refractory must be strictly shorter than the ordinary
+  // refractory, or it is not an emergency policy at all.
+  if (directorControl.emergencyRefractoryMs >= directorControl.interventionRefractoryMs) {
+    failConfig(`${name}.emergencyRefractoryMs ${directorControl.emergencyRefractoryMs} must be shorter than interventionRefractoryMs ${directorControl.interventionRefractoryMs} (the emergency exception exists to answer sooner than the ordinary refractory)`);
+  }
+
+  requireFiniteNumber(`${name}.rescueCorroborationDeclinePct`, directorControl.rescueCorroborationDeclinePct);
+  if (directorControl.rescueCorroborationDeclinePct <= 0 || directorControl.rescueCorroborationDeclinePct >= 1) {
+    failConfig(`${name}.rescueCorroborationDeclinePct must be a fraction in (0, 1); received ${directorControl.rescueCorroborationDeclinePct}`);
+  }
+  // Corroboration must mean more than breadth noise.
+  if (directorControl.rescueCorroborationDeclinePct < directorControl.breadthThresholdPct) {
+    failConfig(`${name}.rescueCorroborationDeclinePct ${directorControl.rescueCorroborationDeclinePct} is below breadthThresholdPct ${directorControl.breadthThresholdPct} (noise cannot corroborate a rescue)`);
+  }
+
+  requireFiniteNumber(`${name}.rescueCorroborationDrawdownPct`, directorControl.rescueCorroborationDrawdownPct);
+  if (directorControl.rescueCorroborationDrawdownPct <= 0 || directorControl.rescueCorroborationDrawdownPct >= 1) {
+    failConfig(`${name}.rescueCorroborationDrawdownPct must be a fraction in (0, 1); received ${directorControl.rescueCorroborationDrawdownPct}`);
+  }
+  // A corroborating drawdown must sit strictly below the independently
+  // severe level, or the two triggers would duplicate.
+  if (directorControl.rescueCorroborationDrawdownPct >= directorControl.rescueDrawdownPct) {
+    failConfig(`${name}.rescueCorroborationDrawdownPct ${directorControl.rescueCorroborationDrawdownPct} must be below rescueDrawdownPct ${directorControl.rescueDrawdownPct} (severe drawdown rescues independently)`);
+  }
+
+  requirePositiveInteger(`${name}.rescueBreadthSeverityRosterSize`, directorControl.rescueBreadthSeverityRosterSize);
 }
 
 // Validate a COMPLETE simulation config: every section and every leaf must
@@ -1153,6 +1370,15 @@ function validateSimulationConfig(config) {
   validateDirector('director', config.director);
   validatePersistentEvents('persistentEvents', config.persistentEvents);
   validateDirectorControl('directorControl', config.directorControl);
+  // Cross-section bound (Wave 2): planned per-coin event-count targets can
+  // never exceed the Wave 1 per-direction ACTIVE caps — a plan above the
+  // persisted-event authority's own limits would be unenforceable.
+  if (config.directorControl.maxTargetPositivePerCoin > config.persistentEvents.maxActivePositivePerCoin) {
+    failConfig(`directorControl.maxTargetPositivePerCoin ${config.directorControl.maxTargetPositivePerCoin} exceeds persistentEvents.maxActivePositivePerCoin ${config.persistentEvents.maxActivePositivePerCoin}`);
+  }
+  if (config.directorControl.maxTargetNegativePerCoin > config.persistentEvents.maxActiveNegativePerCoin) {
+    failConfig(`directorControl.maxTargetNegativePerCoin ${config.directorControl.maxTargetNegativePerCoin} exceeds persistentEvents.maxActiveNegativePerCoin ${config.persistentEvents.maxActiveNegativePerCoin}`);
+  }
   return config;
 }
 
