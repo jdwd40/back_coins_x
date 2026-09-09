@@ -39,6 +39,18 @@ const persistentPricing = require('../game/persistentPricing');
 const { createNeutralEnvironmentProvider } = require('../game/marketEnvironment');
 const { createMarketDirectorProvider } = require('../game/marketDirector');
 const { resolveSimulationConfig } = require('../game/simulationConfig');
+const persistentCoinEventDomain = require('../game/persistentCoinEventDomain');
+const persistentCoinEventRuntime = require('../game/persistentCoinEventRuntime');
+const { planAdaptiveEventTargets } = require('../game/adaptiveDirectorEventPlan');
+
+// Wave 3: the horizon exercises the SAME persistent coin-event modifier
+// path as the live writer — the shared pure reconcile helper over a
+// deterministic in-memory per-coin ledger (never a competing simulator
+// architecture, never a hardcoded zero). The synthetic per-step decision
+// is a NORMAL healthy-market decision (mode/direction/intensity fixed;
+// the step index is the decision cursor, so payloads stay seeded and
+// replay-stable); the REAL Wave 2 planner maps it to per-coin targets.
+const HORIZON_WORLD_ID = 1; // synthetic identity: the horizon has no world row
 
 // Environment provider selection: 'neutral' (Stage 2 default) or
 // 'director' (Stage 3 Market Director behind the same seam).
@@ -84,28 +96,90 @@ function parseArgs(argv) {
 
 // Fresh per-coin world state at the epoch: neutral condition, reference
 // and peak at the opening structural reference, no checkpoint, empty
-// public price window.
+// public price window, empty persistent event ledger (Wave 3).
 function initialCoinState(coin) {
   return {
     condition: 0,
     structuralReference: coin.reference,
     peakReference: coin.reference,
     checkpoint: null,
-    priceWindow: [] // { atMs, price } — the public recent-return window
+    priceWindow: [], // { atMs, price } — the public recent-return window
+    eventLedger: [], // surviving (not-yet-expired) planned persistent events
+    eventSeqCursor: 0, // monotone per-coin sequence anchor (expired included)
+    lastEventModifier: 0 // the capped net modifier applied at the last step
   };
 }
 
+// Wave 3: reconcile every coin's in-memory persistent event ledger to the
+// planner's targets at nowMs (the shared pure runtime helper — identical
+// reconciliation semantics to the live writer's database path), then
+// compute each coin's stack-capped net modifier through the Wave 1 domain.
+// The ledger is append-only within a step; expired events are pruned at
+// step start deterministically (they can never be active again) while the
+// monotone sequence cursor preserves their identity span — mirroring the
+// database's retained-history + MAX(event_seq) anchor. Returns
+// Map coinId -> capped net modifier for this step.
+function reconcileStepEvents({ world, seed, nowMs, stepIndex, environment, config }) {
+  const envNow = environment.environmentAt(nowMs);
+  const decision = {
+    mode: 'NORMAL',
+    direction: 'POSITIVE',
+    intensity: 0,
+    decisionIndex: stepIndex,
+    goldenCoinId: null,
+    demonCoinId: null
+  };
+  const observation = {
+    coins: world.map((entry) => ({ coinId: entry.coin.coinId })),
+    macro: { environment: envNow }
+  };
+  const plan = planAdaptiveEventTargets({ decision, observation, config });
+  const planByCoin = new Map(plan.map((entry) => [entry.coinId, entry]));
+
+  const modifiers = new Map();
+  for (const entry of world) {
+    const state = entry.state;
+    state.eventLedger = state.eventLedger.filter((ev) => new Date(ev.endsAt).getTime() > nowMs);
+    const planEntry = planByCoin.get(entry.coin.coinId);
+    const { created } = persistentCoinEventRuntime.reconcileCoinEventTargets({
+      activeEvents: state.eventLedger,
+      maxEventSeq: state.eventSeqCursor,
+      coinId: entry.coin.coinId,
+      targetPositive: planEntry.targetPositive,
+      targetNegative: planEntry.targetNegative,
+      role: planEntry.role,
+      reason: planEntry.reason,
+      decision,
+      worldSeed: seed,
+      worldId: HORIZON_WORLD_ID,
+      eventSeverityScale: envNow.eventSeverityScale,
+      nowMs,
+      config
+    });
+    if (created.length > 0) {
+      state.eventLedger.push(...created);
+      state.eventSeqCursor += created.length;
+    }
+    const modifier = persistentCoinEventDomain.netActiveModifierCapped(state.eventLedger, nowMs, config);
+    state.lastEventModifier = modifier;
+    modifiers.set(entry.coin.coinId, modifier);
+  }
+  return modifiers;
+}
+
 // One batch for one coin at nowMs (the exact pattern the live writer will
-// run per 30s batch): price from the committed state and checkpoint, then
-// advance the committed coin state (condition, reference, peak) and
-// freeze the fresh checkpoint. Returns the batch detail.
-function stepCoin({ coin, state, nowMs, elapsedMs, environment, config }) {
+// run per 30s batch): price from the committed state and checkpoint with
+// the coin's reconciled capped net event modifier, then advance the
+// committed coin state (condition, reference, peak) and freeze the fresh
+// checkpoint. Returns the batch detail.
+function stepCoin({ coin, state, nowMs, elapsedMs, environment, config, eventModifier = 0 }) {
   const envNow = environment.environmentAt(nowMs);
   const price = persistentPricing.persistentPriceAt({
     seed: coin.seed, coinId: coin.coinId, archetypeId: coin.archetypeId,
     originMs: coin.originMs, nowMs,
     structuralReference: state.structuralReference,
     environment,
+    eventModifier,
     checkpoint: state.checkpoint,
     config
   });
@@ -117,6 +191,7 @@ function stepCoin({ coin, state, nowMs, elapsedMs, environment, config }) {
     originMs: coin.originMs, nowMs,
     structuralReference: state.structuralReference,
     environment,
+    eventModifier,
     checkpoint: state.checkpoint,
     config
   });
@@ -140,7 +215,7 @@ function stepCoin({ coin, state, nowMs, elapsedMs, environment, config }) {
     recentLogReturn,
     drawdownFromPeak: drawdown,
     logCommittedDamage,
-    netEventModifier: 0, // Stage 2: no persistent coin-event stream yet (Stage 3/4 debt)
+    netEventModifier: eventModifier, // Wave 3: the same capped modifier as pricing
     environment: envNow,
     config
   });
@@ -226,12 +301,19 @@ function runPersistentHorizon({
 
   for (let s = 1; s <= steps; s++) {
     const tMs = originMs + s * cadenceMs;
+    // Wave 3: reconcile the persistent event ledgers first — events
+    // created at this instant are active for this step's pricing, exactly
+    // like the live writer's batch ordering.
+    const stepEventModifiers = reconcileStepEvents({
+      world, seed, nowMs: tMs, stepIndex: s, environment, config
+    });
     for (const entry of world) {
       const { coin, state } = entry;
       const referenceBefore = state.structuralReference;
       const before = state.condition;
       const { price, condition, detail } = stepCoin({
-        coin, state, nowMs: tMs, elapsedMs: cadenceMs, environment, config
+        coin, state, nowMs: tMs, elapsedMs: cadenceMs, environment, config,
+        eventModifier: stepEventModifiers.get(coin.coinId)
       });
       const m = metrics.get(coin.coinId);
       if (price < m.minPrice) m.minPrice = price;
@@ -260,7 +342,8 @@ function runPersistentHorizon({
     }
     if (replayStep !== null && s === replayStep) {
       // Freeze the ENTIRE world state (committed coin state + checkpoint
-      // accumulators) — the restart/replay boundary.
+      // accumulators + the Wave 3 event ledgers) — the restart/replay
+      // boundary.
       frozenReplayState = world.map((entry) => ({
         coin: entry.coin,
         state: JSON.parse(JSON.stringify({
@@ -268,7 +351,10 @@ function runPersistentHorizon({
           structuralReference: entry.state.structuralReference,
           peakReference: entry.state.peakReference,
           checkpoint: entry.state.checkpoint,
-          priceWindow: entry.state.priceWindow
+          priceWindow: entry.state.priceWindow,
+          eventLedger: entry.state.eventLedger,
+          eventSeqCursor: entry.state.eventSeqCursor,
+          lastEventModifier: entry.state.lastEventModifier
         }))
       }));
     }
@@ -302,10 +388,14 @@ function resumePersistentHorizon(frozen, { days, cadenceMinutes, seed, environme
   const prices = new Map();
   for (let s = frozen.replayStep + 1; s <= steps; s++) {
     const tMs = originMs + s * cadenceMs;
+    const stepEventModifiers = reconcileStepEvents({
+      world, seed, nowMs: tMs, stepIndex: s, environment, config
+    });
     for (const entry of world) {
       const { price } = stepCoin({
         coin: entry.coin, state: entry.state, nowMs: tMs, elapsedMs: cadenceMs,
-        environment, config
+        environment, config,
+        eventModifier: stepEventModifiers.get(entry.coin.coinId)
       });
       if (s % Math.max(1, Math.round(DAY_MS / cadenceMs)) === 0) {
         if (!prices.has(s)) prices.set(s, new Map());

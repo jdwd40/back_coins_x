@@ -31,9 +31,21 @@ const { createNeutralEnvironmentProvider, NEUTRAL_ENVIRONMENT } = require('../ga
 const { createMarketDirectorProvider } = require('../game/marketDirector');
 const { resolveSimulationConfig } = require('../game/simulationConfig');
 const marketDomain = require('../game/marketDomain');
+const persistentCoinEventDomain = require('../game/persistentCoinEventDomain');
+const persistentCoinEventRuntime = require('../game/persistentCoinEventRuntime');
+const { planAdaptiveEventTargets } = require('../game/adaptiveDirectorEventPlan');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
+
+// Wave 3: as in simulation/persistentHorizon.js, the harness drives the
+// SAME persistent coin-event modifier path as the live writer — the shared
+// pure reconcile helper over a deterministic in-memory per-coin ledger,
+// with the REAL Wave 2 planner mapping a synthetic per-step NORMAL
+// decision (step index as the decision cursor) to per-coin targets. Dead
+// coins are never reconciled (their ledgers simply expire); replacements
+// open a fresh ledger at introduction.
+const HORIZON_WORLD_ID = 1; // synthetic identity: the horizon has no world row
 
 // Canonical opening roster — explicit archetypes, never silent MOON.
 const CANONICAL_PERSISTENT_COINS = Object.freeze([
@@ -84,6 +96,9 @@ function initialCoinState(coin, introducedAtMs) {
     peakReference: coin.reference,
     checkpoint: null,
     priceWindow: [],
+    eventLedger: [], // surviving (not-yet-expired) planned persistent events
+    eventSeqCursor: 0, // monotone per-coin sequence anchor (expired included)
+    lastEventModifier: 0,
     status: 'ALIVE',
     diedAt: null,
     introducedAtMs,
@@ -204,7 +219,8 @@ function stepAliveCoin({
   cadenceMs,
   environment,
   config,
-  events
+  events,
+  eventModifier = 0
 }) {
   const { coin, state } = entry;
 
@@ -216,6 +232,7 @@ function stepAliveCoin({
     nowMs,
     structuralReference: state.structuralReference,
     environment,
+    eventModifier,
     checkpoint: state.checkpoint,
     config
   });
@@ -233,6 +250,7 @@ function stepAliveCoin({
     nowMs,
     structuralReference: state.structuralReference,
     environment,
+    eventModifier,
     checkpoint: state.checkpoint,
     config
   });
@@ -254,7 +272,7 @@ function stepAliveCoin({
     recentLogReturn,
     drawdownFromPeak: drawdown,
     logCommittedDamage,
-    netEventModifier: 0,
+    netEventModifier: eventModifier, // Wave 3: the same capped modifier as pricing
     environment: envNow,
     config
   });
@@ -525,6 +543,54 @@ function runStage9Horizon({
     // this step must not be priced until the next cadence (matches writer
     // then reconcile ordering used by the production worker).
     const liveAtStepStart = world.filter((entry) => entry.state.status === 'ALIVE');
+
+    // Wave 3: reconcile the LIVE roster's in-memory persistent event
+    // ledgers to the planner's targets at nowMs (the shared pure runtime
+    // helper, identical semantics to the live writer's database path).
+    // Dead coins are never reconciled: their events expire historically.
+    const stepEventModifiers = (() => {
+      const envNow = environment.environmentAt(nowMs);
+      const decision = {
+        mode: 'NORMAL', direction: 'POSITIVE', intensity: 0,
+        decisionIndex: s, goldenCoinId: null, demonCoinId: null
+      };
+      const observation = {
+        coins: liveAtStepStart.map((entry) => ({ coinId: entry.coin.coinId })),
+        macro: { environment: envNow }
+      };
+      const plan = planAdaptiveEventTargets({ decision, observation, config });
+      const planByCoin = new Map(plan.map((p) => [p.coinId, p]));
+      const modifiers = new Map();
+      for (const entry of liveAtStepStart) {
+        const state = entry.state;
+        state.eventLedger = state.eventLedger.filter((ev) => new Date(ev.endsAt).getTime() > nowMs);
+        const planEntry = planByCoin.get(entry.coin.coinId);
+        const { created } = persistentCoinEventRuntime.reconcileCoinEventTargets({
+          activeEvents: state.eventLedger,
+          maxEventSeq: state.eventSeqCursor,
+          coinId: entry.coin.coinId,
+          targetPositive: planEntry.targetPositive,
+          targetNegative: planEntry.targetNegative,
+          role: planEntry.role,
+          reason: planEntry.reason,
+          decision,
+          worldSeed: seed,
+          worldId: HORIZON_WORLD_ID,
+          eventSeverityScale: envNow.eventSeverityScale,
+          nowMs,
+          config
+        });
+        if (created.length > 0) {
+          state.eventLedger.push(...created);
+          state.eventSeqCursor += created.length;
+        }
+        const modifier = persistentCoinEventDomain.netActiveModifierCapped(state.eventLedger, nowMs, config);
+        state.lastEventModifier = modifier;
+        modifiers.set(entry.coin.coinId, modifier);
+      }
+      return modifiers;
+    })();
+
     for (const entry of liveAtStepStart) {
       if (entry.state.status !== 'ALIVE') continue;
       stepAliveCoin({
@@ -535,7 +601,8 @@ function runStage9Horizon({
         cadenceMs,
         environment,
         config,
-        events
+        events,
+        eventModifier: stepEventModifiers.get(entry.coin.coinId)
       });
     }
 

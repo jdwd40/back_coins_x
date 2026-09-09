@@ -87,7 +87,21 @@ function computePersistentCoinSignal({
   };
   const current = persistentPricing.computePersistentPrice({ ...shared, nowMs });
   const currentPrice = marketDomain.roundGamePrice(current.price);
-  const pastMs = Math.max(originMs, nowMs - Math.max(1, lookbackMs));
+  // The past leg evaluates the lookback-open instant. A committed
+  // checkpoint is FUTURE state for any instant before it (the engine
+  // refuses future checkpoints loudly), and it is also the oldest instant
+  // the committed accumulators can price cheaply and exactly — so when
+  // the freshest committed checkpoint is newer than the full lookback,
+  // the recent-change window opens at the checkpoint instant instead.
+  // With no checkpoint (or a tick long after the last batch) the fixed
+  // public lookback applies unchanged.
+  const pastMs = Math.max(
+    originMs,
+    nowMs - Math.max(1, lookbackMs),
+    checkpoint && Number.isFinite(Number(checkpoint.checkpointMs))
+      ? Number(checkpoint.checkpointMs)
+      : 0
+  );
   const pastPrice = persistentPricing.persistentPriceAt({ ...shared, nowMs: pastMs });
   const recentChangePct = pastPrice > 0
     ? Math.round(((currentPrice - pastPrice) / pastPrice) * 10000) / 100
