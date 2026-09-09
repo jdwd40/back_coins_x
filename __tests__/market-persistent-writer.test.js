@@ -562,13 +562,31 @@ describe('Stage 4 persistent market writer: provenance and redaction', () => {
   });
 
   test('the public status/stats surface carries no Director internals or seeds', async () => {
-    await marketSimulator.start();
-    const deadline = Date.now() + 5000;
-    while (marketSimulator.lastBatch === null && Date.now() < deadline) {
-      // eslint-disable-next-line no-await-in-loop
-      await new Promise((resolve) => setTimeout(resolve, 25));
+    // Pin the test clock to the first-batch instant. The fixture world
+    // epoch is pinned in the past, so a REAL-clock first batch walks the
+    // whole world age from origin (~12s and growing — far beyond any
+    // fixed wait). With the clock pinned minutes past the epoch the cold
+    // first batch is as short as the warm path and the test is stable at
+    // any wall-clock date. Production scheduling/Director behaviour is
+    // untouched — this injects the same authoritative-instant seam every
+    // simulated-time test in this suite uses.
+    const clockSpy = jest.spyOn(Date, 'now').mockReturnValue(T1_MS);
+    try {
+      await marketSimulator.start();
+      // Await the relevant first update directly: lastBatch is stamped
+      // only after the batch COMMITs, so a non-null lastBatch means the
+      // in-flight first batch has fully completed (the next interval tick
+      // is 30s of pinned time away and stop() clears it below). The bound
+      // is a failure guard, not a sleep — the loop exits the moment the
+      // first batch lands.
+      for (let i = 0; i < 400 && marketSimulator.lastBatch === null; i += 1) {
+        // eslint-disable-next-line no-await-in-loop
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    } finally {
+      marketSimulator.stop();
+      clockSpy.mockRestore();
     }
-    marketSimulator.stop();
     expect(marketSimulator.lastBatch).not.toBeNull();
 
     const status = JSON.stringify(marketSimulator.getMarketStatus());

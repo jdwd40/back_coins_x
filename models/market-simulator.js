@@ -270,10 +270,19 @@ class MarketSimulator {
 
       client = await db.getClient();
       await client.query('BEGIN');
-      // Lock coins for a consistent snapshot + atomic writes (the
-      // coins-before-everything lock order is preserved: coin rows first,
-      // then the persistent market-state rows, Director row and pricing
-      // checkpoint rows — the same fixed order every batch).
+      // Lock coins for a consistent snapshot + atomic writes. The batch's
+      // FIXED lock order is coins -> market_worlds -> everything else: the
+      // coin rows are locked FIRST here; the adaptive Director evaluation
+      // below locks the referenced market_worlds row next (inside
+      // upsertDirectorControlState, on this client), then
+      // director_control_state, the persistent market-state rows and the
+      // pricing checkpoint rows — the same fixed order every batch.
+      // WARNING: future code must NEVER introduce the inverse
+      // market_worlds -> coins path (taking the world-row lock before the
+      // coin locks in any transaction that also touches coins). Every
+      // coins-touching path (trades, this writer) locks coins first; an
+      // inverse world-first path would complete a lock-order cycle and
+      // can deadlock against them.
       const result = await client.query('SELECT coin_id, current_price, cycle_baseline_price, retired FROM coins ORDER BY coin_id FOR UPDATE');
       const coins = result.rows;
 

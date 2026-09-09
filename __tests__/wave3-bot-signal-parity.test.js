@@ -23,6 +23,9 @@ const persistentBots = require('../game/persistentBots');
 const persistentSignals = require('../game/persistentSignals');
 const persistentCoinEventDomain = require('../game/persistentCoinEventDomain');
 const eventsModel = require('../models/persistentCoinEvents.model');
+const coinStateModel = require('../models/marketCoinState.model');
+const checkpointModel = require('../models/pricingCheckpoint.model');
+const marketDomain = require('../game/marketDomain');
 const { resolveSimulationConfig } = require('../game/simulationConfig');
 const { assertDisposableTestDatabase } = require('./helpers/testDatabaseGuard');
 
@@ -88,5 +91,90 @@ describe('Wave 3: persistent bot signal parity with the committed event modifier
     // At least one coin carried a nonzero modifier (the path is live).
     const anyNonZero = signalSpy.mock.calls.some((c) => (c[0].eventModifier ?? 0) !== 0);
     expect(anyNonZero).toBe(true);
+  });
+
+  test('the shaped state still hides the seed, event internals, Director rolls and role plans while events are active', async () => {
+    const world = await persistentWorld.resolveActiveWorld(db);
+    const eventTotal = (await db.query(
+      'SELECT count(*)::int AS n FROM persistent_coin_events WHERE world_id = $1', [world.worldId])).rows[0].n;
+    expect(eventTotal).toBeGreaterThan(0); // events genuinely exist
+
+    const state = await persistentBots.buildPublicPersistentMarketState({
+      world, account: null, nowMs: T2_MS, queryable: db
+    });
+    expect(() => persistentBots.assertPublicPersistentBotState(state)).not.toThrow();
+    for (const coin of state.coins) {
+      expect(Object.keys(coin).sort()).toEqual([...persistentBots.PERSISTENT_BOT_COIN_KEYS].sort());
+    }
+    // Value-level redaction: no world seed, no event identity/payload
+    // fields, no Director rolls/cursors, no planner role targets anywhere
+    // in the shaped state (keys OR values).
+    const json = JSON.stringify(state);
+    expect(json).not.toContain(WORLD_SEED);
+    for (const forbidden of [
+      'eventSeq', 'eventId', 'startsAt', 'endsAt', 'modifier',
+      'rolePlan', 'rolePlans', 'targetCount', 'directorRolls',
+      'decisionIndex', 'decision_index'
+    ]) {
+      expect(json).not.toContain(forbidden);
+    }
+  });
+});
+
+describe('Wave 3 correction: zero current events preserve the baseline signal (event-free first tick)', () => {
+  beforeEach(async () => {
+    assertDisposableTestDatabase();
+    marketSimulator.stop();
+    marketSimulator.lastBatch = null;
+    await persistentWorld.provisionWorld(db, { seed: WORLD_SEED, epochStartedAt: new Date(EPOCH_MS) });
+    await marketSimulator.updateAllPrices({ nowMs: T1_MS }); // the first roster tick ONLY
+  });
+
+  afterEach(() => {
+    marketSimulator.stop();
+    jest.restoreAllMocks();
+  });
+
+  test('the first tick commits no events and every live coin signal equals the no-event baseline exactly', async () => {
+    const world = await persistentWorld.resolveActiveWorld(db);
+    // The expected first-roster one-tick event-free startup is unchanged.
+    const eventTotal = (await db.query(
+      'SELECT count(*)::int AS n FROM persistent_coin_events WHERE world_id = $1', [world.worldId])).rows[0].n;
+    expect(eventTotal).toBe(0);
+
+    const stateByCoinId = await coinStateModel.loadCoinStates(db, world.worldId);
+    const checkpointByCoinId = await checkpointModel.loadCheckpoints(db, world.seed);
+    const committed = await db.query('SELECT coin_id, current_price FROM coins ORDER BY coin_id');
+
+    const state = await persistentBots.buildPublicPersistentMarketState({
+      world, account: null, nowMs: T1_MS, queryable: db
+    });
+    expect(() => persistentBots.assertPublicPersistentBotState(state)).not.toThrow();
+    expect(state.coins.length).toBeGreaterThan(0);
+
+    for (const coin of state.coins) {
+      if (coin.dead) continue;
+      const cs = stateByCoinId.get(coin.coinId) || null;
+      const baseline = persistentSignals.computePersistentCoinSignal({
+        seed: world.seed,
+        coinId: coin.coinId,
+        archetypeId: cs ? cs.archetype : marketDomain.resolveArchetypeId(coin.coinId),
+        originMs: world.epochStartedAtMs,
+        nowMs: T1_MS,
+        structuralReference: cs ? cs.structuralReference : parseFloat(committed.rows.find((r) => r.coin_id === coin.coinId).current_price),
+        condition: cs ? cs.condition : 0,
+        // NO event input: the zero-current-events baseline.
+        checkpoint: checkpointByCoinId.get(coin.coinId) || null,
+        config: CONFIG
+      });
+      expect(coin.phase).toBe(baseline.phase);
+      expect(coin.momentum).toBe(baseline.momentum);
+      expect(coin.archetype).toBe(baseline.archetype);
+      expect(coin.collapseRisk).toBe(baseline.collapseRisk);
+      expect(Object.is(coin.recentChangePct, baseline.recentChangePct)).toBe(true);
+      // The decision input price stays the committed traded price.
+      const row = committed.rows.find((r) => r.coin_id === coin.coinId);
+      expect(Object.is(coin.currentPrice, parseFloat(row.current_price))).toBe(true);
+    }
   });
 });

@@ -236,7 +236,14 @@ async function loadDirectorControlState(queryable, worldId) {
 // committed cursor under the full monotone/equal-index rules. The world
 // FK stays the authority; a missing world fails loudly here, before any
 // state write is attempted. Lock order is fixed: market_worlds, then
-// director_control_state — nothing else locks either row.
+// director_control_state — nothing else locks either row. In the
+// persistent writer batch (models/market-simulator.js) this upsert runs
+// on the batch client AFTER the batch has locked the coins rows, so the
+// whole-batch order is coins -> market_worlds -> director_control_state.
+// Future code must NEVER introduce the inverse market_worlds -> coins
+// path (locking the world row before the coin rows in a transaction that
+// also touches coins): that inverts the coins-first order every
+// coins-touching path follows and completes a deadlock cycle.
 //
 // Transaction ownership (mirroring models/persistentCoinEvents.model.js):
 // when handed anything exposing getClient (the connection pool/wrapper),
