@@ -2086,6 +2086,55 @@ async function verifyDirectorControlState(q, problems) {
   if (bad.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${bad.rows[0].n} director control rows with identical Golden/Demon coins or pair-inconsistent assignments`);
 }
 
+// Director Coin Events Wave 4 (migration 032): the append-only Director
+// decision history — the public-safe decision ledger (summary codes only,
+// never raw reasons) backing GET /api/persistent/runtime.
+async function verifyDirectorDecisionHistory(q, problems) {
+  const TS = 'timestamp with time zone';
+  await verifyPersistentEconomyTable(q, problems, 'director_decision_history', [
+    ['decision_id', 'bigint', 'NO'],
+    ['world_id', 'integer', 'NO'],
+    ['decision_index', 'integer', 'NO'],
+    ['mode', 'character varying', 'NO'],
+    ['direction', 'character varying', 'NO'],
+    ['intensity', 'double precision', 'NO'],
+    ['started_at', TS, 'NO'],
+    ['ends_at', TS, 'NO'],
+    ['summary_code', 'character varying', 'NO'],
+    ['created_at', TS, 'NO']
+  ], [
+    Object.assign((r) => r.contype === 'p', { describe: 'primary key (decision_id)' }),
+    Object.assign((r) => r.contype === 'u' && /UNIQUE \(world_id, decision_index\)/i.test(r.def), { describe: 'UNIQUE (world_id, decision_index) — the replay/idempotency backstop' }),
+    Object.assign((r) => r.contype === 'f' && r.target === 'market_worlds' && /^FOREIGN KEY \(world_id\)/i.test(r.def), { describe: 'FOREIGN KEY world_id -> market_worlds' }),
+    ...[
+      'director_decision_history_mode_known',
+      'director_decision_history_direction_known',
+      'director_decision_history_intensity_bounded',
+      'director_decision_history_decision_index_nonneg',
+      'director_decision_history_window_positive',
+      'director_decision_history_summary_known'
+    ].map((name) => Object.assign((r) => r.contype === 'c' && r.conname === name, { describe: `CHECK ${name}` }))
+  ]);
+
+  const reg = await q(`SELECT to_regclass('public.director_decision_history') AS reg`);
+  if (!reg.rows[0].reg) return; // shape problems already reported
+  const idx = await q(
+    `SELECT 1 FROM pg_class c
+     JOIN pg_index i ON i.indexrelid = c.oid
+     WHERE c.relname = 'idx_director_decision_history_latest' AND i.indrelid = 'public.director_decision_history'::regclass`
+  );
+  if (idx.rowCount === 0) problems.push('missing index idx_director_decision_history_latest');
+
+  // Live-data invariants (the CHECKs enforce these structurally; the query
+  // guards historical anomalies): positive window, bounded intensity,
+  // non-negative decision index.
+  const bad = await q(
+    `SELECT count(*)::int AS n FROM director_decision_history
+     WHERE ends_at <= started_at OR intensity < 0 OR intensity > 1 OR decision_index < 0`
+  );
+  if (bad.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${bad.rows[0].n} director decision history rows with inverted window, out-of-band intensity or negative decision index`);
+}
+
 async function verifyGameSchema({ query } = {}) {
   const q = query || ((...args) => db.query(...args));
   const problems = [];
@@ -2111,6 +2160,7 @@ async function verifyGameSchema({ query } = {}) {
   await verifyPersistentBotTicks(q, problems);
   await verifyPersistentCoinEvents(q, problems);
   await verifyDirectorControlState(q, problems);
+  await verifyDirectorDecisionHistory(q, problems);
 
   return { ok: problems.length === 0, problems };
 }
@@ -2118,7 +2168,7 @@ if (require.main === module) {
   verifyGameSchema()
     .then(async ({ ok, problems }) => {
       if (ok) {
-        console.log('game schema verification PASSED (apocalypse_cycles [SETTLING lifecycle + settlement observability], coins.cycle_baseline_price, canonical coin catalogue [migrations 013 + 014 retirement], coin_collapse_schedule [legacy], apocalypse_coin_collapses [dynamic death record], apocalypse_participants, apocalypse_holdings, apocalypse_transactions, users.is_bot, apocalypse_bots, apocalypse_bot_ticks, apocalypse_cash_events, apocalypse_economy_ticks, apocalypse_economy_events, apocalypse_results [immutable], apocalypse_coin_events [0-5 active cap], apocalypse_market_phases [one primary phase], apocalypse_market_state [one row per cycle, monotonic peak], market_price_checkpoints [per-coin resumable pricing accumulator, exact float8/bigint round-trip], market_worlds [single active persistent world], market_coin_state [bidirectional condition, decaying reference, explicit timestamped death], market_director_state [one Director cursor per world, bounded intensity], persistent_accounts/holdings/transactions [one world-scoped persistent economy, exactly-once starting cash], persistent_accounts.debt + persistent_loans [bot-only interest-free loan ledger, debt persistence], persistent_bot_ticks [world-scoped bot tick identity], persistent_coin_events [persistent-world coin-event authority, per-world/per-coin sequence identity, 0-5 active cap], director_control_state [Director short-term control cursor, Golden/Demon distinct])');
+        console.log('game schema verification PASSED (apocalypse_cycles [SETTLING lifecycle + settlement observability], coins.cycle_baseline_price, canonical coin catalogue [migrations 013 + 014 retirement], coin_collapse_schedule [legacy], apocalypse_coin_collapses [dynamic death record], apocalypse_participants, apocalypse_holdings, apocalypse_transactions, users.is_bot, apocalypse_bots, apocalypse_bot_ticks, apocalypse_cash_events, apocalypse_economy_ticks, apocalypse_economy_events, apocalypse_results [immutable], apocalypse_coin_events [0-5 active cap], apocalypse_market_phases [one primary phase], apocalypse_market_state [one row per cycle, monotonic peak], market_price_checkpoints [per-coin resumable pricing accumulator, exact float8/bigint round-trip], market_worlds [single active persistent world], market_coin_state [bidirectional condition, decaying reference, explicit timestamped death], market_director_state [one Director cursor per world, bounded intensity], persistent_accounts/holdings/transactions [one world-scoped persistent economy, exactly-once starting cash], persistent_accounts.debt + persistent_loans [bot-only interest-free loan ledger, debt persistence], persistent_bot_ticks [world-scoped bot tick identity], persistent_coin_events [persistent-world coin-event authority, per-world/per-coin sequence identity, 0-5 active cap], director_control_state [Director short-term control cursor, Golden/Demon distinct], director_decision_history [append-only Director decision ledger, summary codes only])');
         await db.end();
         return;
       }

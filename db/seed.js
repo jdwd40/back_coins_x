@@ -45,6 +45,7 @@ const seed = async (shouldEnd = false) => {
       DROP TABLE IF EXISTS "persistent_bot_ticks" CASCADE;
       DROP TABLE IF EXISTS "persistent_coin_events" CASCADE;
       DROP TABLE IF EXISTS "director_control_state" CASCADE;
+      DROP TABLE IF EXISTS "director_decision_history" CASCADE;
       DROP TABLE IF EXISTS "persistent_loans" CASCADE;
       DROP TABLE IF EXISTS "persistent_transactions" CASCADE;
       DROP TABLE IF EXISTS "persistent_holdings" CASCADE;
@@ -392,6 +393,16 @@ const seed = async (shouldEnd = false) => {
       'utf8'
     );
     await db.query(directorInterventionModeMigration);
+
+    console.log('📦 Applying Director decision-history migration (db/migrations/032_create_director_decision_history.sql)...');
+    // Director Coin Events Wave 4: the append-only Director decision
+    // history DDL (with the one-row-per-existing-control-row seed),
+    // sourced from the production migration only.
+    const directorDecisionHistoryMigration = require('fs').readFileSync(
+      require('path').join(__dirname, 'migrations', '032_create_director_decision_history.sql'),
+      'utf8'
+    );
+    await db.query(directorDecisionHistoryMigration);
 
     console.log('📦 Inserting coins data...');
     // Insert coins data

@@ -23,6 +23,7 @@
 const persistentEconomy = require('../game/persistentEconomy');
 const persistentLeaderboard = require('../game/persistentLeaderboard');
 const persistentMarketSignalsService = require('../game/persistentMarketSignalsService');
+const persistentRuntimeService = require('../game/persistentRuntimeService');
 
 function statusOf(err) {
   return Number.isInteger(err && err.status) ? err.status : 500;
@@ -140,6 +141,27 @@ exports.getPersistentLeaderboard = async (req, res, next) => {
 exports.getPersistentMarketSignals = async (req, res, next) => {
   try {
     const data = await persistentMarketSignalsService.getPersistentMarketSignals({});
+    res.status(200).json({ status: 'success', data });
+  } catch (err) {
+    if (statusOf(err) < 500) {
+      return res.status(statusOf(err)).json({ status: 'error', message: err.message });
+    }
+    next(err);
+  }
+};
+
+// GET /api/persistent/runtime — public read-only persistent runtime state.
+// Soft-resolves the world (200 null-world, never provisions). One pooled
+// REPEATABLE READ READ ONLY snapshot with ONE DB transaction timestamp as
+// the serverTime/filtering authority. Exact public DTO keys only: the
+// adaptive Director projection (NORMAL projects direction null/intensity
+// 0; roles only when unexpired and on-roster) plus the ALIVE/non-retired
+// roster with active events and canonical capped net modifiers. The
+// decision ledger carries summaryCode only — never decisionIndex or the
+// raw reason. No mutations, no writer tick, no reconcile, no provision.
+exports.getPersistentRuntime = async (req, res, next) => {
+  try {
+    const data = await persistentRuntimeService.getPersistentRuntime({});
     res.status(200).json({ status: 'success', data });
   } catch (err) {
     if (statusOf(err) < 500) {

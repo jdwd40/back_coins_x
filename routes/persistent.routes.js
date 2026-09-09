@@ -12,7 +12,8 @@ const {
   getMyPersistentAccount,
   getMyPersistentTransactions,
   getPersistentLeaderboard,
-  getPersistentMarketSignals
+  getPersistentMarketSignals,
+  getPersistentRuntime
 } = require('../controllers/persistent.controller');
 const { authenticateToken } = require('../middleware/auth.middleware');
 
@@ -27,5 +28,10 @@ persistentRouter.get('/leaderboard', getPersistentLeaderboard);
 // Stage 11-02: public read-only persistent market signals (soft world resolve,
 // exact key contract, authoritative current_price from coins, no mutations).
 persistentRouter.get('/signals', getPersistentMarketSignals);
+// Director Coin Events Wave 4: public read-only persistent runtime state
+// (adaptive Director projection + active coin events; soft world resolve,
+// exact key contract, single REPEATABLE READ READ ONLY snapshot, no
+// mutations). The signals contract above is preserved exactly.
+persistentRouter.get('/runtime', getPersistentRuntime);
 
 exports.persistentRouter = persistentRouter;
