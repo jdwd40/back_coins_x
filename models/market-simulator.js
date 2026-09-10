@@ -74,6 +74,7 @@ const persistentCoinDeath = require('../game/persistentCoinDeath');
 const persistentCoinEventDomain = require('../game/persistentCoinEventDomain');
 const persistentCoinEventRuntime = require('../game/persistentCoinEventRuntime');
 const adaptiveDirectorRuntime = require('../game/adaptiveDirectorRuntime');
+const decisionHistoryModel = require('./directorDecisionHistory.model');
 const { planAdaptiveEventTargets } = require('../game/adaptiveDirectorEventPlan');
 
 
@@ -323,6 +324,29 @@ class MarketSimulator {
       });
       const directorDecision = directorEval.state;
       const directorObservation = directorEval.observation;
+      // Wave 4: the append-only Director decision history records EXACTLY
+      // the genuine new committed decisions (outcome 'committed' <=> the
+      // domain returned changed===true, including a genuine same-window
+      // role rotation) in the SAME batch transaction as the control-state
+      // upsert, so a batch rollback can never leave control state and
+      // history inconsistent. Retained ticks (outcome 'unchanged') and
+      // superseded evaluations (the winner's own batch already recorded
+      // its decision) write NO history. The summary code is mapped here
+      // from the committed reason; the raw reason never reaches the
+      // public ledger. The model's identity rule makes an identical retry
+      // a no-op and a divergent identity a loud failure.
+      if (directorEval.outcome === 'committed') {
+        await decisionHistoryModel.appendDirectorDecision(client, {
+          worldId: world.worldId,
+          decisionIndex: directorDecision.decisionIndex,
+          mode: directorDecision.mode,
+          direction: directorDecision.direction,
+          intensity: directorDecision.intensity,
+          startedAt: directorDecision.startedAt,
+          endsAt: directorDecision.endsAt,
+          summaryCode: decisionHistoryModel.summaryCodeForReason(directorDecision.reason)
+        });
+      }
       const eventPlan = planAdaptiveEventTargets({
         decision: directorDecision,
         observation: directorObservation,
