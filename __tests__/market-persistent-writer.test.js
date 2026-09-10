@@ -42,6 +42,8 @@ const marketDirector = require('../game/marketDirector');
 const pricingCheckpointModel = require('../models/pricingCheckpoint.model');
 const coinStateModel = require('../models/marketCoinState.model');
 const directorStateModel = require('../models/marketDirectorState.model');
+const persistentCoinEventsModel = require('../models/persistentCoinEvents.model');
+const persistentCoinEventDomain = require('../game/persistentCoinEventDomain');
 const { resolveSimulationConfig } = require('../game/simulationConfig');
 const { assertDisposableTestDatabase } = require('./helpers/testDatabaseGuard');
 const replacementRuntime = require('../game/persistentReplacementRuntime');
@@ -164,10 +166,19 @@ describe('Stage 4 persistent market writer: batch state resolution', () => {
     }
     expect(moved).toBeGreaterThan(0);
 
-    // A second batch at the SAME pinned instant recomputes identical prices.
+    // Wave 3 two-phase opening semantics at a pinned instant: the batch at
+    // T1 opened the roster's persistent state, so the FIRST replay of T1 is
+    // also the first batch whose Director observation sees the roster — it
+    // creates the opening persistent event set and prices with its
+    // modifier. From then on the pinned instant is a fixed point: events
+    // are active (reconcile is a no-op), the Director decision is retained
+    // and the recomputation is identical.
     await marketSimulator.updateAllPrices({ nowMs: T1_MS });
     const afterSecond = await coinsSnapshot();
-    expect(afterSecond).toEqual(afterFirst);
+
+    await marketSimulator.updateAllPrices({ nowMs: T1_MS });
+    const afterThird = await coinsSnapshot();
+    expect(afterThird).toEqual(afterSecond);
   });
 
   test('writer owns no pricing timers and no in-memory pricing state outside start()', async () => {
@@ -371,9 +382,14 @@ describe('Stage 4 persistent market writer: simulated time, restart and checkpoi
     await marketSimulator.updateAllPrices({ nowMs: T2_MS });
 
     // Worker-restart resume: the Director walk resumed from the committed
-    // cursor row, not a fresh origin walk.
-    expect(resumeSpy).toHaveBeenCalledTimes(1);
-    expect(resumeSpy.mock.calls[0][0].state.regimeIndex).toBe(directorBefore.regimeIndex);
+    // cursor row, not a fresh origin walk. As of Wave 3 there are exactly
+    // two resumes per batch — the adaptive Director observation's macro
+    // provider and the writer's own pricing environment provider — both
+    // from the SAME committed cursor.
+    expect(resumeSpy).toHaveBeenCalledTimes(2);
+    for (const call of resumeSpy.mock.calls) {
+      expect(call[0].state.regimeIndex).toBe(directorBefore.regimeIndex);
+    }
     // Threading proof: the second batch priced through the persisted
     // accumulators, not the origin walk.
     const resumedCalls = priceSpy.mock.calls.filter((c) => c[0].checkpoint);
@@ -386,6 +402,12 @@ describe('Stage 4 persistent market writer: simulated time, restart and checkpoi
     );
     for (const coin of coinRows) {
       const stateBefore = statesBefore.get(coin.coin_id);
+      // Wave 3: the origin-walk expectation includes the coin's committed
+      // persistent events — the same capped net modifier the batch applied.
+      const activeEvents = await persistentCoinEventsModel.listActivePersistentCoinEvents(
+        db, world.worldId, T2_MS, { coinId: coin.coin_id }
+      );
+      const eventModifier = persistentCoinEventDomain.netActiveModifierCapped(activeEvents, T2_MS, config);
       const expected = persistentPricing.persistentPriceAt({
         seed: WORLD_SEED,
         coinId: coin.coin_id,
@@ -394,6 +416,7 @@ describe('Stage 4 persistent market writer: simulated time, restart and checkpoi
         nowMs: T2_MS,
         structuralReference: stateBefore.structuralReference,
         environment,
+        eventModifier,
         checkpoint: null, // stateless origin walk — the resumed batch must match it bit-for-bit
         config
       });
@@ -539,13 +562,31 @@ describe('Stage 4 persistent market writer: provenance and redaction', () => {
   });
 
   test('the public status/stats surface carries no Director internals or seeds', async () => {
-    await marketSimulator.start();
-    const deadline = Date.now() + 5000;
-    while (marketSimulator.lastBatch === null && Date.now() < deadline) {
-      // eslint-disable-next-line no-await-in-loop
-      await new Promise((resolve) => setTimeout(resolve, 25));
+    // Pin the test clock to the first-batch instant. The fixture world
+    // epoch is pinned in the past, so a REAL-clock first batch walks the
+    // whole world age from origin (~12s and growing — far beyond any
+    // fixed wait). With the clock pinned minutes past the epoch the cold
+    // first batch is as short as the warm path and the test is stable at
+    // any wall-clock date. Production scheduling/Director behaviour is
+    // untouched — this injects the same authoritative-instant seam every
+    // simulated-time test in this suite uses.
+    const clockSpy = jest.spyOn(Date, 'now').mockReturnValue(T1_MS);
+    try {
+      await marketSimulator.start();
+      // Await the relevant first update directly: lastBatch is stamped
+      // only after the batch COMMITs, so a non-null lastBatch means the
+      // in-flight first batch has fully completed (the next interval tick
+      // is 30s of pinned time away and stop() clears it below). The bound
+      // is a failure guard, not a sleep — the loop exits the moment the
+      // first batch lands.
+      for (let i = 0; i < 400 && marketSimulator.lastBatch === null; i += 1) {
+        // eslint-disable-next-line no-await-in-loop
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    } finally {
+      marketSimulator.stop();
+      clockSpy.mockRestore();
     }
-    marketSimulator.stop();
     expect(marketSimulator.lastBatch).not.toBeNull();
 
     const status = JSON.stringify(marketSimulator.getMarketStatus());

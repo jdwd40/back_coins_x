@@ -13,6 +13,7 @@
 
 const botService = require('../game/botService');
 const collapseRiskDomain = require('../game/collapseRiskDomain');
+const marketDomain = require('../game/marketDomain');
 const persistentPricing = require('../game/persistentPricing');
 const persistentSignals = require('../game/persistentSignals');
 const { NEUTRAL_ENVIRONMENT } = require('../game/marketEnvironment');
@@ -113,6 +114,175 @@ describe('Stage 2 persistent public signals', () => {
     expect(dead.dead).toBe(true);
     expect(() => persistentSignals.deadPersistentSignal({ coinId: 3, archetypeId: 'MOON' })).not.toThrow();
     expect(() => persistentSignals.deadPersistentSignal({ coinId: 3, archetypeId: 'NOPE' })).toThrow(/explicit known archetype/);
+  });
+});
+
+describe('Wave 3 correction: the past leg keeps the full public lookback and never sees current/future state', () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  // A real committed checkpoint at the given instant (row-shaped, exactly
+  // what models/pricingCheckpoint.model.js persists and hands back).
+  function realCheckpointAt({ coin = COIN, checkpointMs }) {
+    return persistentPricing.extractPersistentCheckpoint({
+      seed: SEED,
+      coinId: coin.coinId,
+      archetypeId: coin.archetypeId,
+      originMs: ORIGIN_MS,
+      nowMs: checkpointMs,
+      reference: coin.reference,
+      environment: NEUTRAL_ENVIRONMENT,
+      stored: null
+    });
+  }
+
+  test('a fresh checkpoint (~30s old) does not collapse the configured 60s lookback; the past leg receives the intended instant and no future checkpoint', () => {
+    const nowMs = 12 * HOUR_MS;
+    const lookbackMs = marketDomain.PUBLIC_SIGNAL_LOOKBACK_MS; // 60s
+    const checkpoint = realCheckpointAt({ checkpointMs: nowMs - 30 * 1000 });
+    expect(checkpoint.checkpointMs).toBe(nowMs - 30 * 1000);
+
+    // Expected values are computed BEFORE spying so the direct engine
+    // calls below are not recorded as signal legs.
+    const current = persistentPricing.computePersistentPrice({
+      seed: SEED, coinId: COIN.coinId, archetypeId: COIN.archetypeId,
+      originMs: ORIGIN_MS, nowMs, structuralReference: COIN.reference, checkpoint
+    });
+    const expectedCurrentPrice = marketDomain.roundGamePrice(current.price);
+    const pastPrice = persistentPricing.persistentPriceAt({
+      seed: SEED, coinId: COIN.coinId, archetypeId: COIN.archetypeId,
+      originMs: ORIGIN_MS, nowMs: nowMs - lookbackMs, structuralReference: COIN.reference
+    });
+    const expectedChangePct = Math.round(((expectedCurrentPrice - pastPrice) / pastPrice) * 10000) / 100;
+
+    const currentLegSpy = jest.spyOn(persistentPricing, 'computePersistentPrice');
+    const pastLegSpy = jest.spyOn(persistentPricing, 'persistentPriceAt');
+    const signal = persistentSignals.computePersistentCoinSignal({
+      seed: SEED,
+      coinId: COIN.coinId,
+      archetypeId: COIN.archetypeId,
+      originMs: ORIGIN_MS,
+      nowMs,
+      structuralReference: COIN.reference,
+      checkpoint,
+      lookbackMs
+    });
+
+    // The current leg prices the now instant with the committed checkpoint.
+    expect(currentLegSpy).toHaveBeenCalledTimes(1);
+    expect(currentLegSpy.mock.calls[0][0].nowMs).toBe(nowMs);
+    expect(currentLegSpy.mock.calls[0][0].checkpoint).toBe(checkpoint);
+    // The past leg opens the FULL configured lookback behind now — never
+    // clamped forward to the fresh (30s-old) checkpoint — and is handed no
+    // checkpoint from its future.
+    expect(pastLegSpy).toHaveBeenCalledTimes(1);
+    expect(pastLegSpy.mock.calls[0][0].nowMs).toBe(nowMs - lookbackMs);
+    expect(pastLegSpy.mock.calls[0][0].checkpoint).toBeNull();
+    // Behavioural parity: the published recent change is exactly the
+    // engine's committed movement over the full 60s window.
+    expect(Object.is(signal.currentPrice, expectedCurrentPrice)).toBe(true);
+    expect(Object.is(signal.recentChangePct, expectedChangePct)).toBe(true);
+    // The collapsed Wave 3 window (checkpoint instant) would have priced a
+    // different open; the corrected window genuinely spans 60s.
+    const collapsedOpen = persistentPricing.persistentPriceAt({
+      seed: SEED, coinId: COIN.coinId, archetypeId: COIN.archetypeId,
+      originMs: ORIGIN_MS, nowMs: nowMs - 30 * 1000, structuralReference: COIN.reference,
+      checkpoint
+    });
+    const collapsedPct = Math.round(((expectedCurrentPrice - collapsedOpen) / collapsedOpen) * 10000) / 100;
+    expect(signal.recentChangePct).not.toBe(collapsedPct);
+  });
+
+  test('the current event modifier affects the current leg only — the past leg stays neutral', () => {
+    const nowMs = 20 * HOUR_MS;
+    const lookbackMs = marketDomain.PUBLIC_SIGNAL_LOOKBACK_MS;
+    const pastPrice = persistentPricing.persistentPriceAt({
+      seed: SEED, coinId: COIN.coinId, archetypeId: COIN.archetypeId,
+      originMs: ORIGIN_MS, nowMs: nowMs - lookbackMs, structuralReference: COIN.reference
+    });
+    const modifiedCurrent = persistentPricing.persistentPriceAt({
+      seed: SEED, coinId: COIN.coinId, archetypeId: COIN.archetypeId,
+      originMs: ORIGIN_MS, nowMs, structuralReference: COIN.reference, eventModifier: 0.2
+    });
+
+    const pastLegSpy = jest.spyOn(persistentPricing, 'persistentPriceAt');
+    const base = signalFor({ nowMs }); // zero current events: modifier 0
+    const modified = persistentSignals.computePersistentCoinSignal({
+      seed: SEED,
+      coinId: COIN.coinId,
+      archetypeId: COIN.archetypeId,
+      originMs: ORIGIN_MS,
+      nowMs,
+      structuralReference: COIN.reference,
+      eventModifier: 0.2
+    });
+
+    // Every past-leg evaluation — with and without a current event — ran
+    // with a NEUTRAL modifier; the current modifier never leaks backward.
+    for (const call of pastLegSpy.mock.calls) {
+      expect(call[0].eventModifier).toBe(0);
+    }
+    // The current leg carries the modifier (parity with the engine).
+    expect(Object.is(modified.currentPrice, modifiedCurrent)).toBe(true);
+    expect(modified.currentPrice).not.toBe(base.currentPrice);
+    // The past leg is untouched: both signals divide by the identical
+    // committed historical price, so the modifier shows up exactly once —
+    // in the recent-change ratio.
+    const expectedBasePct = Math.round(((base.currentPrice - pastPrice) / pastPrice) * 10000) / 100;
+    const expectedModifiedPct = Math.round(((modified.currentPrice - pastPrice) / pastPrice) * 10000) / 100;
+    expect(Object.is(base.recentChangePct, expectedBasePct)).toBe(true);
+    expect(Object.is(modified.recentChangePct, expectedModifiedPct)).toBe(true);
+    expect(modified.recentChangePct).toBeGreaterThan(base.recentChangePct);
+  });
+
+  test('genuine movement across the full lookback yields non-FLAT momentum/recentChangePct', () => {
+    // Pinned engine fact for this seed/coin: the 60s window opening at
+    // 2h - 60s moves +35.31% — far beyond the public momentum threshold.
+    const nowMs = 2 * HOUR_MS;
+    const checkpoint = realCheckpointAt({ checkpointMs: nowMs - 30 * 1000 });
+    const signal = persistentSignals.computePersistentCoinSignal({
+      seed: SEED,
+      coinId: COIN.coinId,
+      archetypeId: COIN.archetypeId,
+      originMs: ORIGIN_MS,
+      nowMs,
+      structuralReference: COIN.reference,
+      checkpoint
+    });
+    expect(signal.recentChangePct).not.toBeNull();
+    expect(signal.recentChangePct).toBeGreaterThan(marketDomain.PUBLIC_MOMENTUM_THRESHOLD_PCT);
+    expect(signal.momentum).toBe('UP');
+  });
+
+  test('zero current events preserve the baseline: a checkpoint older than the lookback is used and is bit-identical to the origin walk', () => {
+    const nowMs = 26 * HOUR_MS;
+    const lookbackMs = marketDomain.PUBLIC_SIGNAL_LOOKBACK_MS;
+    // Committed HISTORICAL state for the lookback-open instant: usable.
+    const checkpoint = realCheckpointAt({ checkpointMs: nowMs - 2 * HOUR_MS });
+    expect(checkpoint.checkpointMs).toBeLessThanOrEqual(nowMs - lookbackMs);
+
+    const pastLegSpy = jest.spyOn(persistentPricing, 'persistentPriceAt');
+    const withCheckpoint = persistentSignals.computePersistentCoinSignal({
+      seed: SEED,
+      coinId: COIN.coinId,
+      archetypeId: COIN.archetypeId,
+      originMs: ORIGIN_MS,
+      nowMs,
+      structuralReference: COIN.reference,
+      eventModifier: 0, // zero current events, explicitly
+      checkpoint
+    });
+    expect(pastLegSpy).toHaveBeenCalledTimes(1);
+    expect(pastLegSpy.mock.calls[0][0].nowMs).toBe(nowMs - lookbackMs);
+    expect(pastLegSpy.mock.calls[0][0].checkpoint).toBe(checkpoint); // history, not future
+    expect(pastLegSpy.mock.calls[0][0].eventModifier).toBe(0);
+
+    // Baseline: no events, no checkpoint (the pre-Wave-3 origin walk).
+    const baseline = signalFor({ nowMs });
+    expect(withCheckpoint).toEqual(baseline);
+    expect(Object.is(withCheckpoint.currentPrice, baseline.currentPrice)).toBe(true);
+    expect(Object.is(withCheckpoint.recentChangePct, baseline.recentChangePct)).toBe(true);
   });
 });
 

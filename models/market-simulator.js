@@ -34,7 +34,12 @@
 //     state + pricing checkpoints + the Director cursor + market_history +
 //     old-economy peak reconciliation commit together or roll back
 //     together. World/Director state lives in its own tables (024/025),
-//     separate from the pricing checkpoint table (023).
+//     separate from the pricing checkpoint table (023). As of Wave 3 the
+//     SAME batch transaction also commits the adaptive Director decision
+//     (director_control_state, 029/030/031) and any reconciled persistent
+//     coin events (persistent_coin_events, 029): one committed authority
+//     per batch, so restart/replay sees the decision, the events and the
+//     prices they drove together.
 //   * Restarts are bit-identical: the pricing checkpoints resume the pure
 //     engine accumulators (bit-identical to the origin walk) and the
 //     Director walk resumes from the committed cursor (rebuilt and
@@ -66,6 +71,10 @@ const coinStateModel = require('./marketCoinState.model');
 const directorStateModel = require('./marketDirectorState.model');
 const { resolveSimulationConfig } = require('../game/simulationConfig');
 const persistentCoinDeath = require('../game/persistentCoinDeath');
+const persistentCoinEventDomain = require('../game/persistentCoinEventDomain');
+const persistentCoinEventRuntime = require('../game/persistentCoinEventRuntime');
+const adaptiveDirectorRuntime = require('../game/adaptiveDirectorRuntime');
+const { planAdaptiveEventTargets } = require('../game/adaptiveDirectorEventPlan');
 
 
 // Persistent provenance: only world-scoped writer ticks.
@@ -142,14 +151,17 @@ class MarketSimulator {
 
   // Price one live coin through the persistent engine: the shared pure
   // calculation that the persistent horizon harness also runs, fed by the
-  // coin's persisted market state and the batch's Director environment.
-  // Extracted as a method so a fundamentally invalid engine result can be
-  // guarded per coin and tests can observe the exact pricing calls of a
-  // batch. When the persisted pricing checkpoint resumes cleanly it is
-  // threaded through — the resumed calculation is bit-identical to the
-  // stateless origin walk (game/persistentPricing.js), so this never
-  // changes a persisted price. Returns the shared 4dp gameplay rounding.
-  calculateNewPrice(coin, marketContext, coinState, storedCheckpoint = null) {
+  // coin's persisted market state, the batch's Director environment and
+  // the coin's stack-capped net persistent coin-event modifier for this
+  // batch (Wave 3 — the same capped value is also handed to the condition
+  // advance below, exactly once each). Extracted as a method so a
+  // fundamentally invalid engine result can be guarded per coin and tests
+  // can observe the exact pricing calls of a batch. When the persisted
+  // pricing checkpoint resumes cleanly it is threaded through — the
+  // resumed calculation is bit-identical to the stateless origin walk
+  // (game/persistentPricing.js), so this never changes a persisted price.
+  // Returns the shared 4dp gameplay rounding.
+  calculateNewPrice(coin, marketContext, coinState, storedCheckpoint = null, eventModifier = 0) {
     return persistentPricing.persistentPriceAt({
       seed: marketContext.seed,
       coinId: coin.coin_id,
@@ -158,6 +170,7 @@ class MarketSimulator {
       nowMs: marketContext.nowMs,
       structuralReference: coinState.structuralReference,
       environment: marketContext.environment,
+      eventModifier,
       checkpoint: storedCheckpoint,
       config: marketContext.config
     });
@@ -257,10 +270,19 @@ class MarketSimulator {
 
       client = await db.getClient();
       await client.query('BEGIN');
-      // Lock coins for a consistent snapshot + atomic writes (the
-      // coins-before-everything lock order is preserved: coin rows first,
-      // then the persistent market-state rows, Director row and pricing
-      // checkpoint rows — the same fixed order every batch).
+      // Lock coins for a consistent snapshot + atomic writes. The batch's
+      // FIXED lock order is coins -> market_worlds -> everything else: the
+      // coin rows are locked FIRST here; the adaptive Director evaluation
+      // below locks the referenced market_worlds row next (inside
+      // upsertDirectorControlState, on this client), then
+      // director_control_state, the persistent market-state rows and the
+      // pricing checkpoint rows — the same fixed order every batch.
+      // WARNING: future code must NEVER introduce the inverse
+      // market_worlds -> coins path (taking the world-row lock before the
+      // coin locks in any transaction that also touches coins). Every
+      // coins-touching path (trades, this writer) locks coins first; an
+      // inverse world-first path would complete a lock-order cycle and
+      // can deadlock against them.
       const result = await client.query('SELECT coin_id, current_price, cycle_baseline_price, retired FROM coins ORDER BY coin_id FOR UPDATE');
       const coins = result.rows;
 
@@ -271,6 +293,49 @@ class MarketSimulator {
       const coinStates = await coinStateModel.loadCoinStates(client, world.worldId);
       const committedDirector = await directorStateModel.loadDirectorState(client, world.worldId);
       const storedCheckpoints = await pricingCheckpointModel.loadCheckpoints(client, world.seed);
+
+      // Wave 3: the adaptive Director + persistent coin-event runtime run
+      // INSIDE the batch transaction, before any coin write.
+      //   * One evaluation per batch through the existing Wave 2 runtime
+      //     seam, on THIS client (no nested transaction, no Director state
+      //     outside the batch) with the ALREADY resolved world (the world
+      //     is resolved exactly once per batch). The persisted
+      //     director_control_state cursor/timestamps and role-expiry
+      //     semantics decide when a new decision is due: in-window
+      //     re-evaluations are write-free retentions, so the decision
+      //     never advances repeatedly before due, and the first evaluation
+      //     is deterministic and restart-safe.
+      //   * The Wave 2 planner (game/adaptiveDirectorEventPlan.js) is the
+      //     ONLY target-count policy: it maps the committed/current
+      //     decision + the same observation to per-coin targets. A
+      //     superseded evaluation plans from the authoritative winner
+      //     state, still paired with this batch's observation.
+      //   * Reconciliation (game/persistentCoinEventRuntime.js) creates
+      //     ONLY the missing active persistent events for ALIVE
+      //     active-roster coins — append-only, replay-idempotent through
+      //     the Wave 1 (world_id, coin_id, event_seq) identity backstop,
+      //     serialised by the coin row locks this batch already holds.
+      const directorEval = await adaptiveDirectorRuntime.runAdaptiveDirectorEvaluation({
+        nowMs: batchNowMs,
+        db: client,
+        config,
+        world
+      });
+      const directorDecision = directorEval.state;
+      const directorObservation = directorEval.observation;
+      const eventPlan = planAdaptiveEventTargets({
+        decision: directorDecision,
+        observation: directorObservation,
+        config
+      });
+      const activeEventsByCoin = await persistentCoinEventRuntime.reconcilePersistentCoinEvents(client, {
+        world,
+        decision: directorDecision,
+        plan: eventPlan,
+        eventSeverityScale: directorObservation.macro.environment.eventSeverityScale,
+        nowMs: batchNowMs,
+        config
+      });
 
       // The Market Director behind the environment seam, resumed from the
       // committed cursor when one exists (worker restart: the walk resumes
@@ -333,11 +398,25 @@ class MarketSimulator {
         }
 
         const storedCheckpoint = storedCheckpoints.get(coin.coin_id) || null;
+        // Wave 3: the coin's exact stack-capped net persistent coin-event
+        // modifier at the batch instant, from the Wave 1 domain helpers
+        // over the just-reconciled committed actives. The SAME capped
+        // number is passed exactly once to persistent pricing and exactly
+        // once to the condition advance below — never double-applied, and
+        // kept separate from environment and pressure modifiers. Coins
+        // outside the planner's roster scope (no persistent state at
+        // evaluation time, retired, or non-roster) have no events: the
+        // no-event baseline is modifier 0.
+        const eventModifier = persistentCoinEventDomain.netActiveModifierCapped(
+          activeEventsByCoin.get(coin.coin_id) || [],
+          batchNowMs,
+          config
+        );
         // Checkpoint identity/context/future validation happens inside the
         // engine (resolvePersistentCheckpoint): a corrupt, foreign-context,
         // wrong-seed or future accumulator throws here and rolls the whole
         // batch back.
-        const newPrice = this.calculateNewPrice(coin, marketContext, coinState, storedCheckpoint);
+        const newPrice = this.calculateNewPrice(coin, marketContext, coinState, storedCheckpoint, eventModifier);
         // Never persist a corrupt value: an invalid price aborts the whole
         // batch (rollback below) instead of silently writing bad data.
         if (typeof newPrice !== 'number' || !Number.isFinite(newPrice) || newPrice <= 0) {
@@ -353,6 +432,7 @@ class MarketSimulator {
           nowMs: batchNowMs,
           structuralReference: coinState.structuralReference,
           environment: directorProvider,
+          eventModifier,
           checkpoint: storedCheckpoint,
           config
         });
@@ -385,7 +465,7 @@ class MarketSimulator {
           recentLogReturn,
           drawdownFromPeak: drawdown,
           logCommittedDamage,
-          netEventModifier: 0, // Stage 4: no persistent coin-event stream yet (recorded debt)
+          netEventModifier: eventModifier, // Wave 3: the same capped net modifier as pricing, exactly once
           environment: envNow,
           config
         });

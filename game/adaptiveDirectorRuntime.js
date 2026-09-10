@@ -14,10 +14,12 @@
 //      identical-replay no-op and the loud stale/conflict failures. This
 //      module writes NO SQL of its own.
 //
-// Deliberately NOT wired into any worker: this is an explicit callable
-// seam with full test coverage. A future wave may attach it to the
-// persistent market cadence; doing so must not change this module's
-// contract.
+// Wired into the persistent market writer batch as of Wave 3
+// (models/market-simulator.js): the batch calls one evaluation per batch
+// on its own transaction client with the pre-resolved world; the persisted
+// control cursor makes in-window re-evaluations write-free no-ops, so the
+// decision never advances before its committed window is due. The module's
+// contract is unchanged by that integration.
 //
 // Semantics:
 //   * nowMs is the evaluation instant. Production callers pass the real
@@ -39,6 +41,20 @@
 // The `persist` parameter exists ONLY as a test/simulation interleaving
 // seam; it defaults to the model's upsert and production callers never
 // override it.
+//
+// Wave 3 runtime-integration extensions (backward compatible):
+//   * `world` — an optional PRE-RESOLVED active world (the persistent
+//     writer resolves THE active world exactly once per batch and hands it
+//     in). When omitted the runtime resolves it as before. A supplied
+//     world is shape-validated; a wrong-identity world fails loudly.
+//   * the result carries `observation` — the bounded current-market
+//     observation the evaluation computed from — so the caller (the
+//     writer batch) can plan event targets from the SAME snapshot without
+//     a second read. Present on every outcome, including 'superseded'
+//     (paired there with the authoritative winner state).
+//   * handed a transaction client (`db`), every read/write participates
+//     in the caller's transaction — no nested transactions, and no
+//     Director state is read or written outside the caller's batch.
 
 const defaultDb = require('../db/connection');
 const persistentWorld = require('./persistentWorld');
@@ -47,11 +63,22 @@ const { buildAdaptiveDirectorObservation } = require('./adaptiveDirectorObservat
 const { evaluateAdaptiveDirectorDecision } = require('./adaptiveDirector');
 const { resolveSimulationConfig } = require('./simulationConfig');
 
+function assertPreResolvedWorld(world) {
+  if (!world || typeof world !== 'object' || Array.isArray(world)
+      || !Number.isInteger(Number(world.worldId)) || Number(world.worldId) <= 0
+      || typeof world.seed !== 'string' || world.seed.length === 0
+      || !Number.isFinite(Number(world.epochStartedAtMs))) {
+    throw new Error('adaptive director runtime world must be a validated persistent world (worldId, seed, epochStartedAtMs)');
+  }
+  return world;
+}
+
 async function runAdaptiveDirectorEvaluation({
   nowMs,
   db: queryable = defaultDb,
   config = resolveSimulationConfig(),
-  persist = control.upsertDirectorControlState
+  persist = control.upsertDirectorControlState,
+  world = null
 } = {}) {
   const effectiveNowMs = nowMs === undefined ? Date.now() : nowMs;
   if (typeof effectiveNowMs !== 'number' || !Number.isFinite(effectiveNowMs)) {
@@ -61,21 +88,23 @@ async function runAdaptiveDirectorEvaluation({
     throw new Error('adaptive director runtime persist must be the control-state upsert function');
   }
 
-  const world = await persistentWorld.resolveActiveWorld(queryable);
-  const committed = await control.loadDirectorControlState(queryable, world.worldId);
+  const resolvedWorld = world === null || world === undefined
+    ? await persistentWorld.resolveActiveWorld(queryable)
+    : assertPreResolvedWorld(world);
+  const committed = await control.loadDirectorControlState(queryable, resolvedWorld.worldId);
   const observation = await buildAdaptiveDirectorObservation(queryable, {
-    world,
+    world: resolvedWorld,
     nowMs: effectiveNowMs,
     config
   });
   const { state, changed } = evaluateAdaptiveDirectorDecision({
-    worldSeed: world.seed,
+    worldSeed: resolvedWorld.seed,
     nowMs: effectiveNowMs,
     controlState: committed,
     observation,
     config
   });
-  const fullState = { ...state, worldId: world.worldId };
+  const fullState = { ...state, worldId: resolvedWorld.worldId };
 
   try {
     await persist(queryable, fullState);
@@ -84,12 +113,12 @@ async function runAdaptiveDirectorEvaluation({
     // from a read that a concurrent winner has already advanced past. The
     // committed cursor is authoritative — re-read and report it.
     if (/stale|conflict/i.test(error && error.message ? error.message : '')) {
-      const winner = await control.loadDirectorControlState(queryable, world.worldId);
-      return { outcome: 'superseded', state: winner, rejected: fullState };
+      const winner = await control.loadDirectorControlState(queryable, resolvedWorld.worldId);
+      return { outcome: 'superseded', state: winner, rejected: fullState, observation };
     }
     throw error;
   }
-  return { outcome: changed ? 'committed' : 'unchanged', state: fullState };
+  return { outcome: changed ? 'committed' : 'unchanged', state: fullState, observation };
 }
 
 module.exports = {

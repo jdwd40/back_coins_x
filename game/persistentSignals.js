@@ -87,8 +87,35 @@ function computePersistentCoinSignal({
   };
   const current = persistentPricing.computePersistentPrice({ ...shared, nowMs });
   const currentPrice = marketDomain.roundGamePrice(current.price);
+  // The past leg evaluates the lookback-open instant with the pre-Wave-3
+  // semantics restored: the configured public lookback is NEVER collapsed
+  // toward a fresh checkpoint — a checkpoint 30s old must not shrink a
+  // configured 60s lookback to 30s.
   const pastMs = Math.max(originMs, nowMs - Math.max(1, lookbackMs));
-  const pastPrice = persistentPricing.persistentPriceAt({ ...shared, nowMs: pastMs });
+  // The current committed capped event modifier belongs ONLY to the
+  // current/now leg. Historical event state is not reconstructed (no
+  // event-history walk exists), so the past leg prices the committed
+  // historical market state with a neutral modifier — the current
+  // modifier is never fabricated into the past.
+  //
+  // The checkpoint is likewise current state: it is handed to the past
+  // leg ONLY when it is committed HISTORICAL state for that instant
+  // (checkpointMs <= pastMs, where resume is bit-identical to the origin
+  // walk). A checkpoint from the past leg's future is withheld — the
+  // engine would (rightly) refuse it loudly — and the past leg walks
+  // from the world origin instead.
+  const checkpointMs = checkpoint && Number.isFinite(Number(checkpoint.checkpointMs))
+    ? Number(checkpoint.checkpointMs)
+    : null;
+  const pastCheckpoint = checkpointMs !== null && checkpointMs <= pastMs
+    ? checkpoint
+    : null;
+  const pastPrice = persistentPricing.persistentPriceAt({
+    ...shared,
+    eventModifier: 0,
+    checkpoint: pastCheckpoint,
+    nowMs: pastMs
+  });
   const recentChangePct = pastPrice > 0
     ? Math.round(((currentPrice - pastPrice) / pastPrice) * 10000) / 100
     : null;

@@ -43,7 +43,10 @@ const persistentDebt = require('./persistentDebt');
 const persistentSignals = require('./persistentSignals');
 const checkpointModel = require('../models/pricingCheckpoint.model');
 const coinStateModel = require('../models/marketCoinState.model');
+const eventsModel = require('../models/persistentCoinEvents.model');
+const persistentCoinEventDomain = require('./persistentCoinEventDomain');
 const marketDomain = require('./marketDomain');
+const { resolveSimulationConfig } = require('./simulationConfig');
 const {
   BOT_ROSTER,
   BOT_PERSONALITY_PROFILES,
@@ -139,7 +142,7 @@ function assertPublicPersistentBotState(marketState) {
 // shared public-signal domain evaluation ONLY (exactly like the human-facing
 // signals); it is never present in the returned shape.
 // ---------------------------------------------------------------------------
-async function buildPublicPersistentMarketState({ world, account, nowMs, queryable = db, historyWindow = 20 } = {}) {
+async function buildPublicPersistentMarketState({ world, account, nowMs, queryable = db, historyWindow = 20, config = resolveSimulationConfig() } = {}) {
   const { rows: coinRows } = await queryable.query(
     `SELECT c.coin_id, c.symbol, c.current_price, c.retired
        FROM coins c
@@ -149,6 +152,19 @@ async function buildPublicPersistentMarketState({ world, account, nowMs, queryab
   const stateByCoinId = await coinStateModel.loadCoinStates(queryable, world.worldId);
   // Checkpoints are keyed by the world's seed (migration 023 contract).
   const checkpointByCoinId = await checkpointModel.loadCheckpoints(queryable, world.seed);
+  // Wave 3: the world's ACTIVE persistent coin events at nowMs. The bot's
+  // public-signal RECOMPUTATION needs the same current committed capped
+  // net modifier the writer priced with, or the recomputed public
+  // phase/momentum would diverge from the committed market. Only the
+  // resulting coarse public fields enter the shaped state — the modifier
+  // itself, event payloads, seeds and Director internals never do (the
+  // exact-key allowlist below is unchanged).
+  const activeEvents = await eventsModel.listActivePersistentCoinEvents(queryable, world.worldId, nowMs);
+  const activeEventsByCoin = new Map();
+  for (const event of activeEvents) {
+    if (!activeEventsByCoin.has(event.coinId)) activeEventsByCoin.set(event.coinId, []);
+    activeEventsByCoin.get(event.coinId).push(event);
+  }
 
   const coins = [];
   for (const row of coinRows) {
@@ -194,7 +210,11 @@ async function buildPublicPersistentMarketState({ world, account, nowMs, queryab
       nowMs,
       structuralReference: state ? state.structuralReference : parseFloat(row.current_price),
       condition: state ? state.condition : 0,
-      checkpoint: checkpointByCoinId.get(row.coin_id) || null
+      eventModifier: persistentCoinEventDomain.netActiveModifierCapped(
+        activeEventsByCoin.get(row.coin_id) || [], nowMs, config
+      ),
+      checkpoint: checkpointByCoinId.get(row.coin_id) || null,
+      config
     });
     coins.push({
       ...base,
