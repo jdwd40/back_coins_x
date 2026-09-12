@@ -9,7 +9,7 @@
 // the validated resolvers; callers may also inject explicit overrides
 // (the simulator uses this for tuning studies).
 //
-// Power rules (see GAMEPLAY_V2_NIGHT_PLAN.md V2-2):
+// Legacy Apocalypse Power rules retained for compatibility tests/runtime:
 //   * BUY costs Power: 1 + floor(buyTotal / divisor) — a flat per-order
 //     charge plus linear deployment cost, so transaction fragmentation can
 //     never reduce the price of deploying the same money. SELL costs zero

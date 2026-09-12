@@ -1,59 +1,84 @@
 # Changelog
 
-## Stage 12A: persistent diagnostics (2026-09-05)
+Curated history of meaningful production work. This is not a commit-by-commit build log.
 
-- **New endpoint** `GET /api/game/diagnostics/persistent` on the restricted diagnostics router (same `GAME_DIAGNOSTICS_TOKEN` gate via existing `authenticateDiagnostics` mechanism; fail-closed 404 when unset; 401 for missing/invalid bearer credentials; `Cache-Control: no-store`; PostgreSQL `REPEATABLE READ READ ONLY` transaction).
-- Persisted persistent-world identity and Director state; active-roster market summary; per-coin persistent state including DEAD/retired semantics; checkpoint update timestamp; latest persistent `MARKET_TICK` timestamp using persistent provenance.
-- No provisioning, reconciliation, writer/economy/bot/debt/replacement/settlement mutation; no world seed, RNG, or future-state leakage.
-- Docs: `API_DOCUMENTATION.md` persistent section. No gameplay, writer, schema, test, migration, package, workflow, frontend, or generated changes.
+## Unreleased — documentation reconciliation
 
-## Apocalypse Monitor Phase 2.5: monitor cycle discovery (2026-08-29)
+### Changed
 
-- **New endpoint** `GET /api/game/diagnostics/monitor/cycles` on the
-  restricted diagnostics router (same `GAME_DIAGNOSTICS_TOKEN` gate,
-  fail-closed 404, `BEGIN READ ONLY`, `Cache-Control: no-store`, GET only).
-- Newest-first list of persisted `ACTIVE`/`SETTLING`/`COMPLETED` cycles,
-  each exposing only `cycleId`/`status`/`startTime`/`endTime`/`settledAt`
-  plus `hasExactHistory` (true iff any `price_history` row carries the
-  cycle's exact `cycle_id` provenance; legacy-only rows never count —
-  single `EXISTS` query, no N+1). Strict `?limit=` integer 1–100, default
-  20; invalid/excessive values are 400. No seed/internal ids/schedule/rank/
-  bot data; zero writes, no reconciliation/settlement/rollover.
-- Docs: `API_DOCUMENTATION.md` monitor/cycles section. No gameplay, writer,
-  or schema changes.
+- Replaced the obsolete MVP plan and PRD with the current persistent-market product direction.
+- Consolidated API and schema documentation around the live `/api/persistent/*` architecture.
+- Added current bug and feature registers.
+- Removed completed build plans, progress journals, duplicate endpoint guides, stale design audits, and archived LLM opinion drafts.
+- Added a current frontend README and removed duplicated backend documentation from the frontend repository.
 
-## Apocalypse Monitor Phase 2: read-only monitor diagnostics API (2026-08-29)
+## 10 September 2026 — runtime visibility and chart stability
 
-- **New endpoint** `GET /api/game/diagnostics/monitor` on the restricted
-  diagnostics router (same `GAME_DIAGNOSTICS_TOKEN` gate; fail-closed 404
-  when unset; `BEGIN READ ONLY`; no reconcile/settle/locks; authenticated
-  diagnostics responses now carry `Cache-Control: no-store`).
-- Returns the raw per-coin `price_history` series for one cycle with honest
-  attribution: exact rows matched by `price_history.cycle_id` only (never
-  timestamp-matched); legacy `cycle_id IS NULL` rows attributed by the
-  half-open `[start_time, end_time)` window and marked derived
-  (`attribution`: `exact`/`time_window_derived`/`mixed`, `exact` boolean,
-  per-coin attribution, disclosure warnings).
-- Optional `cycleId=APOC-NNNN` (omitted = currently persisted cycle, never
-  reconciled) and `coinId` (positive integer; 400 invalid, 404 unknown).
-- Executed collapses surface only as `source=COLLAPSE` rows; the unexecuted
-  schedule and future-dated rows are never read or exposed. Retired coins
-  are hidden by default unless they genuinely have selected-cycle history.
-  No seed or internal `cycle_id` is exposed; reads perform zero writes.
-- Docs: `API_DOCUMENTATION.md` monitor section; `docs/database_schema.md`
-  index note. No gameplay, writer, or schema changes.
+### Added
 
-## Apocalypse Monitor persistence foundation (2026-08-29)
+- Public `GET /api/persistent/runtime` exposing safe adaptive Director state, Golden/Demon roles, active persistent coin events, capped net modifiers, and recent decision summaries.
+- Player UI for Director activity and per-coin event visibility.
 
-- **Migration 019** (`019_price_history_cycle_provenance.sql`): adds nullable
-  `price_history.cycle_id` (FK → `apocalypse_cycles.cycle_id`), nullable
-  `price_history.source` (`MARKET_TICK`/`COLLAPSE` CHECK), and index
-  `idx_price_history_cycle_coin_created (cycle_id, coin_id, created_at)`.
-  Additive and data-preserving; legacy rows keep NULL and are never backfilled.
-- **Writers**: the normal market writer (`models/market-simulator.js`) now
-  stamps every tick with the already-reconciled cycle id and
-  `source='MARKET_TICK'`; the collapse writer
-  (`game/collapseScheduleService.js`) stamps its £0 transition rows with the
-  caller's cycle id and `source='COLLAPSE'`. Schedule execution stays the
-  only collapse authority.
-- No API, pricing, rollover, settlement, or gameplay changes.
+### Fixed
+
+- Stabilised 5M/10M chart behaviour, stale-response handling, and range changes.
+- Capped player chart selectors at 12H and removed the `ALL` option from the UI.
+
+## 8 September 2026 — adaptive Director safeguards
+
+### Added
+
+- Adaptive `NORMAL`, `BOOM`, `BUST`, and `RESCUE` decisions using bounded market observations.
+- Market-wide stagnation breadth, 20-minute intervention refractory, shorter new-emergency response, rescue corroboration, and Golden/Demon revalidation.
+- Persistent Director decision history with public-safe summary codes.
+
+### Fixed
+
+- Persistent price-history reads now consistently select world-scoped `MARKET_TICK` rows with `cycle_id IS NULL`.
+- Backend deployment now fails closed unless exactly one active persistent world exists.
+
+## 5–6 September 2026 — persistent market cutover
+
+### Added
+
+- Persistent account, holding, and append-only transaction economy with one £10,000 starting grant.
+- Persistent bots, bot debt/loan ledger, leaderboard, signals, diagnostics, coin death, and delayed authored replacement runtime.
+- Persistent frontend provider, trading panels, player status, account activity, leaderboard, and continuous-market header.
+
+### Changed
+
+- The persistent market writer became the sole production gameplay price writer.
+- Normal player routes moved to `/api/persistent/*`; the old cycle surface remains compatibility-only.
+- Legacy cycle, bot, and economy workers stopped starting in production.
+
+### Fixed
+
+- First trade can provision a persistent account instead of being blocked by the frontend.
+- Persistent price-history provenance is verified during deployment.
+
+## 30–31 August 2026 — market simulation foundation
+
+### Added
+
+- Central simulation configuration, market phases, coin events, market state, trading pressure, dynamic collapse, pricing checkpoints, deterministic simulation harnesses, and multi-cycle quality gates.
+- Public market phase and event information.
+
+### Changed
+
+- Unified live pricing and historical persistence through a single writer path.
+- Tuned market balance using repeated deterministic simulations.
+
+## 20–29 August 2026 — Crypto Chaos round-era release
+
+### Added
+
+- 30-minute Apocalypse cycles, fractional round trading, bots, passive economy events, leaderboard/results, collapse scheduling, and operator diagnostics.
+- Internal Apocalypse Monitor with cycle discovery and exact/derived history provenance.
+
+### Status
+
+This era is retained as historical/compatibility context. It is not the current persistent player experience.
+
+## Earlier Coins MVP
+
+- Registration/login, fictional coin catalogue, legacy portfolios and transactions, price history, market statistics, React UI, PostgreSQL persistence, and VPS deployment.

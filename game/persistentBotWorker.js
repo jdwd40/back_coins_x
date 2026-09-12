@@ -13,7 +13,7 @@
 //
 // A tick with no active persistent world is a loud skip (logged, never
 // fatal): world provisioning at deployment is an explicit operational step
-// (AUTOBUILD_STATE known-issues), and the worker must never fabricate one.
+// (docs/persistent-world-ops.md), and the worker must never fabricate one.
 //
 // The legacy cycle bot worker (botWorker.js) is untouched and keeps serving
 // the retained old API surface until its Stage 13 retirement.

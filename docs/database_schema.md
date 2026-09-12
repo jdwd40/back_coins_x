@@ -1,124 +1,98 @@
-# Database Schema Documentation
+# Coins database schema
 
-This document describes the database schema for the Coins application. The database contains five main tables that manage users, cryptocurrencies, portfolios, transactions, and price history.
+Current persistence map for `back_coins_x/main`, reviewed 12 September 2026. The SQL migration files and `db/verify-game-schema.js` are authoritative; this document explains ownership and relationships rather than duplicating every column and constraint.
 
-## Tables
+## Primary persistent-world tables
 
-### 1. Users (`users`)
+| Table | Purpose | Important rules |
+|---|---|---|
+| `market_worlds` | Persistent world identity, immutable seed, epoch, active flag | Partial unique index permits at most one active world |
+| `market_coin_state` | Per-coin archetype, condition, references, `ALIVE`/`DEAD` status | One row per coin; death/status timestamp consistency |
+| `market_director_state` | Long-running six-regime deterministic Director cursor | One row per world; regime/index/intensity persisted |
+| `director_control_state` | Adaptive short-term mode, roles, cooldown state, decision cursor | One row per world; `NORMAL/BOOM/BUST/RESCUE` |
+| `director_decision_history` | Append-only safe decision summaries | Unique `(world_id, decision_index)` |
+| `persistent_coin_events` | World-scoped active and historical coin events | Unique `(world_id, coin_id, event_seq)`; direction/sign and duration constraints |
+| `market_price_checkpoints` | Restart-safe pricing checkpoint for each coin/world | Used to resume the deterministic writer |
+| `persistent_accounts` | Player/bot cash and starting grant per world | Unique `(world_id, user_id)`; £10,000 granted once |
+| `persistent_holdings` | Fractional quantity and weighted-average cost basis | Unique `(account_id, coin_id)`; quantity/cost basis non-negative |
+| `persistent_transactions` | Append-only persistent BUY/SELL ledger | Written after successful guarded mutation in the same DB transaction |
+| `persistent_loans` | Bot-only ISSUE/REPAYMENT debt ledger | Records post-operation debt; humans are rejected in domain logic |
+| `persistent_bot_ticks` | Cross-process idempotency claim for bot ticks | Primary key `(world_id, tick_id)` |
 
-Stores user account information and their available funds.
+## Shared catalogue and history tables
 
-| Column | Type | Constraints | Description |
-|--------|------|-------------|-------------|
-| user_id | integer | PRIMARY KEY | Unique identifier for users |
-| username | varchar(50) | NOT NULL, UNIQUE | User's display name |
-| email | varchar(100) | NOT NULL, UNIQUE | User's email address |
-| password_hash | varchar(255) | NOT NULL | Hashed password |
-| funds | numeric(18,2) | NOT NULL, DEFAULT 1000.00 | User's available funds |
-| created_at | timestamp | DEFAULT CURRENT_TIMESTAMP | Account creation timestamp |
-| updated_at | timestamp | DEFAULT CURRENT_TIMESTAMP | Last update timestamp |
+| Table | Purpose | Current authority |
+|---|---|---|
+| `users` | Credentials, identity, bot flag/personality | JWT authentication identity; legacy `funds` is not current gameplay cash |
+| `coins` | Catalogue and live price | `current_price` is the public execution/display price; `retired` hides old/dead catalogue items |
+| `price_history` | Per-coin historical prices | Persistent rows are `source='MARKET_TICK' AND cycle_id IS NULL` |
+| `market_history` | Aggregate market value and coarse trend | Written by the persistent market batch |
+| `price_history_rollups` | Historical aggregation support | Secondary/legacy optimisation table |
+| `coin_statistics` | Stored high/low statistics | Secondary market statistics |
+| `schema_migrations` | Applied/baselined migration ledger | Managed by `db/migrate.js` |
 
-### 2. Coins (`coins`)
+## Primary relationships
 
-Stores information about different cryptocurrencies.
+```text
+users ──< persistent_accounts ──< persistent_holdings >── coins
+                  │                        │
+                  ├──< persistent_transactions >─────────┘
+                  └──< persistent_loans
 
-| Column | Type | Constraints | Description |
-|--------|------|-------------|-------------|
-| coin_id | integer | PRIMARY KEY | Unique identifier for coins |
-| name | varchar(50) | NOT NULL | Name of the cryptocurrency |
-| symbol | varchar(10) | NOT NULL, UNIQUE | Trading symbol |
-| current_price | numeric(18,2) | NOT NULL | Current market price |
-| market_cap | numeric(18,2) | NOT NULL | Market capitalization |
-| circulating_supply | integer | NOT NULL | Number of coins in circulation |
-| price_change_24h | numeric(5,2) | | 24-hour price change percentage |
-| founder | varchar(50) | NOT NULL | Founder of the cryptocurrency |
-| date_added | timestamp | DEFAULT CURRENT_TIMESTAMP | When the coin was added |
+market_worlds ──< market_coin_state >── coins
+      │          ├──< market_price_checkpoints
+      │          └──< persistent_coin_events
+      ├── market_director_state
+      ├── director_control_state
+      ├──< director_decision_history
+      └──< persistent_bot_ticks
 
-### 3. Portfolios (`portfolios`)
+coins ──< price_history
+```
 
-Tracks users' cryptocurrency holdings.
+## Sources of truth
 
-| Column | Type | Constraints | Description |
-|--------|------|-------------|-------------|
-| portfolio_id | integer | PRIMARY KEY | Unique identifier for portfolio entries |
-| user_id | integer | FOREIGN KEY | Reference to users table |
-| coin_id | integer | FOREIGN KEY | Reference to coins table |
-| quantity | numeric(18,2) | DEFAULT 0 | Number of coins held |
-| average_purchase_price | numeric(18,2) | DEFAULT 0 | Average price paid per coin |
-| created_at | timestamp | DEFAULT CURRENT_TIMESTAMP | When the portfolio was created |
-| updated_at | timestamp | DEFAULT CURRENT_TIMESTAMP | Last update timestamp |
+| Concept | Source of truth | Derived/public views |
+|---|---|---|
+| Active world | single active `market_worlds` row | persistent APIs return `worldId` |
+| Current price | `coins.current_price` | signals, account valuation, leaderboard, UI |
+| Coin lifecycle | `market_coin_state.status` and `died_at` | signals/runtime; `coins.retired` controls catalogue visibility |
+| Player cash/debt | `persistent_accounts` | account API and leaderboard |
+| Holdings/cost basis | `persistent_holdings` | account API and leaderboard valuation |
+| Trade history | `persistent_transactions` | authenticated transaction API |
+| Director regime | `market_director_state` | public regime/intensity signal |
+| Adaptive action/roles | `director_control_state` | runtime API projection |
+| Director audit history | `director_decision_history` | safe recent decision summaries |
+| Coin events | `persistent_coin_events` | runtime API; capped net modifier enters pricing once |
+| Restart state | `market_price_checkpoints` plus Director cursors | market writer resume |
+| Bot tick completion | `persistent_bot_ticks` | no public raw tick data |
 
-**Note:** There is a unique constraint on (user_id, coin_id) to prevent duplicate portfolio entries.
+## Atomicity and lock order
 
-### 4. Transactions (`transactions`)
+Persistent trades use one PostgreSQL client and transaction. The server resolves the active world, locks the live coin before the account/holding, validates current state and price, performs guarded cash or quantity mutation, updates cost basis, appends the ledger row, and commits. Any error rolls the whole trade back.
 
-Records all buy and sell transactions.
+The market writer runs a single transaction per batch. It resolves one world, locks current market/coin/checkpoint/Director state, reconciles decisions/events, computes every live coin, writes current prices/history/checkpoints/state, commits the Director cursor and decision history, and then completes the batch. Invalid state causes rollback rather than partial pricing.
 
-| Column | Type | Constraints | Description |
-|--------|------|-------------|-------------|
-| transaction_id | integer | PRIMARY KEY | Unique identifier for transactions |
-| user_id | integer | FOREIGN KEY | Reference to users table |
-| coin_id | integer | FOREIGN KEY | Reference to coins table |
-| type | varchar(10) | NOT NULL, CHECK | Transaction type ('BUY' or 'SELL') |
-| quantity | numeric(18,2) | NOT NULL | Number of coins traded |
-| price | numeric(18,2) | NOT NULL | Price per coin at transaction time |
-| total_amount | numeric(18,2) | NOT NULL | Total transaction amount |
-| created_at | timestamp | DEFAULT CURRENT_TIMESTAMP | Transaction timestamp |
+## Price-history provenance
 
-### 5. Price History (`price_history`)
+The table contains historical data from more than one architecture:
 
-Tracks historical price data for cryptocurrencies.
+- Persistent world: `source='MARKET_TICK' AND cycle_id IS NULL`.
+- Legacy Apocalypse monitor: cycle-scoped `MARKET_TICK`/`COLLAPSE` rows.
+- Pre-provenance legacy rows: nullable source/cycle fields.
 
-| Column | Type | Constraints | Description |
-|--------|------|-------------|-------------|
-| history_id | integer | PRIMARY KEY | Unique identifier for price records |
-| coin_id | integer | FOREIGN KEY | Reference to coins table |
-| cycle_id | integer | FOREIGN KEY, NULL | Authoritative apocalypse cycle (migration 019); NULL on legacy rows, never backfilled |
-| price | numeric(18,2) | NOT NULL | Historical price |
-| created_at | timestamp | DEFAULT CURRENT_TIMESTAMP | When the price was recorded |
-| source | varchar(12) | NULL, CHECK | Provenance: `MARKET_TICK` or `COLLAPSE`; NULL on legacy rows (migration 019) |
+New player charts must use only the persistent predicate. Do not infer persistent ownership from timestamps.
 
-## Indexes
+## Legacy cycle schema
 
-### Users Table
-- PRIMARY KEY on `user_id`
-- UNIQUE INDEX on `username`
-- UNIQUE INDEX on `email`
+The database still contains `apocalypse_*` tables for compatibility and the internal monitor: cycles, participants, holdings, transactions, bots/ticks, results, cash/economy events, phases, coin events, market state, and collapses, plus `coin_collapse_schedule`.
 
-### Coins Table
-- PRIMARY KEY on `coin_id`
-- UNIQUE INDEX on `symbol`
+These are not the primary player economy. The legacy workers do not start in production. Do not drop the tables until consumers, diagnostics, rollback needs, and historical retention have been audited.
 
-### Portfolios Table
-- PRIMARY KEY on `portfolio_id`
-- INDEX on `user_id`
-- INDEX on `coin_id`
-- UNIQUE INDEX on (`user_id`, `coin_id`)
+## Migration policy
 
-### Transactions Table
-- PRIMARY KEY on `transaction_id`
-- INDEX on `user_id`
-- INDEX on `coin_id`
-
-### Price History Table
-- PRIMARY KEY on `history_id`
-- INDEX on `coin_id`
-- INDEX on `created_at`
-- INDEX on (`cycle_id`, `coin_id`, `created_at`) — per-cycle monitor reads (migration 019); consumed by the read-only operator endpoint `GET /api/game/diagnostics/monitor` (exact rows by `cycle_id`, legacy NULL rows by half-open `[start_time, end_time)` window only)
-
-## Foreign Key Relationships
-
-1. `portfolios.user_id` → `users.user_id` (ON DELETE CASCADE)
-2. `portfolios.coin_id` → `coins.coin_id` (ON DELETE CASCADE)
-3. `transactions.user_id` → `users.user_id` (ON DELETE CASCADE)
-4. `transactions.coin_id` → `coins.coin_id` (ON DELETE CASCADE)
-5. `price_history.coin_id` → `coins.coin_id` (ON DELETE CASCADE)
-6. `price_history.cycle_id` → `apocalypse_cycles.cycle_id` (nullable; migration 019)
-
-## Data Types
-
-The schema uses the following PostgreSQL data types:
-- `integer`: For IDs and whole numbers
-- `numeric(18,2)`: For precise decimal numbers (financial calculations)
-- `varchar`: For variable-length character strings
-- `timestamp`: For date and time information
+- `db/migrate.js` tracks canonical `NNN_description.sql` files.
+- Migrations 001–006 are recorded as an existing-schema baseline and are not executed by the tracked runner.
+- Migrations 007+ run once, each inside its own transaction under an advisory lock.
+- `db/seed.js` drops and recreates tables for local/test use and refuses production.
+- Production deploy order is migrate → schema verify → persistent-world verify → pm2 restart → health checks.

@@ -51,7 +51,7 @@ const GAME_PRICE_DECIMALS = 4;
 const MIN_POSITIVE_PRICE = 0.0001;
 
 // ---------------------------------------------------------------------------
-// Archetypes: initial V2-1 balance parameters (GAMEPLAY_V2_NIGHT_PLAN.md).
+// Archetypes: retained V2 balance parameters used by the persistent engine.
 //   cycleMs: market-cycle duration range (DIP->FALL)
 //   swing:   typical total oscillation amplitude (fraction of anchor)
 //   drift:   max per-cycle anchor drift fraction (regime movement between
