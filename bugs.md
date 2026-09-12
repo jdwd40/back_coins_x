@@ -41,4 +41,3 @@ Persistent reads could include cycle-scoped history from the retired round game.
 ## Reporting rule
 
 Add only reproducible defects. Architecture debt, feature requests, and balance preferences belong in `project_plan.md` or `new_features.md`.
-

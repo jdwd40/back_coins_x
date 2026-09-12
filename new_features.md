@@ -10,7 +10,7 @@ Requested and planned work that is not part of the current production feature se
 
 **Constraints:** expose only completed trades or safe summaries. Do not expose strategy internals, RNG state, the world seed, future actions, or information unavailable to human players. Keep payloads bounded.
 
-**Priority:** Medium  
+**Priority:** Medium
 **Status:** Requested; needs product/API design after balance playtesting.
 
 ## Planned engineering work
@@ -19,28 +19,28 @@ Requested and planned work that is not part of the current production feature se
 
 Measure multi-hour and multi-day production behaviour before tuning volatility, event frequency, intervention frequency, bot performance, deaths, loans, and replacement pacing.
 
-**Priority:** High  
+**Priority:** High
 **Status:** Active playtesting; parameter changes not yet specified.
 
 ### Architecture references
 
 Create a visual human architecture report and a denser LLM orientation report from the actual current code. Keep them descriptive rather than redesigning the application.
 
-**Priority:** High  
+**Priority:** High
 **Status:** Planned/in progress separately.
 
 ### Legacy compatibility retirement
 
 After caller and monitor audits, remove proven-unreachable Apocalypse player surfaces, old workers/services, and unmounted frontend modules in small tested changes.
 
-**Priority:** Medium  
+**Priority:** Medium
 **Status:** Planned; blocked on evidence. Do not perform as opportunistic cleanup.
 
 ### Maintainability refactors
 
 Use the dedicated complexity review to rank behaviour-preserving reductions in duplication, overloaded modules, and competing legacy logic.
 
-**Priority:** Medium  
+**Priority:** Medium
 **Status:** Review first; no implementation approved yet.
 
 ## Future ideas
@@ -60,4 +60,3 @@ The earlier **Dwarf Mines and Markets** gem/miner theme remains an optional art 
 ## Excluded ideas
 
 Do not add real cryptocurrency, blockchain, real-money payments, deposits, withdrawals, investment advice, wallet custody, gambling, or real exchange integration.
-

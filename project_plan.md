@@ -156,4 +156,3 @@ Production releases must preserve the workflow gates in both repositories. Datab
 - `docs/database_schema.md` maps current persistence.
 - `docs/persistent-world-ops.md` owns world provisioning and deploy operations.
 - `bugs.md`, `new_features.md`, and `changelog.md` track defects, future work, and completed work.
-

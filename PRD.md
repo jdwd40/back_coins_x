@@ -1,6 +1,6 @@
 # Product requirements document — Coins / Crypto Chaos
 
-Status: current production product  
+Status: current production product
 Last reviewed: 12 September 2026
 
 ## 1. Product summary
@@ -145,4 +145,3 @@ There is no join button, countdown, settlement screen, or scheduled reset in the
 - Blockchain, wallets, custody, exchange connectivity, or financial advice.
 - High-scale infrastructure, microservices, or a stack rewrite.
 - Admin trading/price controls unless a future requirement defines authentication and audit rules first.
-
