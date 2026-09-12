@@ -560,65 +560,9 @@ describe('issue #18: passive drains', () => {
 });
 
 describe('issue #18: player-safe API (frontend #11 contract)', () => {
-  test('GET /api/game/participant requires authentication', async () => {
+  test('GET /api/game/participant is removed with the player game router (404)', async () => {
     const res = await request(app).get('/api/game/participant');
-    expect(res.status).toBe(401);
-  });
-
-  test('returns authoritative Cash plus recent FEE/TAX/EVENT rows, with no internal secrets', async () => {
-    // Real-time-aligned live cycle: the endpoint reconciles with the real
-    // clock, so the cycle must be genuinely live NOW.
-    const cycle = await reconcileCycle({ now: new Date() });
-    const startMs = new Date(cycle.start_time).getTime();
-    await economyService.runEconomyPass({ now: new Date(startMs + 5 * MIN) }); // fees + tax (+ any due event)
-
-    const res = await request(app)
-      .get('/api/game/participant')
-      .set('Authorization', `Bearer ${tokenFor(1)}`);
-    expect(res.status).toBe(200);
-    const { participant, cashEvents } = res.body.data;
-    expect(participant.userId).toBe(1);
-    const expected = await expectedZeroTradeCash(cycle, startMs + 5 * MIN);
-    expect(participant.currentCash).toBe(expected);
-    expect(cashEvents.length).toBeGreaterThanOrEqual(3); // FEE-T1, FEE-T2, TAX-T1 (+ any due event)
-    const keys = cashEvents.map((e) => e.eventKey);
-    expect(keys.filter((k) => k === 'FEE-T1')).toHaveLength(1);
-    expect(keys.filter((k) => k === 'FEE-T2')).toHaveLength(1);
-    expect(keys.filter((k) => k === 'TAX-T1')).toHaveLength(1);
-    // Newest first.
-    const ids = cashEvents.map((e) => e.cashEventId);
-    expect(ids).toEqual([...ids].sort((a, b) => b - a));
-    for (const e of cashEvents) {
-      expect(['FEE', 'TAX', 'EVENT']).toContain(e.type);
-      expect(e.amount).toBeGreaterThan(0);
-      expect(typeof e.description).toBe('string');
-      expect(typeof e.createdAt).toBe('string');
-      expect(e.balanceAfter).toBeLessThan(e.balanceBefore);
-    }
-    // No internal secrets or future event information anywhere in the payload.
-    const payload = JSON.stringify(res.body);
-    expect(payload).not.toMatch(/seed/i);
-    expect(payload).not.toMatch(/scheduled_at|scheduledAt/);
-    // Future events exist in the persisted schedule but are not executed:
-    // the player's feed shows EXECUTED debits only.
-    const { rows: futureEvents } = await db.query(
-      'SELECT count(*)::int AS n FROM apocalypse_economy_events WHERE cycle_id = $1 AND executed_at IS NULL',
-      [cycle.cycle_id]
-    );
-    expect(cashEvents.filter((e) => e.type === 'EVENT')).toHaveLength(2 - futureEvents[0].n);
-  });
-
-  test('validates the history limit', async () => {
-    await reconcileCycle({ now: new Date() });
-    const res = await request(app)
-      .get('/api/game/participant?limit=abc')
-      .set('Authorization', `Bearer ${tokenFor(1)}`);
-    expect(res.status).toBe(400);
-    const ok = await request(app)
-      .get('/api/game/participant?limit=1')
-      .set('Authorization', `Bearer ${tokenFor(1)}`);
-    expect(ok.status).toBe(200);
-    expect(ok.body.data.cashEvents.length).toBeLessThanOrEqual(1);
+    expect(res.status).toBe(404);
   });
 });
 

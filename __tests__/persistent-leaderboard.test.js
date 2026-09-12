@@ -4,7 +4,7 @@
 // replacement holdings contributing live value, humans + bots, ranking
 // (netWorth DESC, account_id ASC), fractional precision via round2,
 // read-only (no mutation), public access, and no seed / internal leakage.
-// Legacy GET /api/game/leaderboard remains untouched (smoke).
+// Former /api/game leaderboard aliases are removed with the player game router (404).
 
 const request = require('supertest');
 const app = require('../app');
@@ -13,15 +13,13 @@ const persistentWorld = require('../game/persistentWorld');
 const persistentEconomy = require('../game/persistentEconomy');
 const persistentLeaderboard = require('../game/persistentLeaderboard');
 const coinStateModel = require('../models/marketCoinState.model');
-const { ensureBotsProvisioned } = require('../game/botService');
-const { reconcileCycle } = require('../game/gameCycleService');
+const { ensureBotsProvisioned } = require('../game/persistentBotProvisioning');
 const { assertDisposableTestDatabase } = require('./helpers/testDatabaseGuard');
 
 jest.setTimeout(60000);
 
 const WORLD_SEED = 'stage10a-leaderboard-world-seed';
 const EPOCH = new Date('2026-09-04T00:00:00.000Z');
-const LONG_DURATION_MS = 7 * 24 * 60 * 60 * 1000;
 
 function round2(value) {
   return Math.round(value * 100) / 100;
@@ -341,20 +339,13 @@ describe('Stage 10A S10-01: persistent leaderboard', () => {
     }
   });
 
-  test('alias GET /api/game/persistent-leaderboard returns the same board', async () => {
+  test('former alias GET /api/game/persistent-leaderboard is removed (404)', async () => {
     await persistentEconomy.provisionPersistentAccount({ userId: 1 });
-    const primary = await request(app).get('/api/persistent/leaderboard').expect(200);
-    const alias = await request(app).get('/api/game/persistent-leaderboard').expect(200);
-    expect(alias.body.status).toBe('success');
-    expect(alias.body.data.worldId).toBe(primary.body.data.worldId);
-    expect(alias.body.data.entries).toEqual(primary.body.data.entries);
+    await request(app).get('/api/persistent/leaderboard').expect(200);
+    await request(app).get('/api/game/persistent-leaderboard').expect(404);
   });
 
-  test('legacy GET /api/game/leaderboard still works (smoke)', async () => {
-    await reconcileCycle({ now: new Date(), durationMs: LONG_DURATION_MS });
-    const res = await request(app).get('/api/game/leaderboard').expect(200);
-    expect(res.body.status).toBe('success');
-    expect(res.body.data).toHaveProperty('cycleId');
-    expect(Array.isArray(res.body.data.entries)).toBe(true);
+  test('former GET /api/game/leaderboard player route is removed (404)', async () => {
+    await request(app).get('/api/game/leaderboard').expect(404);
   });
 });

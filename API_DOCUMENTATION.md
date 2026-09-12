@@ -100,7 +100,8 @@ These routes remain mounted for old clients and the internal Apocalypse monitor.
 | Prefix | Routes |
 |---|---|
 | `/api/transactions` | `POST /buy`, `POST /sell`, `GET /user/:user_id`, `GET /:transaction_id`, `GET /portfolio/:user_id` |
-| `/api/game` | `GET /state`, `/market-signals`, `/leaderboard`, `/persistent-leaderboard`, `/leaderboards/recent`, `/results/:cycleId`, `/participant`; `POST /join`, `/trades/buy`, `/trades/sell` |
+| `/api/game` (player) | **Removed** — former round routes return 404 |
+| `/api/game/diagnostics/*` | Token-gated read-only operator diagnostics (retained) |
 
 The root `POST /api/transactions`, manual coin-price mutation, market start/stop, and `/api/market/history` routes were deliberately removed.
 

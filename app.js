@@ -137,9 +137,8 @@ app.use((req, res) => {
   res.status(404).json({ message: 'Route not found' });
 });
 
-// Keep the legacy market simulator lifecycle unchanged. The global game-cycle
-// worker is started explicitly by server.js only after the database check and
-// HTTP listener have completed, never as an application-module side effect.
+// Persistent market writer: started here in production as the sole live
+// price authority. Cycle/economy/bot workers are not part of this process.
 if (process.env.NODE_ENV === 'production') {
   marketSimulator.start();
 }

@@ -3,10 +3,10 @@
 // These endpoints expose THE persistent economy (game/persistentEconomy.js)
 // to clients: authenticated persistent buy/sell at the server-locked live
 // price, and the authenticated caller's persistent account state (cash,
-// holdings at live value, wealth). The old cycle-shaped surface
-// (/api/game/*, /api/transactions/*) is UNTOUCHED and keeps serving the old
-// deployed frontend exactly as before (documented compatibility debt —
-// removal is a post-deploy event, Stage 13).
+// holdings at live value, wealth). Former player /api/game/* round routes
+// are removed (404). Legacy /api/transactions/* funds paths remain for
+// portfolio/history compatibility. Token-gated /api/game/diagnostics/*
+// is retained for the internal monitor.
 //
 // Contract:
 //   * authenticated callers only ever act on their OWN account (the

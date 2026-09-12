@@ -210,4 +210,16 @@ describe('Core 1: server lifecycle', () => {
     jest.dontMock('../game/persistentReplacementWorker');
     jest.dontMock('../models/market-simulator');
   });
+
+  test('deleted Apocalypse workers are not present and cannot be required', () => {
+    for (const rel of [
+      '../game/gameCycleWorker',
+      '../game/botWorker',
+      '../game/economyWorker'
+    ]) {
+      expect(() => require(rel)).toThrow();
+      expect(() => require.resolve(rel)).toThrow();
+    }
+  });
+
 });
