@@ -34,20 +34,7 @@ const registerUser = async (req, res, next) => {
 
     const newUser = await createUser(username, email, password);
 
-    // Issue #17: a user who registers during an ACTIVE Apocalypse is a
-    // participant immediately — exactly one current-cycle row with the
-    // authoritative starting cash, no JOIN step. Best-effort: registration
-    // itself must never fail because game reconciliation did; the next
-    // cycle reconciliation also ensures the row (initializeCycleParticipants
-    // is idempotent), so a failure here only delays visibility.
-    try {
-      const gameRoundService = require('../game/gameRoundService');
-      await gameRoundService.joinRound({ userId: newUser.user_id });
-    } catch (gameErr) {
-      logger.error(`Post-registration round initialization failed for user ${newUser.user_id}: ${gameErr.message}`);
-    }
-
-    // Persistent-market Stage 6: registration also provisions the user's
+    // Registration provisions the user's
     // persistent account — exactly-once £10,000, idempotent
     // (UNIQUE (world_id, user_id)); no round enrolment is required by the
     // persistent economy. Best-effort like the legacy path: before the

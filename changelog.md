@@ -1,5 +1,13 @@
 # Changelog
 
+## 12 September 2026 — Apocalypse runtime cutover
+
+- Removed the former `/api/game/*` player routes while retaining token-gated read-only diagnostics.
+- Removed the cycle, cycle-bot, and cycle-economy worker modules from the server lifecycle.
+- Stopped registration from creating Apocalypse participants.
+- Removed legacy participant peak reconciliation from the persistent market transaction.
+- Preserved historical Apocalypse tables and monitor data without destructive migrations.
+
 Curated history of meaningful production work. This is not a commit-by-commit build log.
 
 ## Unreleased — documentation reconciliation
