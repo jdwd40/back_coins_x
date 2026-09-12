@@ -42,8 +42,8 @@
 // Tick identity: runBotTick claims (cycle_id, tick_id) in
 // apocalypse_bot_ticks with INSERT ... ON CONFLICT DO NOTHING, so a given
 // tick executes at most once across every Node/PM2 process — the database is
-// the duplicate-tick authority. This module owns no timers; the single
-// lifecycle-owned bot worker (botWorker.js) is the only scheduler.
+// the duplicate-tick authority. This retained simulation service owns no
+// timers and is not reachable from the production HTTP or worker lifecycle.
 //
 // Limits (validated in botConfig, enforced HERE at the service layer):
 // a per-trade size cap on every executed BUY, a per-bot cooldown read from

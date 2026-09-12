@@ -29,9 +29,9 @@ Create a visual human architecture report and a denser LLM orientation report fr
 **Priority:** High
 **Status:** Planned/in progress separately.
 
-### Legacy compatibility retirement
+### Historical Apocalypse retention decision
 
-After caller and monitor audits, remove proven-unreachable Apocalypse player surfaces, old workers/services, and unmounted frontend modules in small tested changes.
+After the player/runtime cutover, decide how long the internal monitor and historical cycle tables must be retained. Any table removal requires an explicit archival and migration plan.
 
 **Priority:** Medium
 **Status:** Planned; blocked on evidence. Do not perform as opportunistic cleanup.

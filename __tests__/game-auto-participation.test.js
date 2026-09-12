@@ -148,38 +148,6 @@ describe('issue #17: automatic participant initialization', () => {
     expect(sums[0].over_paid).toBe(0);
   });
 
-  test('a new registration during ACTIVE play gets exactly one £10,000 participant immediately', async () => {
-    // Registration joins at REAL time, so this test uses the real clock
-    // (the fixed 2026-08-20 cycle would be long expired by wall-clock now).
-    await reconcileCycle({ now: new Date() });
-
-    const response = await request(app)
-      .post('/api/users/register')
-      .send({ username: 'midcycle_newbie', email: 'midcycle_newbie@example.com', password: 'password123' })
-      .expect(201);
-    const userId = response.body.user.user_id;
-
-    // Registration itself ensured the participant in whatever cycle is
-    // ACTIVE right now (robust even if a boundary lands mid-test).
-    const cycle = await activeCycle();
-    let { rows } = await db.query(
-      `SELECT * FROM apocalypse_participants WHERE cycle_id = $1 AND user_id = $2`,
-      [cycle.cycle_id, userId]
-    );
-    expect(rows).toHaveLength(1);
-    expect(rows[0].starting_cash).toBe('10000.00');
-    expect(rows[0].current_cash).toBe('10000.00');
-
-    // Later reconciles and an explicit ensure keep it exactly one row.
-    await reconcileCycle({ now: new Date() });
-    await joinRound({ userId, now: new Date() });
-    ({ rows } = await db.query(
-      `SELECT count(*)::int AS n FROM apocalypse_participants WHERE cycle_id = $1 AND user_id = $2`,
-      [cycle.cycle_id, userId]
-    ));
-    expect(rows[0].n).toBe(1);
-  });
-
   test('initialization never touches legacy users.funds', async () => {
     await db.query(`UPDATE users SET funds = 7777.00 WHERE user_id = 1`);
     await reconcileCycle({ now: atPercent(0.5) });

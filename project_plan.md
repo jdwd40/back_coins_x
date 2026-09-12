@@ -96,12 +96,15 @@ The profile route uses the persistent account and transaction ledger. The intern
 
 ## Legacy compatibility boundary
 
-The former 30-minute Apocalypse game is not the current product. Its database tables, services, diagnostics, tests, and some unmounted frontend modules remain to preserve compatibility and historical monitoring.
+The former 30-minute Apocalypse game is not the current product. Its player HTTP routes and background workers have been retired. Historical tables and the read-only diagnostics namespace remain for the internal monitor.
 
-- Legacy game-cycle, bot, and economy workers do not start in production.
-- Legacy `/api/game/*` and `/api/transactions/*` routes remain mounted.
+- `/api/game/diagnostics/*` remains token-gated and read-only.
+- Former `/api/game/*` player routes are not mounted; they return 404.
+- Registration provisions only the persistent account and never joins a cycle.
+- The market writer no longer updates legacy participant peak wealth.
+- `/api/transactions/*` remains a separate legacy exchange compatibility surface pending its own caller/security audit.
 - New player features must use `/api/persistent/*`.
-- Do not delete legacy runtime code until callers and the internal monitor have been audited and removal tests exist.
+- Do not drop historical tables or remove the internal monitor without an explicit retention decision and migration plan.
 
 ## Current priorities
 

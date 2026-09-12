@@ -1,8 +1,7 @@
 // Persistent-market Stage 8: the single lifecycle-owned persistent bot
 // worker.
 //
-// Mirrors botWorker's contract: no timers are created at import time; the
-// explicit start()/stop() lifecycle is called from the production
+// No timers are created at import time; the explicit start()/stop() lifecycle is called from the production
 // application bootstrap only. Timer wakeups merely compute the
 // deterministic tick id (wall-clock floored to the configured tick quantum)
 // and delegate to persistentBots.runPersistentBotTick — the DATABASE
@@ -15,9 +14,6 @@
 // fatal): world provisioning at deployment is an explicit operational step
 // (docs/persistent-world-ops.md), and the worker must never fabricate one.
 //
-// The legacy cycle bot worker (botWorker.js) is untouched and keeps serving
-// the retained old API surface until its Stage 13 retirement.
-
 const persistentBots = require('./persistentBots');
 const { resolveBotConfig } = require('./botConfig');
 const logger = require('../utils/logger');
