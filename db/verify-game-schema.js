@@ -12,7 +12,9 @@
 //   * Canonical coin catalogue (migrations 013 + 014): the exact
 //     player-facing (coin_id, name, symbol) identities for coin_ids 1..10,
 //     the coins.retired column shape, exactly the canonical 10 active
-//     (non-retired extra rows are player-facing and flagged; retired legacy
+//     (a canonical coin retired by the persistent replacement runtime is
+//     valid only when persistently DEAD in the active world; a non-retired
+//     extra row is valid only when persistently ALIVE there; other retired
 //     rows are preserved history, not catalogue), and live symbol
 //     uniqueness.
 //   * public.coin_collapse_schedule (legacy Core 3, retired in Wave 4):
@@ -26,7 +28,10 @@
 //     (cycle/coin and cycle/rank), CHECK constraints, and live-data
 //     invariants (no collapsed coin with a non-zero live price in the
 //     ACTIVE/SETTLING cycle, no zero-priced coin without a persisted death
-//     record, no duplicate deaths or ranks).
+//     record in EITHER death authority — an executed Apocalypse collapse in
+//     the ACTIVE/SETTLING cycle OR a market_coin_state DEAD record in the
+//     active persistent world — no duplicate deaths or ranks, and every
+//     persistent-world DEAD coin soft-retired and priced at exactly £0).
 //   * Core 4 round state: apocalypse_participants, apocalypse_holdings and
 //     apocalypse_transactions — columns, PKs, FKs (including the composite
 //     participant FKs), uniqueness, CHECK constraints, lookup indexes, and
@@ -277,6 +282,15 @@ async function verifyBaselineColumn(q, problems) {
 // The player-facing catalogue renamed in place by migration 013. Mapping
 // authority: stable coin_id ordering 1..10 onto the documented catalogue
 // order. Rows outside ids 1..10 are not part of the canonical catalogue.
+//
+// Persistent-world caveat (Stage 9 replacement lifecycle): the canonical 10
+// are the Apocalypse game's roster, but the persistent market is a second,
+// legitimate lifecycle over the same catalogue rows. A canonical coin that
+// dies in the ACTIVE persistent world (market_coin_state.status = 'DEAD') is
+// soft-retired by the replacement runtime, and its authored replacement
+// enters as a non-canonical ALIVE row. Both states are validated against the
+// persistent authority below — the catalogue invariant is NOT relaxed for
+// coins with no persistent-world explanation.
 const CANONICAL_COIN_CATALOGUE = [
   [1, 'FutureCoin', 'FTR'],
   [2, 'NovaCash', 'NVC'],
@@ -290,12 +304,66 @@ const CANONICAL_COIN_CATALOGUE = [
   [10, 'CryptoZen', 'CZN']
 ];
 
+// --- Persistent death authority (shared helper) -----------------------------
+//
+// The game has TWO legitimate death authorities over the shared coins
+// catalogue:
+//   1. Apocalypse cycles: a death row in apocalypse_coin_collapses whose
+//      cycle is ACTIVE/SETTLING (the original Core 3/Wave 4 authority).
+//   2. The persistent market: market_coin_state.status = 'DEAD' in the
+//      ACTIVE world (Stage 9 authoritative death, written by
+//      game/persistentCoinDeath.js at the moment of death).
+// A zero live price must be explained by at least one of them, and a
+// persistent death must be reflected in the catalogue (soft-retired, £0).
+// Returns { alive: Set<coin_id>, dead: Set<coin_id> } over the ACTIVE world,
+// or null when either persistent table is absent (callers then keep the
+// legacy Apocalypse-only behaviour).
+
+async function loadActiveWorldCoinState(q) {
+  const reg = await q(
+    `SELECT to_regclass('public.market_coin_state') AS s, to_regclass('public.market_worlds') AS w`
+  );
+  if (!reg.rows[0].s || !reg.rows[0].w) return null;
+  // Guard against same-named stub tables missing the columns this authority
+  // reads — their shape problems are reported by the persistent-world
+  // verifier, never by a crash here.
+  const cols = await q(
+    `SELECT table_name, column_name
+       FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND ((table_name = 'market_coin_state' AND column_name IN ('coin_id', 'status'))
+          OR (table_name = 'market_worlds' AND column_name IN ('world_id', 'active')))`
+  );
+  const present = new Set(cols.rows.map((r) => `${r.table_name}.${r.column_name}`));
+  for (const required of ['market_coin_state.coin_id', 'market_coin_state.status', 'market_worlds.world_id', 'market_worlds.active']) {
+    if (!present.has(required)) return null;
+  }
+  const { rows } = await q(
+    `SELECT s.coin_id, s.status
+       FROM market_coin_state s
+       JOIN market_worlds w ON w.world_id = s.world_id
+      WHERE w.active`
+  );
+  const alive = new Set();
+  const dead = new Set();
+  for (const row of rows) {
+    if (row.status === 'DEAD') dead.add(row.coin_id);
+    else alive.add(row.coin_id);
+  }
+  return { alive, dead };
+}
+
 async function verifyCoinCatalogue(q, problems) {
   const table = await q(`SELECT to_regclass('public.coins') AS reg`);
   if (!table.rows[0].reg) {
     problems.push('table public.coins does not exist');
     return;
   }
+
+  // Persistent authority for the replacement lifecycle — null when the
+  // persistent tables are absent, in which case the legacy-only catalogue
+  // rules apply unchanged.
+  const persistent = await loadActiveWorldCoinState(q);
 
   // Migration 014 column shape: retirement semantics underpin the catalogue
   // checks below, so a missing/incompatible column is reported on its own.
@@ -323,15 +391,25 @@ async function verifyCoinCatalogue(q, problems) {
     } else if (row.name !== name || row.symbol !== symbol) {
       problems.push(`canonical coin_id ${id}: found ${row.name}/${row.symbol}, expected ${name}/${symbol}`);
     } else if (row.retired) {
-      problems.push(`canonical coin_id ${id} (${name}/${symbol}) is retired — canonical coins must stay active`);
+      // A canonical coin retired by the persistent replacement runtime is
+      // valid ONLY when the active persistent world records its death. Any
+      // other canonical retirement (no persisted death explanation) still
+      // fails — the invariant is extended, not relaxed.
+      if (!(persistent && persistent.dead.has(id))) {
+        problems.push(`canonical coin_id ${id} (${name}/${symbol}) is retired — canonical coins must stay active`);
+      }
     }
   }
 
-  // The ACTIVE catalogue is exactly the canonical 10. Extra rows are only
-  // tolerated when retired (migration 014's soft-retirement path) — a
-  // non-retired extra is still player-facing and is flagged.
+  // The ACTIVE catalogue is exactly the canonical 10, plus authored
+  // replacement coins carrying an ALIVE state in the active persistent
+  // world. Other extra rows are only tolerated when retired (migration
+  // 014's soft-retirement path) — a non-retired extra with no persistent
+  // ALIVE state is still player-facing and is flagged.
   const canonicalIds = new Set(CANONICAL_COIN_CATALOGUE.map(([id]) => id));
-  const activeExtras = rows.filter((r) => !r.retired && !canonicalIds.has(r.coin_id));
+  const activeExtras = rows.filter(
+    (r) => !r.retired && !canonicalIds.has(r.coin_id) && !(persistent && persistent.alive.has(r.coin_id))
+  );
   if (activeExtras.length > 0) {
     problems.push(`coin catalogue: ${activeExtras.length} non-canonical coin row(s) are not retired (${activeExtras.map((r) => `${r.coin_id}:${r.name}/${r.symbol}`).join(', ')}) — extra rows are player-facing`);
   }
@@ -561,15 +639,78 @@ async function verifyDynamicCollapses(q, problems) {
   // A zero live price must be backed by a persisted death record in the
   // ACTIVE or SETTLING cycle — death is never inferred from price alone,
   // and a mid-settlement £0 (no ACTIVE cycle exists then) is legitimate.
+  // The persistent market is the SECOND legitimate death authority: a coin
+  // recorded DEAD in the ACTIVE persistent world is permanently £0 without
+  // any Apocalypse collapse row. The Apocalypse check is preserved; the
+  // persistent arm is an additional explanation, never a replacement.
+  const persistentState = await loadActiveWorldCoinState(q);
+  const persistentAuthority = persistentState !== null;
   const unexplained = await q(
     `SELECT count(*)::int AS n FROM coins c
      WHERE c.current_price = 0 AND NOT EXISTS (
        SELECT 1 FROM apocalypse_coin_collapses cc
        JOIN apocalypse_cycles ac ON ac.cycle_id = cc.cycle_id
        WHERE ac.status IN ('ACTIVE', 'SETTLING') AND cc.coin_id = c.coin_id
-     )`
+     )${persistentAuthority ? ` AND NOT EXISTS (
+       SELECT 1 FROM market_coin_state s
+       JOIN market_worlds w ON w.world_id = s.world_id
+       WHERE w.active AND s.coin_id = c.coin_id AND s.status = 'DEAD'
+     )` : ''}`
   );
-  if (unexplained.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${unexplained.rows[0].n} zero-priced coins have no executed collapse row in the ACTIVE/SETTLING cycle`);
+  if (unexplained.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${unexplained.rows[0].n} zero-priced coins have no executed collapse row in the ACTIVE/SETTLING cycle and no persistent-world DEAD record`);
+}
+
+// --- Persistent death consistency -------------------------------------------
+//
+// A persistent death (market_coin_state.status = 'DEAD' in the ACTIVE world)
+// must be reflected in the shared catalogue exactly as the death runtime
+// writes it: the coin soft-retired (replacement lifecycle) and priced at
+// exactly £0. Anything else is a genuine inconsistency: an un-retired DEAD
+// coin is still player-facing while dead, and a DEAD coin with a non-zero
+// live price is a revived corpse. Rows belonging to INACTIVE worlds are
+// historical and impose no catalogue requirements.
+
+async function verifyPersistentDeathConsistency(q, problems) {
+  // The state-side guard (tables + readable columns) is shared with the
+  // other persistent-authority call sites; the coins-side columns are
+  // guarded below. A stub or pre-migration schema is reported by its own
+  // shape verifier, never by a crash here.
+  const persistentState = await loadActiveWorldCoinState(q);
+  if (!persistentState) return;
+  const coinsReg = await q(`SELECT to_regclass('public.coins') AS c`);
+  if (!coinsReg.rows[0].c) return;
+
+  // Never crash on a pre-migration-014 schema where the catalogue columns
+  // this check reads do not exist yet — the catalogue verifier reports that
+  // shape problem on its own.
+  const coinCols = await q(
+    `SELECT count(*)::int AS n FROM information_schema.columns
+     WHERE table_schema = 'public' AND table_name = 'coins'
+       AND column_name IN ('retired', 'current_price') AND is_nullable = 'NO'`
+  );
+  if (coinCols.rows[0].n !== 2) return;
+
+  const deadUnretired = await q(
+    `SELECT count(*)::int AS n
+       FROM market_coin_state s
+       JOIN market_worlds w ON w.world_id = s.world_id
+       JOIN coins c ON c.coin_id = s.coin_id
+      WHERE w.active AND s.status = 'DEAD' AND c.retired = FALSE`
+  );
+  if (deadUnretired.rows[0].n > 0) {
+    problems.push(`INVARIANT VIOLATION: ${deadUnretired.rows[0].n} persistently DEAD coin(s) in the active world are not retired in the catalogue`);
+  }
+
+  const deadPriced = await q(
+    `SELECT count(*)::int AS n
+       FROM market_coin_state s
+       JOIN market_worlds w ON w.world_id = s.world_id
+       JOIN coins c ON c.coin_id = s.coin_id
+      WHERE w.active AND s.status = 'DEAD' AND c.current_price <> 0`
+  );
+  if (deadPriced.rows[0].n > 0) {
+    problems.push(`INVARIANT VIOLATION: ${deadPriced.rows[0].n} persistently DEAD coin(s) in the active world have a non-zero live price`);
+  }
 }
 
 // --- Core 4: round state (participants / holdings / round transactions) ---
@@ -2152,6 +2293,7 @@ async function verifyGameSchema({ query } = {}) {
   await verifyCoinEventsAndMarketPhases(q, problems);
   await verifyMarketState(q, problems);
   await verifyDynamicCollapses(q, problems);
+  await verifyPersistentDeathConsistency(q, problems);
   await verifyPricingCheckpoints(q, problems);
   await verifyPersistentWorld(q, problems);
   await verifyMarketDirectorState(q, problems);
