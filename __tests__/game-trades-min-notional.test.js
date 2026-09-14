@@ -10,9 +10,6 @@
 // The collapsed-coin £0 exit is deliberately UNCHANGED: a dead holding
 // (price exactly £0) still sells out for exactly £0.
 
-const request = require('supertest');
-const jwt = require('jsonwebtoken');
-const app = require('../app');
 const db = require('../db/connection');
 const { reconcileCycle } = require('../game/gameCycleService');
 const { joinRound, buyRoundTrade, sellRoundTrade } = require('../game/gameRoundService');
@@ -23,9 +20,9 @@ const botService = require('../game/botService');
 // keeps every coin alive for the whole test regardless of when it runs.
 const LONG_DURATION_MS = 7 * 24 * 60 * 60 * 1000;
 
-function tokenFor(userId) {
-  return jwt.sign({ user_id: userId }, process.env.JWT_SECRET, { expiresIn: '1h' });
-}
+// Auth is unused after the HTTP cutover; kept so call sites stay readable.
+function tokenFor(userId) { return `domain-user-${userId}`; }
+
 
 async function roundCash(participantId) {
   const { rows } = await db.query(
@@ -58,19 +55,54 @@ async function setupJoinedRound({ coinPrice = 1 } = {}) {
   return { cycle, participant, coinId: 1 };
 }
 
-// NOT async: return the supertest chain itself so callers can .expect().
-function buy(auth, cycle, coinId, amount) {
-  return request(app)
-    .post('/api/game/trades/buy')
-    .set('Authorization', auth)
-    .send({ cycleId: cycle.apocalypse_id, coin_id: coinId, amount });
+// Domain helpers (player HTTP trade routes are removed). Return a thenable
+// with .expect(status) so existing call sites keep working.
+function domainTrade(side, cycle, coinId, amount) {
+  const run = side === 'buy'
+    ? buyRoundTrade({
+        userId: 1,
+        apocalypseId: cycle.apocalypse_id,
+        coinId,
+        quantity: amount
+      })
+    : sellRoundTrade({
+        userId: 1,
+        apocalypseId: cycle.apocalypse_id,
+        coinId,
+        quantity: amount
+      });
+
+  const settled = run.then(
+    (data) => ({ status: 201, body: { data } }),
+    (err) => ({
+      status: err && err.status ? err.status : 500,
+      body: { message: err.message }
+    })
+  );
+
+  return {
+    expect(code) {
+      return settled.then((result) => {
+        if (result.status !== code) {
+          throw new Error(
+            `expected ${code}, got ${result.status}: ${result.body && result.body.message}`
+          );
+        }
+        return result;
+      });
+    },
+    then(onFulfilled, onRejected) {
+      return settled.then(onFulfilled, onRejected);
+    }
+  };
 }
 
-function sell(auth, cycle, coinId, amount) {
-  return request(app)
-    .post('/api/game/trades/sell')
-    .set('Authorization', auth)
-    .send({ cycleId: cycle.apocalypse_id, coin_id: coinId, amount });
+function buy(_auth, cycle, coinId, amount) {
+  return domainTrade('buy', cycle, coinId, amount);
+}
+
+function sell(_auth, cycle, coinId, amount) {
+  return domainTrade('sell', cycle, coinId, amount);
 }
 
 describe('minimum notional: every live-priced trade must settle for at least £0.01', () => {

@@ -9,7 +9,7 @@
 // identically.
 //
 // Determinism: every pseudo-random choice comes from the SHA-256 counter
-// stream (botService.createBotRandom) keyed by the persistent world seed +
+// stream (persistentBotProvisioning.createBotRandom) keyed by the persistent world seed +
 // the bot's stable identity + the tick id. Same inputs -> identical
 // decisions, in every process, forever. Math.random() is never used.
 //
@@ -56,7 +56,7 @@ const {
   GAME_MIN_TRADE_VALUE,
   GAME_QUANTITY_DECIMALS
 } = require('./gameConstants');
-const { createBotRandom, ensureBotsProvisioned } = require('./botService');
+const { createBotRandom, ensureBotsProvisioned } = require('./persistentBotProvisioning');
 
 
 // Persistent provenance: only world-scoped writer ticks.

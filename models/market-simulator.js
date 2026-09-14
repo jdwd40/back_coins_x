@@ -61,7 +61,6 @@
 
 const db = require('../db/connection');
 const logger = require('../utils/logger');
-const gameRoundService = require('../game/gameRoundService');
 const marketDomain = require('../game/marketDomain');
 const persistentPricing = require('../game/persistentPricing');
 const persistentWorld = require('../game/persistentWorld');
@@ -625,13 +624,6 @@ class MarketSimulator {
         'INSERT INTO market_history (total_value, market_trend) VALUES ($1, $2)',
         [totalMarketValue, trend]
       );
-
-      // Old-economy compatibility (until Stage 7): set-based peak
-      // reconciliation. One SQL statement lifts every legacy active
-      // participant's monotonic peak_wealth from the prices just written in
-      // this batch — atomically with the price update itself, and with no
-      // per-participant JavaScript loop. No new rounds/cycles are created.
-      await gameRoundService.reconcileActivePeaks(client);
 
       await client.query('COMMIT');
       this.lastBatch = { trend, at: new Date(batchNowMs) };

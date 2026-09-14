@@ -1,9 +1,6 @@
 const app = require('./app');
 const db = require('./db/connection');
 const logger = require('./utils/logger');
-const gameCycleWorker = require('./game/gameCycleWorker');
-const botWorker = require('./game/botWorker');
-const economyWorker = require('./game/economyWorker');
 const persistentBotWorker = require('./game/persistentBotWorker');
 const persistentReplacementWorker = require('./game/persistentReplacementWorker');
 const marketSimulator = require('./models/market-simulator');
@@ -53,17 +50,8 @@ const startServer = async (port = PORT) => {
     console.log('Database connection successful:', result.rows[0]);
 
     httpServer = app.listen(port, () => {
-      // S11-01 cutover: persistent market writer is the ONLY gameplay system
-      // allowed to mutate live coins.current_price. Explicit lifecycle policy:
-      // do NOT start dangerous legacy price-mutating workers (gameCycleWorker,
-      // botWorker, economyWorker). Persistent systems (market writer via app.js,
-      // persistentBotWorker, persistentReplacementWorker) still start.
+      // The persistent market writer is the only live price authority.
       if (process.env.NODE_ENV === 'production') {
-        // Legacy gameCycle/bot/economy deliberately omitted — they drive
-        // restoreBaselinePrices + executeCollapse + settlement zeroing.
-        // Reconcile paths remain available (HTTP compat) but are guarded
-        // inside dynamicCollapseService to be price-neutral when persistent
-        // world active.
         // Persistent-market Stage 8: the persistent roster bots trade THE
         // persistent economy. A tick before world provisioning is a loud
         // logged skip, never a crash (the worker never fabricates a world).
@@ -115,16 +103,6 @@ const shutdown = (signal = 'unknown') => {
 
     // 1. Stop background workers/timers.
     try {
-      gameCycleWorker.stop();
-    } catch (err) {
-      console.error('[LIFECYCLE] Error stopping game cycle worker:', err.message);
-    }
-    try {
-      botWorker.stop();
-    } catch (err) {
-      console.error('[LIFECYCLE] Error stopping bot worker:', err.message);
-    }
-    try {
       persistentBotWorker.stop();
     } catch (err) {
       console.error('[LIFECYCLE] Error stopping persistent bot worker:', err.message);
@@ -133,11 +111,6 @@ const shutdown = (signal = 'unknown') => {
       persistentReplacementWorker.stop();
     } catch (err) {
       console.error('[LIFECYCLE] Error stopping persistent replacement worker:', err.message);
-    }
-    try {
-      economyWorker.stop();
-    } catch (err) {
-      console.error('[LIFECYCLE] Error stopping economy worker:', err.message);
     }
     try {
       marketSimulator.stop();

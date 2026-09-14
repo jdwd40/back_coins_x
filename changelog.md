@@ -1,5 +1,22 @@
 # Changelog
 
+## 2026-09-12 — Apocalypse backend cutover (continued)
+
+- Extracted `game/persistentBotProvisioning.js` (`createBotRandom`, `ensureBotsProvisioned`); live persistent bots no longer import the cycle `botService` decision engine.
+- Removed obsolete round-engine npm scripts (`simulate`, `simulate:power`, `simulate:v2-3`, `simulate:bots`, `simulate:multi-cycle`); retained persistent/stage9/checkpoint horizon tools.
+- Added cutover regressions for removed `/api/game/*` player routes and deleted workers.
+- Documented remaining legacy classification in `docs/apocalypse-cutover-audit.md`.
+- Independent production STF/StellaFortune data invariant remains a deploy blocker outside this PR.
+
+
+## 12 September 2026 — Apocalypse runtime cutover
+
+- Removed the former `/api/game/*` player routes while retaining token-gated read-only diagnostics.
+- Removed the cycle, cycle-bot, and cycle-economy worker modules from the server lifecycle.
+- Stopped registration from creating Apocalypse participants.
+- Removed legacy participant peak reconciliation from the persistent market transaction.
+- Preserved historical Apocalypse tables and monitor data without destructive migrations.
+
 Curated history of meaningful production work. This is not a commit-by-commit build log.
 
 ## Unreleased — deployment-verifier dual death authority

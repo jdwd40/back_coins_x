@@ -8,7 +8,6 @@ const { coinsRouter } = require('./routes/coins.routes');
 const { usersRouter } = require('./routes/users.routes');
 const { transactionsRouter } = require('./routes/transactions.routes');
 const { marketRouter } = require('./routes/market.routes');
-const { gameRouter } = require('./routes/game.routes');
 const { gameDiagnosticsRouter } = require('./routes/gameDiagnostics.routes');
 const { persistentRouter } = require('./routes/persistent.routes');
 
@@ -67,10 +66,6 @@ app.use('/api/coins', coinsRouter);
 app.use('/api/users', usersRouter);
 app.use('/api/transactions', transactionsRouter);
 app.use('/api/market', marketRouter);
-app.use('/api/game', gameRouter);
-// Persistent-market Stage 6: the persistent API surface (additive — the old
-// cycle-shaped routes above stay mounted for compatibility. Their retirement
-// is tracked in project_plan.md and must follow a caller/monitor audit.
 app.use('/api/persistent', persistentRouter);
 // Issue #21: restricted read-only operator diagnostics (token-gated; 404
 // when GAME_DIAGNOSTICS_TOKEN is unset).
@@ -142,9 +137,8 @@ app.use((req, res) => {
   res.status(404).json({ message: 'Route not found' });
 });
 
-// Keep the legacy market simulator lifecycle unchanged. The global game-cycle
-// worker is started explicitly by server.js only after the database check and
-// HTTP listener have completed, never as an application-module side effect.
+// Persistent market writer: started here in production as the sole live
+// price authority. Cycle/economy/bot workers are not part of this process.
 if (process.env.NODE_ENV === 'production') {
   marketSimulator.start();
 }

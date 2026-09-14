@@ -93,22 +93,9 @@ describe('SIM-13/14: collapsed-coin behaviour in round trades', () => {
     const participant = await joinRound({ userId: 1, now: EARLY });
     const deadCoinId = await collapseOneCoin(cycle);
 
-    const response = await request(app)
-      .post('/api/game/trades/buy')
-      .set('Authorization', `Bearer ${tokenFor(1)}`)
-      .send({ cycleId: cycle.apocalypse_id, coin_id: deadCoinId, amount: 1 });
-
-    // The API runs at wall-clock now; if the fixed cycle has already rolled
-    // over in real time the stale-cycle rejection (409) is equally correct —
-    // assert the domain behaviour via the service at the fixed time instead.
-    if (response.status === 409) {
-      await expect(
-        buyRoundTrade({ userId: 1, apocalypseId: cycle.apocalypse_id, coinId: deadCoinId, quantity: 1, now: EARLY })
-      ).rejects.toMatchObject({ status: 400, message: expect.stringMatching(/collapsed to £0/) });
-    } else {
-      expect(response.status).toBe(400);
-      expect(response.body.message).toMatch(/collapsed to £0/);
-    }
+    await expect(
+      buyRoundTrade({ userId: 1, apocalypseId: cycle.apocalypse_id, coinId: deadCoinId, quantity: 1, now: EARLY })
+    ).rejects.toMatchObject({ status: 400, message: expect.stringMatching(/collapsed to £0/) });
 
     const p = await participantRow(participant.participantId);
     expect(parseFloat(p.current_cash)).toBe(10000);

@@ -17,7 +17,7 @@ const persistentDebt = require('../game/persistentDebt');
 const persistentBots = require('../game/persistentBots');
 const coinStateModel = require('../models/marketCoinState.model');
 const { BOT_ROSTER } = require('../game/botConfig');
-const { ensureBotsProvisioned } = require('../game/botService');
+const { ensureBotsProvisioned } = require('../game/persistentBotProvisioning');
 const { assertDisposableTestDatabase } = require('./helpers/testDatabaseGuard');
 
 jest.setTimeout(90000);
@@ -115,7 +115,7 @@ describe('Stage 8: the public-state allowlist (redaction contract)', () => {
 describe('Stage 8: the deterministic decision layer', () => {
   test('identical inputs produce identical decisions (determinism)', () => {
     const state = publicState({ coins: [publicCoin(), publicCoin({ coinId: 2, symbol: 'BLN' })] });
-    const { createBotRandom } = require('../game/botService');
+    const { createBotRandom } = require('../game/persistentBotProvisioning');
     const first = persistentBots.decidePersistentBotAction({
       strategy: 'conservative', state, random: createBotRandom({ seed: WORLD_SEED, botKey: 'conservative-carl', tickId: 7 })
     });

@@ -276,7 +276,7 @@ describe('Stage 6: registration provisions the persistent account idempotently',
     await provisionedWorld();
   });
 
-  test('registering a new user provisions exactly one persistent account with exactly £10,000', async () => {
+  test('registration provisions only the persistent account, never an Apocalypse participant', async () => {
     const res = await request(app)
       .post('/api/users/register')
       .send({ username: 'persistent_newbie', email: 'newbie@example.com', password: 'password123' })
@@ -290,5 +290,11 @@ describe('Stage 6: registration provisions the persistent account idempotently',
     expect(rows.length).toBe(1);
     expect(parseFloat(rows[0].starting_cash)).toBe(10000);
     expect(parseFloat(rows[0].cash)).toBe(10000);
+
+    const legacy = await db.query(
+      'SELECT count(*)::int AS n FROM apocalypse_participants WHERE user_id = $1',
+      [newUserId]
+    );
+    expect(legacy.rows[0].n).toBe(0);
   });
 });

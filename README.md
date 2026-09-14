@@ -19,7 +19,7 @@ Public API base: `https://jdwd40.com/api-2/api`
 - Persistent dead-coin replacement worker.
 - PostgreSQL as the authority for users, coins, prices, accounts, holdings, trades, market state, Director state, events, bots, and debt.
 
-The old Apocalypse/cycle API and schema remain for compatibility and the internal monitor. The legacy cycle, bot, and economy workers do **not** start in production and do not drive current prices.
+The former Apocalypse player API and cycle workers have been removed. Historical cycle tables remain read-only for the token-gated internal monitor; they are not gameplay authorities and are not mutated by registration or the persistent market writer.
 
 ## Main runtime flow
 

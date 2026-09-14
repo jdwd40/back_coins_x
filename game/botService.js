@@ -9,10 +9,11 @@
 // guarantees (advisory lock, row locks, ledger-only writes, legacy funds
 // untouched) therefore apply to bots identically.
 //
-// Determinism: every pseudo-random choice comes from a SHA-256 counter
-// stream keyed by the cycle's persisted Core 1 seed + the bot's stable
-// identity + the tick id. Same inputs -> identical decisions, in every
-// process, forever. Math.random() is never used.
+// Determinism: every pseudo-random choice comes from createBotRandom
+// (game/persistentBotProvisioning.js) keyed by the cycle seed + bot
+// identity + tick id. Same inputs -> identical decisions forever.
+// Math.random() is never used. This module is retained for offline
+// cycle-era tests/simulation only — production bots use persistentBots.
 //
 // Public-state-only decisions: the decision layer accepts ONLY the
 // deliberately shaped market state built here — live coin prices, recent
@@ -42,8 +43,8 @@
 // Tick identity: runBotTick claims (cycle_id, tick_id) in
 // apocalypse_bot_ticks with INSERT ... ON CONFLICT DO NOTHING, so a given
 // tick executes at most once across every Node/PM2 process — the database is
-// the duplicate-tick authority. This module owns no timers; the single
-// lifecycle-owned bot worker (botWorker.js) is the only scheduler.
+// the duplicate-tick authority. This retained simulation service owns no
+// timers and is not reachable from the production HTTP or worker lifecycle.
 //
 // Limits (validated in botConfig, enforced HERE at the service layer):
 // a per-trade size cap on every executed BUY, a per-bot cooldown read from
@@ -56,8 +57,6 @@
 // cap and minimum cash reserve, and rising public apocalypsePercent drives
 // universal profit-taking/loss-cutting/liquidation pressure.
 
-const crypto = require('crypto');
-const bcrypt = require('bcrypt');
 const db = require('../db/connection');
 const {
   BOT_ROSTER,
@@ -79,6 +78,7 @@ const powerDomain = require('./powerDomain');
 const { getApocalypseVolatility } = require('./apocalypseVolatility');
 const { computeLiveCoinSignal } = require('./marketSignalsService');
 const { loadPricingContext } = require('./pricingContext');
+const { createBotRandom, ensureBotsProvisioned } = require('./persistentBotProvisioning');
 
 // How many recent price points each coin carries in the shaped public state.
 // A fixed game-design constant — deliberately not configurable.
@@ -141,24 +141,6 @@ function floor2(value) {
 // Deterministic PRNG: SHA-256 counter mode keyed by cycle seed + stable bot
 // identity + tick. Same (seed, botKey, tickId) -> identical stream, in every
 // process, forever.
-// ---------------------------------------------------------------------------
-function createBotRandom({ seed, botKey, tickId }) {
-  if (typeof seed !== 'string' || seed.length === 0) {
-    throw new Error(`bot random seed must be a non-empty string; received ${typeof seed === 'string' ? JSON.stringify(seed) : String(seed)}`);
-  }
-  if (typeof botKey !== 'string' || botKey.length === 0) {
-    throw new Error(`bot random botKey must be a non-empty string; received ${typeof botKey === 'string' ? JSON.stringify(botKey) : String(botKey)}`);
-  }
-  if (!Number.isInteger(tickId) || tickId < 0) {
-    throw new Error(`bot random tickId must be a non-negative integer; received ${String(tickId)}`);
-  }
-  let counter = 0;
-  return function botRandom() {
-    const digest = crypto.createHash('sha256').update(`${seed}:core5:${botKey}:${tickId}:${counter}`).digest();
-    counter += 1;
-    return digest.readUInt32BE(0) / 0x100000000; // [0, 1)
-  };
-}
 
 // ---------------------------------------------------------------------------
 // Provisioning: create (exactly once) the roster's backing users and durable
@@ -166,67 +148,6 @@ function createBotRandom({ seed, botKey, tickId }) {
 // users.username UNIQUE constraint and apocalypse_bots UNIQUE constraints are
 // the database backstops. Repeated runs reuse the same stable user ids and
 // never rotate credentials.
-// ---------------------------------------------------------------------------
-async function ensureBotsProvisioned({ queryable = db } = {}) {
-  const provisioned = [];
-  for (const bot of BOT_ROSTER) {
-    // The password hash is a syntactically valid bcrypt hash of a random
-    // secret generated here and NEVER stored anywhere: no candidate password
-    // can ever authenticate as a bot. A fresh secret is generated only when
-    // the row does not yet exist (ON CONFLICT DO NOTHING discards it).
-    const unusableHash = await bcrypt.hash(crypto.randomBytes(32).toString('hex'), 10);
-    await queryable.query(
-      `INSERT INTO users (username, email, password_hash, funds, is_bot)
-       VALUES ($1, $2, $3, 0.00, true)
-       ON CONFLICT (username) DO NOTHING`,
-      [bot.username, bot.email, unusableHash]
-    );
-    const { rows: userRows } = await queryable.query(
-      'SELECT user_id, is_bot FROM users WHERE username = $1',
-      [bot.username]
-    );
-    const user = userRows[0];
-    if (!user) {
-      throw new Error(`bot provisioning: failed to resolve roster user ${bot.username}`);
-    }
-    if (user.is_bot !== true) {
-      // The roster username belongs to a pre-existing HUMAN account. That is
-      // a deployment conflict, never something to silently take over.
-      throw new Error(
-        `bot provisioning: username ${bot.username} already exists and is not a bot; refusing to adopt a human account`
-      );
-    }
-
-    await queryable.query(
-      `INSERT INTO apocalypse_bots (bot_key, strategy, user_id)
-       VALUES ($1, $2, $3)
-       ON CONFLICT (bot_key) DO NOTHING`,
-      [bot.botKey, bot.strategy, user.user_id]
-    );
-    const { rows: identityRows } = await queryable.query(
-      'SELECT bot_key, strategy, user_id, last_action_at FROM apocalypse_bots WHERE bot_key = $1',
-      [bot.botKey]
-    );
-    const identity = identityRows[0];
-    if (identity.user_id !== user.user_id) {
-      throw new Error(
-        `bot provisioning: identity ${bot.botKey} is pinned to user ${identity.user_id}, expected ${user.user_id}`
-      );
-    }
-    if (identity.strategy !== bot.strategy) {
-      throw new Error(
-        `bot provisioning: identity ${bot.botKey} persists strategy ${identity.strategy}, roster now says ${bot.strategy}; reconcile manually`
-      );
-    }
-    provisioned.push({
-      botKey: bot.botKey,
-      strategy: bot.strategy,
-      userId: user.user_id,
-      lastActionAt: identity.last_action_at ? new Date(identity.last_action_at) : null
-    });
-  }
-  return provisioned;
-}
 
 // ---------------------------------------------------------------------------
 // Deliberately shaped PUBLIC market state — the ONLY input the decision

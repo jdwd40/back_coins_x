@@ -739,23 +739,19 @@ describe('S11-01 P0: persistent price authority cutover — legacy paths neutral
     expect(afterPrices).toEqual(beforePrices);
   });
 
-  test('HTTP reconcile-before-read safety: use real supertest against Express app (not direct service calls)', async () => {
+  test('retired Apocalypse player routes return 404 without mutating persistent state', async () => {
     const beforePricesRes = await db.query('SELECT coin_id, current_price FROM coins ORDER BY coin_id LIMIT 5');
     const beforePrices = beforePricesRes.rows.map(r => parseFloat(r.current_price));
     const beforeStates = await db.query('SELECT coin_id, status FROM market_coin_state ORDER BY coin_id LIMIT 5');
 
-    // Use Supertest against the real Express app under disposable DB
+    // The operator diagnostics namespace remains separately mounted, but
+    // former player routes are gone rather than silently reconciling cycles.
     const stateRes = await request(app).get('/api/game/state');
-    expect(stateRes.status).toBe(200);
-    expect(stateRes.body).toHaveProperty('apocalypseId'); // expected lifecycle shape from getGameState
-
-    // at least one other reconcile-before-read legacy game GET
+    expect(stateRes.status).toBe(404);
     const lbRes = await request(app).get('/api/game/leaderboard');
-    // may 409 if no legacy cycle yet, but should not 5xx and not mutate
-    expect([200, 409]).toContain(lbRes.status);
-
+    expect(lbRes.status).toBe(404);
     const signalsRes = await request(app).get('/api/game/market-signals');
-    expect(signalsRes.status).toBe(200);
+    expect(signalsRes.status).toBe(404);
 
     const afterPricesRes = await db.query('SELECT coin_id, current_price FROM coins ORDER BY coin_id LIMIT 5');
     const afterPrices = afterPricesRes.rows.map(r => parseFloat(r.current_price));
