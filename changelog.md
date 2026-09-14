@@ -19,6 +19,14 @@
 
 Curated history of meaningful production work. This is not a commit-by-commit build log.
 
+## Unreleased — deployment-verifier dual death authority
+
+### Fixed
+
+- The production schema verifier now recognises the persistent market as a second legitimate death authority alongside Apocalypse-cycle collapse rows: a zero-priced coin passes when it is recorded `DEAD` in the active persistent world (`market_coin_state`), not only when it has an executed collapse row in the ACTIVE/SETTLING cycle. The Apocalypse check is preserved; the persistent arm is an additional explanation, never a replacement.
+- Catalogue verification accepts the Stage 9 replacement lifecycle: a retired canonical coin is valid only when persistently `DEAD` in the active world, and an active non-canonical coin is valid only when persistently `ALIVE` there. Unexplained zero prices, retirements and active extras still fail.
+- New death-consistency invariants: a persistently `DEAD` coin in the active world must be soft-retired in the catalogue and priced at exactly £0. Records belonging to inactive worlds satisfy nothing.
+
 ## Unreleased — documentation reconciliation
 
 ### Changed
