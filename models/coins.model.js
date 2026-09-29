@@ -124,39 +124,24 @@ async function get24HourPriceChange(coinId) {
   }
 }
 
-/**
- * Select all coins from the database
- * Fixed N+1 query problem by using a single query with CTEs
- */
-exports.selectAllCoins = async () => {
-  const result = await db.query(`
-    WITH latest_prices AS (
-      SELECT DISTINCT ON (coin_id)
-        coin_id,
-        price AS current_price,
-        created_at
-      FROM price_history
-      WHERE ${PERSISTENT_PH}
-      ORDER BY coin_id, created_at DESC
-    ),
-    old_prices_24h AS (
-      SELECT DISTINCT ON (coin_id)
-        coin_id,
-        price AS old_price
-      FROM price_history
-      WHERE created_at <= NOW() - INTERVAL '24 hours'
-        AND ${PERSISTENT_PH}
-      ORDER BY coin_id, created_at DESC
-    ),
-    earliest_prices AS (
-      SELECT DISTINCT ON (coin_id)
-        coin_id,
-        price AS earliest_price
-      FROM price_history
-      WHERE ${PERSISTENT_PH}
-      ORDER BY coin_id, created_at ASC
-    )
-    SELECT 
+// GET /api/coins: one statement, O(live coins) index lookups.
+//
+// Each live coin gets three LIMIT 1 lookups (latest persistent price, the
+// persistent price at/before 24h ago, and — only when there is no 24h-old
+// price — the coin's earliest persistent price). The previous CTE form ran
+// DISTINCT ON over every persistent price_history row three times (full
+// scans + on-disk sorts), which grew with table age and took 3-45s in
+// production, saturating the pool under frontend polling.
+//
+// Result semantics are identical to the old query: the CASE only reads
+// earliest_price when old_price IS NULL, so gating that lookup on
+// `op.old_price IS NULL` cannot change the output. `created_at + INTERVAL
+// '0 seconds'` in the earliest lookup deliberately stops the planner from
+// walking idx_price_history_created_at from the oldest row of the whole
+// table (it would filter ~1M foreign rows per coin); it instead reads only
+// that coin's rows by coin_id and picks the earliest.
+const SELECT_ALL_COINS_SQL = `
+    SELECT
       c.coin_id,
       c.name,
       c.symbol,
@@ -165,24 +150,75 @@ exports.selectAllCoins = async () => {
       c.circulating_supply,
       c.price_change_24h,
       c.founder,
-      CASE 
+      CASE
         WHEN lp.current_price IS NULL OR (op.old_price IS NULL AND ep.earliest_price IS NULL) THEN NULL
-        ELSE ROUND(((lp.current_price - COALESCE(op.old_price, ep.earliest_price)) / 
+        ELSE ROUND(((lp.current_price - COALESCE(op.old_price, ep.earliest_price)) /
                     NULLIF(COALESCE(op.old_price, ep.earliest_price), 0) * 100)::numeric, 2)
       END AS calculated_price_change_24h
     FROM coins c
-    LEFT JOIN latest_prices lp ON c.coin_id = lp.coin_id
-    LEFT JOIN old_prices_24h op ON c.coin_id = op.coin_id
-    LEFT JOIN earliest_prices ep ON c.coin_id = ep.coin_id
+    LEFT JOIN LATERAL (
+      SELECT p.price AS current_price
+      FROM price_history p
+      WHERE p.coin_id = c.coin_id
+        AND ${PERSISTENT_PH}
+      ORDER BY p.created_at DESC
+      LIMIT 1
+    ) lp ON true
+    LEFT JOIN LATERAL (
+      SELECT p.price AS old_price
+      FROM price_history p
+      WHERE p.coin_id = c.coin_id
+        AND p.created_at <= NOW() - INTERVAL '24 hours'
+        AND ${PERSISTENT_PH}
+      ORDER BY p.created_at DESC
+      LIMIT 1
+    ) op ON true
+    LEFT JOIN LATERAL (
+      SELECT p.price AS earliest_price
+      FROM price_history p
+      WHERE op.old_price IS NULL
+        AND p.coin_id = c.coin_id
+        AND ${PERSISTENT_PH}
+      ORDER BY p.created_at + INTERVAL '0 seconds' ASC
+      LIMIT 1
+    ) ep ON true
     WHERE c.retired = FALSE
     ORDER BY c.coin_id ASC;
-  `);
+  `;
+exports.SELECT_ALL_COINS_SQL = SELECT_ALL_COINS_SQL;
+
+/**
+ * Select all live (non-retired) coins with their 24h price change.
+ */
+exports.selectAllCoins = async () => {
+  // The planner's (pessimistic) cost estimate for the never-executed gated
+  // lookup crosses jit_above_cost, so PostgreSQL would spend ~0.6-0.8s
+  // JIT-compiling a sub-millisecond query. Disable JIT for this one
+  // statement only (SET LOCAL is scoped to this transaction).
+  const client = await db.getClient();
+  let result;
+  let releaseError;
+  try {
+    await client.query('BEGIN');
+    await client.query('SET LOCAL jit = off');
+    result = await client.query(SELECT_ALL_COINS_SQL);
+    await client.query('COMMIT');
+  } catch (err) {
+    try {
+      await client.query('ROLLBACK');
+    } catch (rollbackErr) {
+      // Connection is unusable: have the pool discard it, not reuse it.
+      releaseError = rollbackErr;
+    }
+    throw err;
+  } finally {
+    client.release(releaseError);
+  }
 
   // Use the calculated price change and format response
   return result.rows.map(coin => {
     // Convert calculated_price_change_24h from string to number or null
     const priceChange = coin.calculated_price_change_24h === null ? null : Number(coin.calculated_price_change_24h);
-    console.log(`Price change for coin ${coin.coin_id}:`, priceChange);
     return formatCoinResponse({
       ...coin,
       price_change_24h: priceChange
