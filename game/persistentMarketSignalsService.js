@@ -45,6 +45,7 @@
 const db = require('../db/connection');
 const persistentWorld = require('./persistentWorld');
 const marketDomain = require('./marketDomain');
+const persistentSignals = require('./persistentSignals');
 
 async function resolveActiveWorldOrNull(queryable) {
   try {
@@ -61,6 +62,45 @@ function parseNum(v) {
   if (v === null || v === undefined) return null;
   const n = parseFloat(v);
   return Number.isFinite(n) ? n : null;
+}
+
+// The committed comparison price per coin: the latest persistent writer
+// tick (source='MARKET_TICK' AND cycle_id IS NULL) at least one public
+// lookback old and not before the world epoch. One windowed query, no N+1.
+// Shared by this endpoint and the persistent bot tick (game/persistentBots)
+// so both compare against exactly the same committed row.
+async function loadCommittedPastPrices(queryable, {
+  coinIds,
+  nowMs,
+  epochStartedAtMs,
+  lookbackMs = marketDomain.PUBLIC_SIGNAL_LOOKBACK_MS || 60000
+} = {}) {
+  const pastPrices = new Map();
+  const coinIdList = (coinIds || []).map(Number);
+  if (coinIdList.length === 0) return pastPrices;
+  const cutoff = new Date(nowMs - lookbackMs).toISOString();
+  const epochStartedAt = new Date(epochStartedAtMs).toISOString();
+  const placeholders = coinIdList.map((_, i) => `$${i + 3}`).join(', ');
+  const histSql = `
+    SELECT coin_id, price
+    FROM (
+      SELECT coin_id, price,
+             ROW_NUMBER() OVER (PARTITION BY coin_id ORDER BY created_at DESC) AS rn
+        FROM price_history
+       WHERE coin_id IN (${placeholders})
+         AND created_at <= $1
+         AND created_at >= $2
+         AND source = 'MARKET_TICK'
+         AND cycle_id IS NULL
+    ) ranked
+    WHERE rn = 1
+  `;
+  const { rows: histRows } = await queryable.query(histSql, [cutoff, epochStartedAt, ...coinIdList]);
+  for (const h of histRows) {
+    const p = parseNum(h.price);
+    if (p != null) pastPrices.set(Number(h.coin_id), p);
+  }
+  return pastPrices;
 }
 
 async function getPersistentMarketSignals({ queryable = db, now = new Date() } = {}) {
@@ -120,34 +160,12 @@ async function getPersistentMarketSignals({ queryable = db, now = new Date() } =
     // Provenance filter: only persistent writer rows (source='MARKET_TICK' AND cycle_id IS NULL).
     // Pre-epoch samples rejected using resolved world.epochStartedAtMs (readily available).
     const coinIdList = coinRows.map((r) => Number(r.coin_id));
-    const pastPrices = new Map();
-    if (coinIdList.length > 0) {
-      const lookbackMs = marketDomain.PUBLIC_SIGNAL_LOOKBACK_MS || 60000;
-      const cutoff = new Date(nowDate.getTime() - lookbackMs).toISOString();
-      const epochStartedAt = new Date(world.epochStartedAtMs).toISOString();
-      const placeholders = coinIdList.map((_, i) => `$${i + 3}`).join(', ');
-      const histSql = `
-        SELECT coin_id, price
-        FROM (
-          SELECT coin_id, price,
-                 ROW_NUMBER() OVER (PARTITION BY coin_id ORDER BY created_at DESC) AS rn
-            FROM price_history
-           WHERE coin_id IN (${placeholders})
-             AND created_at <= $1
-             AND created_at >= $2
-             AND source = 'MARKET_TICK'
-             AND cycle_id IS NULL
-        ) ranked
-        WHERE rn = 1
-      `;
-      const { rows: histRows } = await client.query(histSql, [cutoff, epochStartedAt, ...coinIdList]);
-      for (const h of histRows) {
-        const p = parseNum(h.price);
-        if (p != null) pastPrices.set(Number(h.coin_id), p);
-      }
-    }
+    const pastPrices = await loadCommittedPastPrices(client, {
+      coinIds: coinIdList,
+      nowMs: nowDate.getTime(),
+      epochStartedAtMs: world.epochStartedAtMs
+    });
 
-    const THRESH = marketDomain.PUBLIC_MOMENTUM_THRESHOLD_PCT;
     const coins = coinRows.map((row) => {
       const coinId = Number(row.coin_id);
       const currentPriceRaw = parseNum(row.current_price);
@@ -158,20 +176,15 @@ async function getPersistentMarketSignals({ queryable = db, now = new Date() } =
       // currentPrice always the direct DB value (authoritative for trades)
       const currentPrice = currentPriceRaw != null ? currentPriceRaw : 0;
 
-      let recentChangePct = null;
-      if (!isDead && pastPrices.has(coinId) && currentPriceRaw != null) {
-        const past = pastPrices.get(coinId);
-        if (past > 0) {
-          const pct = ((currentPriceRaw - past) / past) * 100;
-          recentChangePct = Math.round(pct * 100) / 100;
-        }
-      }
-
-      let momentum = 'FLAT';
-      if (recentChangePct !== null) {
-        if (recentChangePct > THRESH) momentum = 'UP';
-        else if (recentChangePct < -THRESH) momentum = 'DOWN';
-      }
+      // Shared with the persistent bot tick (persistentSignals) so bots and
+      // this endpoint always publish identical movement for the same data.
+      const recentChangePct = isDead
+        ? null
+        : persistentSignals.committedRecentChangePct(
+          currentPriceRaw,
+          pastPrices.has(coinId) ? pastPrices.get(coinId) : null
+        );
+      const momentum = persistentSignals.committedMomentum(recentChangePct);
 
       return {
         coinId,
@@ -209,5 +222,6 @@ async function getPersistentMarketSignals({ queryable = db, now = new Date() } =
 }
 
 module.exports = {
-  getPersistentMarketSignals
+  getPersistentMarketSignals,
+  loadCommittedPastPrices
 };

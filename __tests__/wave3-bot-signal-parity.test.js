@@ -13,14 +13,17 @@
 //     modifier per coin;
 //   * the shaped public coin state carries the exact allowlist keys — the
 //     modifier never leaks into the decision input;
-//   * the recomputed signal price matches the committed traded price
-//     exactly (parity through the shared engine).
+//   * the signal's price is the committed traded price exactly (bot
+//     signals are built from committed data — see
+//     persistent-bot-signals-snapshot.test.js for endpoint parity).
 
 const db = require('../db/connection');
 const marketSimulator = require('../models/market-simulator');
 const persistentWorld = require('../game/persistentWorld');
 const persistentBots = require('../game/persistentBots');
 const persistentSignals = require('../game/persistentSignals');
+const persistentMarketSignalsService = require('../game/persistentMarketSignalsService');
+const collapseRiskDomain = require('../game/collapseRiskDomain');
 const persistentCoinEventDomain = require('../game/persistentCoinEventDomain');
 const eventsModel = require('../models/persistentCoinEvents.model');
 const coinStateModel = require('../models/marketCoinState.model');
@@ -58,7 +61,7 @@ describe('Wave 3: persistent bot signal parity with the committed event modifier
       'SELECT count(*)::int AS n FROM persistent_coin_events WHERE world_id = $1', [world.worldId])).rows[0].n;
     expect(eventTotal).toBeGreaterThan(0); // the fixture genuinely carries events
 
-    const signalSpy = jest.spyOn(persistentSignals, 'computePersistentCoinSignal');
+    const signalSpy = jest.spyOn(persistentSignals, 'computeCommittedPersistentCoinSignal');
     const state = await persistentBots.buildPublicPersistentMarketState({
       world, account: null, nowMs: T2_MS, queryable: db
     });
@@ -79,14 +82,11 @@ describe('Wave 3: persistent bot signal parity with the committed event modifier
       // The shaped decision input price IS the committed traded price.
       const row = committed.rows.find((r) => r.coin_id === coin.coinId);
       expect(Object.is(coin.currentPrice, parseFloat(row.current_price))).toBe(true);
-      // The recomputed signal is well-formed. (Its internal price is the
-      // Stage 2 neutral-environment recompute; Director-environment parity
-      // of that recompute is pre-existing Stage 8 debt, out of Wave 3
-      // scope — the Wave 3 contract is the committed-modifier threading
-      // asserted above and the committed-price decision input.)
+      // The signal is built on the committed traded price (no recompute
+      // of the price: the committed-data signal path).
       const callIndex = signalSpy.mock.calls.findIndex((c) => Number(c[0].coinId) === coin.coinId);
-      const recomputed = signalSpy.mock.results[callIndex].value.currentPrice;
-      expect(Number.isFinite(recomputed) && recomputed > 0).toBe(true);
+      const signalPrice = signalSpy.mock.results[callIndex].value.currentPrice;
+      expect(Object.is(signalPrice, parseFloat(row.current_price))).toBe(true);
     }
     // At least one coin carried a nonzero modifier (the path is live).
     const anyNonZero = signalSpy.mock.calls.some((c) => (c[0].eventModifier ?? 0) !== 0);
@@ -136,6 +136,10 @@ describe('Wave 3 correction: zero current events preserve the baseline signal (e
   });
 
   test('the first tick commits no events and every live coin signal equals the no-event baseline exactly', async () => {
+    // Committed-data contract: phase/archetype come from the shared engine's
+    // current leg (baseline below); recent movement/momentum from committed
+    // prices, identical to GET /api/persistent/signals at the same instant;
+    // collapse risk from those same public observables.
     const world = await persistentWorld.resolveActiveWorld(db);
     // The expected first-roster one-tick event-free startup is unchanged.
     const eventTotal = (await db.query(
@@ -151,6 +155,7 @@ describe('Wave 3 correction: zero current events preserve the baseline signal (e
     });
     expect(() => persistentBots.assertPublicPersistentBotState(state)).not.toThrow();
     expect(state.coins.length).toBeGreaterThan(0);
+    const endpoint = await persistentMarketSignalsService.getPersistentMarketSignals({ queryable: db, now: new Date(T1_MS) });
 
     for (const coin of state.coins) {
       if (coin.dead) continue;
@@ -168,10 +173,21 @@ describe('Wave 3 correction: zero current events preserve the baseline signal (e
         config: CONFIG
       });
       expect(coin.phase).toBe(baseline.phase);
-      expect(coin.momentum).toBe(baseline.momentum);
       expect(coin.archetype).toBe(baseline.archetype);
-      expect(coin.collapseRisk).toBe(baseline.collapseRisk);
-      expect(Object.is(coin.recentChangePct, baseline.recentChangePct)).toBe(true);
+      const published = endpoint.coins.find((c) => c.coinId === coin.coinId);
+      expect(published).toBeDefined();
+      expect(coin.momentum).toBe(published.momentum);
+      expect(Object.is(coin.recentChangePct, published.recentChangePct)).toBe(true);
+      expect(coin.collapseRisk).toBe(collapseRiskDomain.getPersistentCollapseRisk({
+        seed: world.seed,
+        coinId: coin.coinId,
+        archetypeId: coin.archetype,
+        condition: cs ? cs.condition : 0,
+        phase: coin.phase,
+        momentum: published.momentum,
+        recentChangePct: published.recentChangePct,
+        nowMs: T1_MS
+      }));
       // The decision input price stays the committed traded price.
       const row = committed.rows.find((r) => r.coin_id === coin.coinId);
       expect(Object.is(coin.currentPrice, parseFloat(row.current_price))).toBe(true);
