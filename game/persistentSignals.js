@@ -148,6 +148,105 @@ function computePersistentCoinSignal({
   };
 }
 
+// ---------------------------------------------------------------------------
+// Committed-price public movement (the /api/persistent/signals contract).
+//
+// recentChangePct/momentum over COMMITTED prices: the current price is
+// coins.current_price and the comparison price is the last committed
+// persistent price tick at least one public lookback old (loaded by
+// persistentMarketSignalsService.loadCommittedPastPrices). These two pure
+// helpers are the single formula shared by the public endpoint and the
+// persistent bot tick, so both always publish identical movement for the
+// same committed data. No committed comparison price => null / FLAT.
+// ---------------------------------------------------------------------------
+function committedRecentChangePct(currentPrice, pastPrice) {
+  if (typeof currentPrice !== 'number' || !Number.isFinite(currentPrice)) return null;
+  if (typeof pastPrice !== 'number' || !Number.isFinite(pastPrice) || !(pastPrice > 0)) return null;
+  const pct = ((currentPrice - pastPrice) / pastPrice) * 100;
+  return Math.round(pct * 100) / 100;
+}
+
+function committedMomentum(recentChangePct) {
+  return recentChangePct === null || recentChangePct === undefined
+    ? 'FLAT'
+    : coarseMomentum(recentChangePct);
+}
+
+// The persistent public signal for one LIVE coin at one instant, built from
+// COMMITTED market data (the live bot-tick path).
+//
+//   * currentPrice / recentChangePct / momentum come from committed prices
+//     only (see committedRecentChangePct) — never from an epoch replay, so
+//     the cost is independent of the world's age (no bounded-walk guard).
+//   * phase comes from the current leg of the shared persistent pricing
+//     engine, resumed from the coin's latest committed checkpoint. The
+//     instant is max(nowMs, checkpoint.checkpointMs): a checkpoint the
+//     market writer committed after the caller fixed nowMs is the freshest
+//     committed state, never a "future" checkpoint to refuse. The pricing
+//     maths themselves are untouched.
+//   * collapseRisk is the same coarse public level, over the same public
+//     observables.
+function computeCommittedPersistentCoinSignal({
+  seed,
+  coinId,
+  archetypeId,
+  originMs,
+  nowMs,
+  structuralReference,
+  condition = 0,
+  environment = NEUTRAL_ENVIRONMENT,
+  eventModifier = 0,
+  pressureModifier = 0,
+  checkpoint = null,
+  currentPrice,
+  pastPrice = null,
+  config = resolveSimulationConfig()
+}) {
+  const archetype = marketDomain.MARKET_ARCHETYPES[archetypeId];
+  if (!archetype) {
+    throw new Error(`persistent signals require an explicit known archetype for coin ${String(coinId)}; received ${JSON.stringify(archetypeId)}`);
+  }
+  if (typeof condition !== 'number' || !Number.isFinite(condition) || condition < -1 || condition > 1) {
+    throw new Error(`persistent signals condition for coin ${String(coinId)} must be in [-1, 1]; received ${String(condition)}`);
+  }
+  if (typeof currentPrice !== 'number' || !Number.isFinite(currentPrice)) {
+    throw new Error(`persistent committed signal for coin ${String(coinId)} requires a finite committed currentPrice; received ${String(currentPrice)}`);
+  }
+  const checkpointMs = checkpoint && Number.isFinite(Number(checkpoint.checkpointMs))
+    ? Number(checkpoint.checkpointMs)
+    : null;
+  const phaseMs = checkpointMs !== null && checkpointMs > nowMs ? checkpointMs : nowMs;
+  const current = persistentPricing.computePersistentPrice({
+    seed, coinId, archetypeId, originMs, structuralReference,
+    environment, eventModifier, pressureModifier, checkpoint, config,
+    nowMs: phaseMs
+  });
+  const recentChangePct = committedRecentChangePct(currentPrice, pastPrice);
+  const momentum = committedMomentum(recentChangePct);
+
+  return {
+    coinId: Number(coinId),
+    archetype: archetypeId,
+    currentPrice,
+    recentChangePct,
+    phase: current.phase,
+    momentum,
+    typicalCycleMinutes: [archetype.cycleMs[0] / (60 * 1000), archetype.cycleMs[1] / (60 * 1000)],
+    typicalSwingPct: [archetype.swing[0] * 100, archetype.swing[1] * 100],
+    condition: persistentPricing.conditionLabel(condition),
+    collapseRisk: collapseRiskDomain.getPersistentCollapseRisk({
+      seed,
+      coinId,
+      archetypeId,
+      condition,
+      phase: current.phase,
+      momentum,
+      recentChangePct,
+      nowMs
+    })
+  };
+}
+
 // The minimal public marker for a DEAD persistent coin: only its death
 // and archetype identity — no phase/momentum/condition pretence (the same
 // dead-marker contract as the V2 signal; history is preserved, trading is
@@ -173,6 +272,9 @@ function deadPersistentSignal({ coinId, archetypeId }) {
 
 module.exports = {
   PERSISTENT_PUBLIC_SIGNAL_KEYS,
+  committedMomentum,
+  committedRecentChangePct,
+  computeCommittedPersistentCoinSignal,
   computePersistentCoinSignal,
   deadPersistentSignal
 };
