@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-10-01 — Frontend UI/UX overhaul ("After-Hours Exchange")
+
+Frontend only (`fcoins_y`); no backend routes, API contracts, auth, trading rules or deployment configuration changed.
+
+- New dark-first visual language (light theme retained) with shared tokens, Space Grotesk / Inter / JetBrains Mono, per-coin identity avatars, and direction always shown by glyph and word as well as colour.
+- One app shell for all player routes: sticky top bar, live world strip (Director mode, climate, Golden/Demon coins, live events, data freshness), phone bottom tab bar, footer.
+- Separate routes: Market (`/`), Coin (`/coin/:coinId`), Portfolio (`/portfolio`; `/profile` redirects), Leaderboard (`/leaderboard`), World (`/world`) and an in-shell not-found page. The internal Apocalypse monitor is unchanged and stays outside the player providers.
+- One shared trade ticket (inline on the coin page, bottom sheet elsewhere): quick-buy amounts, custom fractional quantity, sell-all, live estimate, a review step before every trade, explained disabled states, and a receipt built from the server's transaction.
+- Market board with filters/sort, top movers, sparklines and graveyard; World page for the Director, climate, roles, live events, Director log and market pulse; podium and gap-to-next standings on the leaderboard; day-grouped Buy/Sell ledger on the portfolio.
+- Unit prices under £1 shown to 4dp; event modifiers shown to 1dp.
+- Accessibility: one dialog component with focus trap, Escape and focus restore; live-region toasts; visible focus rings; 44px touch targets; reduced-motion support; WCAG AA token contrast in both themes.
+- Removed superseded and unreachable presentation components (including the old historical drill-down and modal coin detail), and stopped logging auth responses/tokens to the console.
+- Chart code split into lazy routes (main bundle ~165 kB, from ~550 kB). Fixed sparkline strokes being purged from the CSS build and the 10-second delay before World market stats appeared.
+- Gates: 342 unit tests, migrated UI contract, `tsc`, lint (0 errors), production build; browser-verified register/buy/sell/limits/expiry/re-login flows and phone-to-wide-desktop layouts against a disposable local backend.
+
 ## 2026-09-12 — Apocalypse backend cutover (continued)
 
 - Extracted `game/persistentBotProvisioning.js` (`createBotRandom`, `ensureBotsProvisioned`); live persistent bots no longer import the cycle `botService` decision engine.
