@@ -108,6 +108,8 @@ Never run `npm run seed` against production. A new deployment requires a one-tim
 - [`API_DOCUMENTATION.md`](API_DOCUMENTATION.md) — current endpoint map
 - [`docs/database_schema.md`](docs/database_schema.md) — current data model
 - [`docs/persistent-world-ops.md`](docs/persistent-world-ops.md) — production runbook
+- [`docs/architecture/coins-software-architecture.md`](docs/architecture/coins-software-architecture.md) — current human architecture report
+- [`docs/architecture/coins-software-architecture-llm.md`](docs/architecture/coins-software-architecture-llm.md) — LLM-oriented architecture reference
 - [`bugs.md`](bugs.md) — confirmed open and fixed defects
 - [`new_features.md`](new_features.md) — requested and planned work
 - [`changelog.md`](changelog.md) — curated release history

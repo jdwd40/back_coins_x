@@ -1,0 +1,651 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Coins software architecture</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<style>
+:root {
+  --bg: #0f1419;
+  --panel: #1a2332;
+  --text: #e7ecf3;
+  --muted: #9aa7b8;
+  --accent: #5b9fd4;
+  --border: #2a3a4f;
+  --code-bg: #0b1016;
+  --table-stripe: #151e2b;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.55;
+}
+.layout {
+  display: grid;
+  grid-template-columns: 280px 1fr;
+  min-height: 100vh;
+}
+nav {
+  position: sticky;
+  top: 0;
+  align-self: start;
+  max-height: 100vh;
+  overflow: auto;
+  padding: 1.25rem 1rem;
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+}
+nav h1 {
+  font-size: 1rem;
+  margin: 0 0 0.75rem;
+  color: var(--accent);
+}
+nav ol {
+  margin: 0;
+  padding-left: 1.1rem;
+  font-size: 0.85rem;
+}
+nav a { color: var(--muted); text-decoration: none; }
+nav a:hover { color: var(--accent); }
+main {
+  padding: 2rem 2.5rem 4rem;
+  max-width: 960px;
+}
+h1 { font-size: 1.85rem; margin-top: 0; }
+h2 {
+  margin-top: 2.25rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--border);
+  color: #cfe6ff;
+}
+h3 { margin-top: 1.4rem; color: #b8d4f0; }
+p { margin: 0.7rem 0; }
+strong { color: #fff; }
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.88em;
+  background: var(--code-bg);
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+}
+pre {
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.9rem 1rem;
+  overflow: auto;
+}
+pre code { border: 0; padding: 0; background: transparent; }
+.table-wrap { overflow-x: auto; margin: 1rem 0; }
+table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.92rem;
+}
+th, td {
+  border: 1px solid var(--border);
+  padding: 0.45rem 0.6rem;
+  text-align: left;
+  vertical-align: top;
+}
+th { background: var(--panel); }
+tr:nth-child(even) td { background: var(--table-stripe); }
+ul, ol { margin: 0.5rem 0 0.8rem 1.2rem; }
+hr { border: 0; border-top: 1px solid var(--border); margin: 1.5rem 0; }
+.mermaid {
+  background: #fff;
+  color: #111;
+  border-radius: 8px;
+  padding: 1rem;
+  margin: 1rem 0;
+  overflow-x: auto;
+}
+.meta {
+  color: var(--muted);
+  font-size: 0.95rem;
+}
+a { color: var(--accent); }
+@media (max-width: 900px) {
+  .layout { grid-template-columns: 1fr; }
+  nav { position: relative; max-height: none; }
+  main { padding: 1.25rem; }
+}
+</style>
+</head>
+<body>
+<div class="layout">
+<nav>
+  <h1>Coins architecture</h1>
+  <p class="meta">12 Sep 2026<br/>BE 4601dfa · FE 012631e</p>
+  <ol>
+    <li><a href="#1-coins-in-one-page">1. Coins in One Page</a></li><li><a href="#2-system-context">2. System Context</a></li><li><a href="#3-architecture-at-a-glance">3. Architecture at a Glance</a></li><li><a href="#4-repository-map">4. Repository Map</a></li><li><a href="#5-backend-architecture">5. Backend Architecture</a></li><li><a href="#6-frontend-architecture">6. Frontend Architecture</a></li><li><a href="#7-auth-sequence">7. Auth Sequence</a></li><li><a href="#8-buy-sequence-atomicity">8. Buy Sequence (Atomicity)</a></li><li><a href="#9-sell-sequence">9. Sell Sequence</a></li><li><a href="#10-market-simulation-actual-order">10. Market Simulation (Actual Order)</a></li><li><a href="#11-director">11. Director</a></li><li><a href="#12-coin-events">12. Coin Events</a></li><li><a href="#13-bots">13. Bots</a></li><li><a href="#14-coin-lifecycle">14. Coin Lifecycle</a></li><li><a href="#15-data-er">15. Data ER</a></li><li><a href="#16-sources-of-truth-table">16. Sources of Truth Table</a></li><li><a href="#17-runtime-flows-map">17. Runtime Flows Map</a></li><li><a href="#18-deployment">18. Deployment</a></li><li><a href="#19-testing">19. Testing</a></li><li><a href="#20-strengths">20. Strengths</a></li><li><a href="#21-risks-debt">21. Risks / Debt</a></li><li><a href="#22-glossary">22. Glossary</a></li><li><a href="#23-how-it-all-fits-together">23. How It All Fits Together</a></li>
+  </ol>
+</nav>
+<main>
+<h1>Coins Software Architecture</h1>
+
+<p><strong>Current as of:</strong> 12 September 2026 (Europe/London)  </p>
+<p><strong>Backend SHA:</strong> <code>4601dfa</code> (docs cleanup on top of runtime API <code>e69c019</code>)  </p>
+<p><strong>Frontend SHA:</strong> <code>012631e</code> (docs on <code>b755918</code>)  </p>
+<p><strong>Production branches:</strong> BE <code>main</code>, FE <code>master</code>  </p>
+<p><strong>Live API:</strong> https://jdwd40.com/api-2/api  </p>
+<p><strong>Live UI:</strong> https://jdwd40.com/coins/  </p>
+
+<p>Authority: <strong>code wins</strong> when docs disagree. This report is assembled from verified backend/frontend architecture notes and project docs (<code>project_plan.md</code>, <code>PRD.md</code>, <code>README</code>, <code>API_DOCUMENTATION.md</code>, <code>docs/database_schema.md</code>, <code>changelog.md</code>, <code>bugs.md</code>). Where evidence is incomplete, items are marked <strong>UNCERTAIN</strong>.</p>
+
+<hr/>
+
+<h2 id="1-coins-in-one-page">1. Coins in One Page</h2>
+
+<p>Coins is a continuous <strong>persistent market</strong> game: players hold GBP cash and coin positions in a single active world, prices tick every <strong>30 seconds</strong> on the server, and wealth ranks on a live leaderboard.</p>
+
+<div class="table-wrap"><table>
+<tr><th>Layer</th><th>What it does</th></tr>
+<tr><td><strong>Backend</strong> (Express + Postgres)</td><td>Authoritative prices, JWT auth, persistent economy trades, Adaptive + long-running Directors, coin events, bots, replacements</td></tr>
+<tr><td><strong>Frontend</strong> (Vite/React, basename <code>/coins</code>)</td><td>Player shell with Auth → Toast → PersistentProvider; 5s poll of leaderboard/signals/runtime/account; trades <code>{coin_id, quantity}</code></td></tr>
+<tr><td><strong>Workers (production only)</strong></td><td>Market writer 30s; bot worker ~60s; replacement worker 60s</td></tr>
+<tr><td><strong>Not primary anymore</strong></td><td>Apocalypse cycle game (<code>/api/game/*</code>, GameContext) — still mounted for compatibility / operator monitor</td></tr>
+</table></div>
+
+<p><strong>Starting cash:</strong> £10,000 on persistent account provision (register best-effort; first buy also provisions).  </p>
+<p><strong>Auth:</strong> Bearer JWT, 24h expiry, stored in FE <code>localStorage</code> as <code>token</code> / <code>user</code>.  </p>
+<p><strong>Open P1 bug:</strong> <code>GET/PUT/DELETE /api/users/:user_id</code> JWT-authenticated but <strong>no ownership check</strong>.</p>
+
+<hr/>
+
+<h2 id="2-system-context">2. System Context</h2>
+
+<div class="mermaid">
+flowchart LR
+  Player[Player browser<br/>jdwd40.com/coins]
+  Operator[Operator<br/>apocalypse-monitor]
+  FE[Frontend static<br/>/var/www/.../coins]
+  BE[Express API<br/>pm2 back_coins_x :3000]
+  PG[(PostgreSQL)]
+  GH[GitHub Actions]
+
+  Player --> FE
+  Player -->|HTTPS /api-2/api| BE
+  Operator -->|diagnostics token| BE
+  FE -.->|build rsync| GH
+  GH -->|SSH deploy| BE
+  BE --> PG
+</div>
+
+<ul><li><strong>UI host:</strong> nginx static at <code>/var/www/jdwd40.com/html/coins</code> (rsync <code>dist/</code>).</li><li><strong>API host:</strong> VPS <code>213.165.91.221:4020</code> SSH; app at <code>/home/jd/back_coins_x</code>; listens <code>:3000</code>.</li><li><strong>CORS:</strong> <code>FRONTEND_URL</code> + localhost/5173–5175/etc.; credentials allowed.</li></ul>
+
+<hr/>
+
+<h2 id="3-architecture-at-a-glance">3. Architecture at a Glance</h2>
+
+<div class="mermaid">
+flowchart TB
+  subgraph FE["Frontend /coins"]
+    Auth[AuthContext JWT]
+    PC[PersistentContext 5s]
+    UI[Market / Profile / Director]
+    Auth --> PC --> UI
+  end
+
+  subgraph BE["Backend Express"]
+    Routes["/api/persistent primary<br/>/api/coins /market /users<br/>legacy /game /transactions"]
+    MS[MarketSimulator 30s]
+    Bot[persistentBotWorker ~60s]
+    Rep[persistentReplacementWorker 60s]
+    Eco[persistentEconomy]
+    Routes --> Eco
+    MS --> PG[(Postgres)]
+    Bot --> Eco
+    Eco --> PG
+    Rep --> PG
+  end
+
+  UI -->|Bearer JWT| Routes
+  UI -->|public GET| Routes
+</div>
+
+<p><strong>Dual Directors (same batch):</strong></p>
+
+<ol><li><strong>Long regime</strong> — <code>GOLDEN_AGE|BOOM|BULL|BEAR|BUST|RECESSION</code> in <code>market_director_state</code> (hours-scale, seeded).</li><li><strong>Adaptive</strong> — <code>NORMAL|BOOM|BUST|RESCUE</code> in <code>director_control_state</code> (~minutes, refractory ~20m); Golden/Demon roles; public via <code>/runtime</code> (summary codes only).</li></ol>
+
+<hr/>
+
+<h2 id="4-repository-map">4. Repository Map</h2>
+
+<h3>Backend (<code>coins-arch-be</code> @ <code>4601dfa</code>)</h3>
+
+<div class="table-wrap"><table>
+<tr><th>Path</th><th>Role</th></tr>
+<tr><td><code>server.js</code></td><td>Bootstrap: JWT gate, DB ping, listen, prod workers, shutdown</td></tr>
+<tr><td><code>app.js</code></td><td>Express, CORS, routes, prod <code>marketSimulator.start()</code></td></tr>
+<tr><td><code>routes/</code></td><td>HTTP mounts (<code>persistent</code>, <code>coins</code>, <code>market</code>, <code>users</code>, <code>game</code>, <code>transactions</code>, diagnostics)</td></tr>
+<tr><td><code>controllers/</code></td><td>Thin handlers</td></tr>
+<tr><td><code>middleware/auth.middleware.js</code></td><td><code>authenticateToken</code></td></tr>
+<tr><td><code>game/</code></td><td>Persistent economy, directors, events, bots, replacement, pricing</td></tr>
+<tr><td><code>models/market-simulator.js</code></td><td>30s writer / <code>updateAllPrices</code></td></tr>
+<tr><td><code>models/*.model.js</code></td><td>DB access for state/history/users</td></tr>
+<tr><td><code>db/migrations/</code></td><td>Canonical <code>007</code>–<code>032_*.sql</code>; baseline 001–006</td></tr>
+<tr><td><code>db/migrate.js</code></td><td>Migration runner</td></tr>
+<tr><td><code>__tests__/</code></td><td>Jest serial suites</td></tr>
+<tr><td><code>.github/workflows/deploy.yml</code></td><td>Deploy on <code>main</code></td></tr>
+<tr><td><code>services/rollup-service.js</code></td><td><strong>DEAD</strong> (unimported)</td></tr>
+<tr><td><code>src/market/**</code></td><td>Nest stubs <strong>DEAD</strong></td></tr>
+</table></div>
+
+<h3>Frontend (notes @ <code>012631e</code>)</h3>
+
+<div class="table-wrap"><table>
+<tr><th>Path</th><th>Role</th></tr>
+<tr><td><code>src/main.tsx</code> / <code>App.tsx</code></td><td>Bootstrap; <code>basename=&quot;/coins&quot;</code></td></tr>
+<tr><td><code>src/context/AuthContext.tsx</code></td><td>Login/register, localStorage</td></tr>
+<tr><td><code>src/context/PersistentContext.tsx</code></td><td>5s <code>allSettled</code> poll</td></tr>
+<tr><td><code>src/services/persistentService.ts</code></td><td>Parsers + trade client</td></tr>
+<tr><td><code>src/services/apiConfig.ts</code></td><td>Default API base</td></tr>
+<tr><td>Player UI</td><td><code>GameMarketGrid</code>, <code>PersistentDirectorPanel</code>, <code>PersistentTradePanel</code>, Profile</td></tr>
+<tr><td>Internal</td><td><code>/internal/apocalypse-monitor</code></td></tr>
+<tr><td>Leftover</td><td><code>GameContext</code>, BuyForm/SellForm (unmounted)</td></tr>
+</table></div>
+
+<hr/>
+
+<h2 id="5-backend-architecture">5. Backend Architecture</h2>
+
+<h3>Process lifecycle</h3>
+
+<ol><li><code>npm start</code> → <code>node server.js</code> (<code>package.json</code> <code>&quot;main&quot;: &quot;index.js&quot;</code> is a <strong>meta mismatch</strong> — no <code>index.js</code>).</li><li>Production: require non-blank <code>JWT_SECRET</code> or exit.</li><li>DB ping → <code>app.listen(PORT\|\|3000)</code>.</li><li><strong>Production only after listen:</strong> <code>persistentBotWorker.start()</code>, <code>persistentReplacementWorker.start()</code>.</li><li><strong>Production only in <code>app.js</code>:</strong> <code>marketSimulator.start()</code> (30s ticks).</li><li>Legacy <code>gameCycleWorker</code> / <code>botWorker</code> / <code>economyWorker</code> are imported but <strong>not started</strong> in production.</li></ol>
+
+<h3>Route mounts (<code>app.js</code>)</h3>
+
+<div class="table-wrap"><table>
+<tr><th>Mount</th><th>Router</th><th>Role</th></tr>
+<tr><td><code>/api/coins</code></td><td>coinsRouter</td><td>Catalogue + price history</td></tr>
+<tr><td><code>/api/users</code></td><td>usersRouter</td><td>Register/login/profile</td></tr>
+<tr><td><code>/api/transactions</code></td><td>transactionsRouter</td><td><strong>Legacy</strong> funds/portfolios</td></tr>
+<tr><td><code>/api/market</code></td><td>marketRouter</td><td>status/stats/price-history</td></tr>
+<tr><td><code>/api/game</code></td><td>gameRouter</td><td><strong>Legacy</strong> cycle compat</td></tr>
+<tr><td><code>/api/persistent</code></td><td>persistentRouter</td><td><strong>Primary</strong> economy + signals/runtime</td></tr>
+<tr><td><code>/api/game/diagnostics</code></td><td>gameDiagnosticsRouter</td><td>Token-gated; <strong>404 if token unset</strong></td></tr>
+</table></div>
+
+<h3>Persistent API (primary)</h3>
+
+<div class="table-wrap"><table>
+<tr><th>Method</th><th>Path</th><th>Auth</th></tr>
+<tr><td>POST</td><td><code>/trades/buy</code>, <code>/trades/sell</code></td><td>JWT</td></tr>
+<tr><td>GET</td><td><code>/account</code>, <code>/transactions</code></td><td>JWT</td></tr>
+<tr><td>GET</td><td><code>/leaderboard</code>, <code>/signals</code>, <code>/runtime</code></td><td>public</td></tr>
+</table></div>
+
+<hr/>
+
+<h2 id="6-frontend-architecture">6. Frontend Architecture</h2>
+
+<ul><li><strong>Providers on player routes:</strong> <code>AuthProvider</code> → <code>ToastProvider</code> → <code>PersistentProvider</code>. <strong><code>GameContext</code> is not mounted.</strong></li><li><strong>Routes:</strong> <code>/</code> Market, <code>/profile</code>, <code>/internal/apocalypse-monitor</code> (no player providers).</li><li><strong>PersistentContext:</strong> every <strong>5s</strong>, <code>Promise.allSettled</code> of leaderboard + signals + runtime + (account if authed).</li><li><strong>Runtime stale:</strong> <code>directorUnavailable</code> if last runtime success older than <strong>15s</strong>, or runtime null with error, or active world with null director.</li><li><strong>Trade body:</strong> <code>{ coin_id, quantity }</code> only — no client price.</li><li><strong>Charts:</strong> 5M UI range maps to <strong>10M</strong> API then client-window; sparklines from <code>/coins/:id/price-history</code>.</li><li><strong>Dual surfaces on <code>/</code>:</strong> primary persistent grid vs secondary <code>#markets</code> classic feeds (<code>useFetch</code> <strong>2s</strong> poll of <code>/coins</code>, <code>/market/stats</code>, <code>/market/status</code>).</li><li><strong>Title debt:</strong> <code>index.html</code> still “Apocalypse Exchange”.</li></ul>
+
+<hr/>
+
+<h2 id="7-auth-sequence">7. Auth Sequence</h2>
+
+<div class="mermaid">
+sequenceDiagram
+  participant U as User
+  participant FE as AuthContext
+  participant BE as /api/users
+  participant PE as persistentEconomy
+
+  U->>FE: Register
+  FE->>BE: POST /register
+  BE->>BE: createUser
+  BE-->>PE: provisionPersistentAccount (best-effort)
+  FE->>BE: POST /login (auto)
+  BE-->>FE: { token, user? } JWT 24h
+  FE->>FE: localStorage token + user
+
+  U->>FE: Login
+  FE->>BE: POST /login
+  BE-->>FE: JWT
+  Note over FE: getAuthToken validates exp;<br/>401 → SessionExpiredError → logout
+
+  Note over BE: GET/PUT/DELETE /users/:user_id<br/>JWT ok but NO ownership check (P1)
+</div>
+
+<hr/>
+
+<h2 id="8-buy-sequence-atomicity">8. Buy Sequence (Atomicity)</h2>
+
+<div class="mermaid">
+sequenceDiagram
+  participant FE as PersistentTradePanel
+  participant R as buyPersistent
+  participant E as buyPersistentTrade
+  participant DB as Postgres
+
+  FE->>R: POST /persistent/trades/buy {coin_id,quantity}
+  R->>R: authenticateToken
+  R->>E: userId from JWT
+  E->>DB: resolveActiveWorld (outside txn)
+  E->>DB: BEGIN
+  E->>DB: LOCK coin FOR UPDATE
+  Note over E: reject missing / retired / DEAD / price≤0
+  E->>DB: lockOrProvisionAccount (£10k)
+  E->>DB: UPDATE cash WHERE cash>=total
+  E->>DB: upsert holdings + cost_basis
+  E->>DB: INSERT persistent_transactions BUY
+  E->>DB: getPersistentAccountState
+  E->>DB: COMMIT
+  R-->>FE: 201 { transaction, account }
+  FE->>FE: adopt account → syncNow()
+</div>
+
+<p><strong>Invariants:</strong> server-locked price only; min notional £0.01; coins-before-account lock order; single-client txn.</p>
+
+<hr/>
+
+<h2 id="9-sell-sequence">9. Sell Sequence</h2>
+
+<p>Same auth/controller shape as buy. Differences:</p>
+
+<div class="table-wrap"><table>
+<tr><th>Step</th><th>Buy</th><th>Sell</th></tr>
+<tr><td>Retired coin</td><td><strong>Rejected</strong></td><td><strong>Not checked</strong> (code asymmetry — <strong>UNCERTAIN</strong> if intentional)</td></tr>
+<tr><td>DEAD / price ≤0</td><td>Rejected</td><td>Rejected</td></tr>
+<tr><td>Holding lock</td><td>N/A</td><td><code>persistent_holdings FOR UPDATE</code></td></tr>
+<tr><td>Cash</td><td>Debit with <code>cash &gt;= total</code></td><td>Credit <code>cash + total</code></td></tr>
+<tr><td>Cost basis</td><td><code>+= total</code></td><td>Proportionate reduce</td></tr>
+<tr><td>Ledger</td><td><code>BUY</code></td><td><code>SELL</code></td></tr>
+<tr><td>After death</td><td>N/A</td><td>Holdings remain, value £0, <strong>unsellable</strong></td></tr>
+</table></div>
+
+<hr/>
+
+<h2 id="10-market-simulation-actual-order">10. Market Simulation (Actual Order)</h2>
+
+<p>Cadence: <strong>30s</strong> (<code>priceUpdateInterval</code>); immediate tick on <code>start()</code>; on interval error recover in <strong>5s</strong>. Pricing state is <strong>DB-backed</strong> (checkpoints + director cursors); process memory holds only lifecycle flags + <code>lastBatch</code> for <code>/market/status</code>.</p>
+
+<div class="mermaid">
+flowchart TD
+  A[resolveActiveWorld BEFORE txn] --> B[BEGIN]
+  B --> C[LOCK coins FOR UPDATE ORDER BY coin_id]
+  C --> D[loadCoinStates / loadDirectorState / loadCheckpoints]
+  D --> E[runAdaptiveDirectorEvaluation]
+  E --> F{committed?}
+  F -->|yes| G[appendDirectorDecision]
+  F -->|no| H[planAdaptiveEventTargets]
+  G --> H
+  H --> I[reconcilePersistentCoinEvents]
+  I --> J[createMarketDirectorProvider + resume cursor]
+  J --> K[Per live coin loop]
+  K --> K1[eventModifier capped]
+  K1 --> K2[persistentPriceAt]
+  K2 --> K3[advance condition/refs + checkpoint]
+  K3 --> K4{authoritative death?}
+  K4 -->|die| K5[apply death price 0 continue]
+  K4 -->|live| K6[UPDATE price + INSERT price_history MARKET_TICK cycle_id NULL]
+  K5 --> L
+  K6 --> L[upsertDirectorState long regime]
+  L --> M[INSERT market_history]
+  M --> N[reconcileActivePeaks legacy]
+  N --> O[COMMIT]
+</div>
+
+<p><strong>Lock order:</strong> coins first → world (inside adaptive upsert) → director/state/checkpoints. <strong>Inverse order risks deadlock.</strong></p>
+
+<hr/>
+
+<h2 id="11-director">11. Director</h2>
+
+<h3>Long-running (<code>game/marketDirector.js</code>)</h3>
+
+<ul><li>Regimes: <code>GOLDEN_AGE | BOOM | BULL | BEAR | BUST | RECESSION</code></li><li>Seeded deterministic walk; durations typically <strong>hours</strong></li><li>Persisted in <code>market_director_state</code></li><li>Public surface via signals: <strong>regime + intensity only</strong></li></ul>
+
+<h3>Adaptive (<code>game/adaptiveDirector.js</code> + runtime)</h3>
+
+<ul><li>Modes: <code>NORMAL | BOOM | BUST | RESCUE</code></li><li>Evaluated <strong>inside each 30s batch</strong> (not a separate worker). Config <code>cadenceMs=1min</code> is a <strong>validation lower bound</strong>, not a timer.</li><li>Windows often 8–14m NORMAL; interventions 2–10m; refractory ~<strong>20m</strong> (emergency 5m)</li><li>Golden / Demon: at most one each, never same coin; Demon is a control signal, not a death sentence</li><li>Persisted in <code>director_control_state</code> (+ mig 030/031 refractory fields)</li><li>Audit: <code>director_decision_history</code> unique <code>(world_id, decision_index)</code>; public <strong>summary codes only</strong> (no seed/raw reason)</li></ul>
+
+<p><strong>Stale comment:</strong> <code>simulationConfig</code> still says persistentEvents/directorControl “NOT wired” — <strong>false</strong>; Wave 3 writer wiring is live on main (<code>e69c019</code> + FE Wave4 panel).</p>
+
+<hr/>
+
+<h2 id="12-coin-events">12. Coin Events</h2>
+
+<div class="table-wrap"><table>
+<tr><th>Aspect</th><th>Fact</th></tr>
+<tr><td>Table</td><td><code>persistent_coin_events</code> (mig 029)</td></tr>
+<tr><td>Created</td><td><code>reconcilePersistentCoinEvents</code> in same market batch txn</td></tr>
+<tr><td>Duration</td><td><strong>1–15 minutes</strong></td></tr>
+<tr><td>Max active</td><td><strong>5</strong> per coin; net modifier capped (~0.06)</td></tr>
+<tr><td>Apply</td><td>Same <code>eventModifier</code> once into price <strong>and</strong> condition advance</td></tr>
+<tr><td>Public</td><td><code>/api/persistent/runtime</code> per-coin events + net modifiers</td></tr>
+<tr><td>Legacy</td><td><code>apocalypse_coin_events</code> / <code>coinEventEngine</code> — cycle path only</td></tr>
+</table></div>
+
+<p><strong>Doc vs code:</strong> <code>/market/status</code> events field is effectively <strong>always empty</strong> (writer comment) — secondary FE <code>#markets</code> CoinDetail still reads it; primary UI uses runtime events.</p>
+
+<hr/>
+
+<h2 id="13-bots">13. Bots</h2>
+
+<div class="table-wrap"><table>
+<tr><th>Aspect</th><th>Fact</th></tr>
+<tr><td>Worker</td><td><code>persistentBotWorker</code> → <code>runPersistentBotTick</code></td></tr>
+<tr><td>Cadence</td><td>Default <strong>60s</strong> (<code>GAME_BOT_TICK_INTERVAL_MS</code> 1s–10m)</td></tr>
+<tr><td>Idempotency</td><td><code>persistent_bot_ticks</code> PK <code>(world_id, tick_id)</code>; <code>tickId = floor(now/interval)</code></td></tr>
+<tr><td>Roster</td><td>4: conservative / momentum / dip_buyer / reckless</td></tr>
+<tr><td>Economy</td><td>Same <code>buyPersistentTrade</code> / <code>sellPersistentTrade</code> (not HTTP)</td></tr>
+<tr><td>Loans</td><td>Bot-only <code>persistent_loans</code>; humans debt=0 on leaderboard formula</td></tr>
+<tr><td>Skip</td><td>No active world → skip</td></tr>
+<tr><td>Legacy</td><td><code>botWorker</code> <strong>not started</strong> in production</td></tr>
+</table></div>
+
+<hr/>
+
+<h2 id="14-coin-lifecycle">14. Coin Lifecycle</h2>
+
+<div class="mermaid">
+stateDiagram-v2
+  [*] --> ALIVE: roster / replacement insert
+  ALIVE --> DEAD: authoritative death riskThreshold
+  DEAD --> retired: replacement soft-retire
+  retired --> [*]
+  note right of DEAD: price forced 0\nnever revived\nholdings remain value 0
+</div>
+
+<ul><li>Death decided <strong>after</strong> living price calc via <code>decideAuthoritativePersistentDeath</code> (collapse-risk ≥ threshold — <strong>not</strong> living price floor alone).</li><li>Replacement worker every 60s: <code>reconcilePersistentReplacements</code>; authored pool; <strong>≤1</strong> replacement per eligible death after delay (<strong>6h</strong> per plan/config).</li></ul>
+
+<hr/>
+
+<h2 id="15-data-er">15. Data ER</h2>
+
+<div class="mermaid">
+erDiagram
+  market_worlds ||--|| market_director_state : has
+  market_worlds ||--|| director_control_state : has
+  market_worlds ||--o{ market_coin_state : tracks
+  market_worlds ||--o{ director_decision_history : audits
+  market_worlds ||--o{ persistent_coin_events : events
+  market_worlds ||--o{ persistent_accounts : economy
+  market_worlds ||--o{ persistent_bot_ticks : claims
+  coins ||--o{ market_coin_state : state
+  coins ||--o{ price_history : ticks
+  coins ||--o{ market_price_checkpoints : resume
+  persistent_accounts ||--o{ persistent_holdings : holds
+  persistent_accounts ||--o{ persistent_transactions : ledger
+  persistent_accounts ||--o{ persistent_loans : bot_debt
+  users ||--o{ persistent_accounts : owns
+</div>
+
+<p>Also: <code>market_history</code>, <code>schema_migrations</code>. Legacy <code>apocalypse_*</code>, <code>portfolios</code>, <code>transactions</code>, <code>users.funds</code> remain for compat/monitor.</p>
+
+<p><strong>Migrations:</strong> runner executes <strong>007–032</strong> (<code>032_create_director_decision_history.sql</code>); 001–006 baseline; non-canonical SQL files not executed.</p>
+
+<hr/>
+
+<h2 id="16-sources-of-truth-table">16. Sources of Truth Table</h2>
+
+<div class="table-wrap"><table>
+<tr><th>Concept</th><th>Authority</th><th>Competing / legacy</th></tr>
+<tr><td>Current price</td><td><code>coins.current_price</code> (writer)</td><td>Legacy cycle/collapse paths price-neutral when world active</td></tr>
+<tr><td>Player cash</td><td><code>persistent_accounts.cash</code></td><td><code>users.funds</code>, apocalypse participant cash</td></tr>
+<tr><td>Holdings</td><td><code>persistent_holdings</code></td><td><code>portfolios</code>, <code>apocalypse_holdings</code></td></tr>
+<tr><td>Player charts</td><td><code>price_history</code> where <code>source=&#x27;MARKET_TICK&#x27; AND cycle_id IS NULL</code></td><td>Cycle-scoped / null-provenance rows</td></tr>
+<tr><td>Long Director</td><td><code>market_director_state</code></td><td>—</td></tr>
+<tr><td>Adaptive Director</td><td><code>director_control_state</code></td><td>—</td></tr>
+<tr><td>Events (player)</td><td><code>persistent_coin_events</code></td><td><code>apocalypse_coin_events</code>; empty <code>/market/status</code> events</td></tr>
+<tr><td>Bot wealth</td><td>Same accounts/holdings/debt</td><td>apocalypse bot tables</td></tr>
+<tr><td>World</td><td>Single active <code>market_worlds</code></td><td>Verifier fails closed</td></tr>
+</table></div>
+
+<hr/>
+
+<h2 id="17-runtime-flows-map">17. Runtime Flows Map</h2>
+
+<div class="table-wrap"><table>
+<tr><th>Flow</th><th>Trigger</th><th>Cadence</th><th>Entry</th></tr>
+<tr><td>Market tick</td><td>Prod <code>marketSimulator.start</code></td><td>30s</td><td><code>updateAllPrices</code></td></tr>
+<tr><td>Adaptive Director</td><td>Inside tick</td><td>Per batch / window endsAt</td><td><code>runAdaptiveDirectorEvaluation</code></td></tr>
+<tr><td>Coin events</td><td>Inside tick</td><td>Per batch</td><td><code>reconcilePersistentCoinEvents</code></td></tr>
+<tr><td>Bot tick</td><td>Prod bot worker</td><td>~60s</td><td><code>runPersistentBotTick</code></td></tr>
+<tr><td>Replacement</td><td>Prod replacement worker</td><td>60s</td><td><code>reconcilePersistentReplacements</code></td></tr>
+<tr><td>FE primary poll</td><td>PersistentContext</td><td>5s</td><td>signals/runtime/leaderboard/account</td></tr>
+<tr><td>FE classic secondary</td><td><code>useFetch</code> on Market</td><td>2s</td><td><code>/coins</code>, <code>/market/stats</code>, <code>/market/status</code></td></tr>
+<tr><td>FE charts refresh</td><td>App <code>refreshTrigger</code></td><td>30s</td><td>secondary charts only</td></tr>
+</table></div>
+
+<hr/>
+
+<h2 id="18-deployment">18. Deployment</h2>
+
+<h3>Backend (<code>.github/workflows/deploy.yml</code>, push <code>main</code>)</h3>
+
+<ol><li>SSH VPS → <code>cd /home/jd/back_coins_x</code></li><li><code>git fetch</code> + <code>reset --hard origin/main</code></li><li><code>npm install</code></li><li><code>NODE_ENV=production npm run migrate</code></li><li><code>verify:game-schema</code> + <code>verify:persistent-world</code></li><li><code>pm2 restart back_coins_x</code></li><li>Health: <code>curl :3000/api/coins</code></li><li>Signals: <code>/api/persistent/signals</code> requires <code>worldId</code> + <code>coins.length &gt; 0</code></li></ol>
+
+<p>Does <strong>not</strong> run <code>provision:persistent-world</code> on normal deploy.</p>
+
+<h3>Frontend</h3>
+
+<ol><li><code>npm ci</code> → <code>test:ui</code> + <code>tsc --noEmit</code> → <code>build</code></li><li>rsync <code>dist/</code> → <code>/var/www/jdwd40.com/html/coins</code></li><li>curl live <code>/coins/</code></li><li><strong>Does not run <code>test:unit</code></strong> in deploy</li></ol>
+
+<hr/>
+
+<h2 id="19-testing">19. Testing</h2>
+
+<h3>Backend</h3>
+
+<ul><li>Jest <code>__tests__/</code> <strong>serial</strong> (<code>--runInBand</code>)</li><li>Strong coverage: <code>persistent-economy-db</code>, <code>persistent-api</code>, <code>market-persistent-writer</code>, <code>adaptive-director*</code>, <code>persistent-coin-event*</code>, <code>persistent-bots</code>, <code>persistent-coin-death</code>, <code>persistent-replacement</code>, <code>persistent-runtime-api</code>, <code>deploy-workflow</code>, <code>verify-persistent-world</code>, <code>price-history-provenance</code></li><li>Many leftover <strong>cycle-era</strong> suites still run</li></ul>
+
+<h3>Frontend</h3>
+
+<ul><li><code>test:unit</code> — parsers, gates, chart sanitize, sync-gate, etc.</li><li><code>test:ui</code> — source contract (~1260 lines): PersistentProvider only, trade body shape, single timer, Wave4 panel, no hard-coded host outside <code>apiConfig</code></li><li>Deploy gates on UI contract + tsc + build only</li></ul>
+
+<hr/>
+
+<h2 id="20-strengths">20. Strengths</h2>
+
+<ul><li>Clear <strong>primary</strong> persistent path separated from legacy mounts</li><li><strong>Atomic</strong> buy/sell with server-locked prices and coins-before-account locking</li><li>Deterministic seeded Directors + event identity → reproducible simulation</li><li>Bot tick claims prevent double-trading across processes</li><li>Price history <strong>provenance</strong> filters protect player charts from Apocalypse data</li><li>Deploy verifies schema + live world signals before declaring healthy</li><li>FE sync-gate prevents stale account apply across logout/user switch</li><li>Strong Jest / UI-contract coverage on hot paths</li></ul>
+
+<hr/>
+
+<h2 id="21-risks-debt">21. Risks / Debt</h2>
+
+<h3>Immediate</h3>
+
+<ul><li><strong>P1 IDOR:</strong> authenticated profile routes lack ownership check (<code>bugs.md</code>)</li><li>Auth FE default fabricated <code>funds: 1000</code> vs £10k persistent narrative</li><li>Dual event models: primary runtime vs secondary <code>/market/status</code> (empty events)</li></ul>
+
+<h3>Maintainability</h3>
+
+<ul><li>Stale <code>simulationConfig</code> “NOT wired” comments; README FE table omits Wave4 director panel</li><li><code>package.json</code> <code>main: index.js</code> vs <code>server.js</code></li><li>Classic 2s vs persistent 5s polls on same page</li><li>FE deploy skips <code>test:unit</code></li><li><code>project_plan</code> once said Wave4 runtime not deployed — <strong>now it is</strong> on main</li></ul>
+
+<h3>Legacy</h3>
+
+<ul><li>Mounted <code>/api/game/*</code>, <code>/api/transactions/*</code>, unmounted GameContext / BuyForm / SellForm</li><li>Writer still calls <code>reconcileActivePeaks</code> (compat)</li><li>Registration still best-effort <code>joinRound</code></li><li>Dead <code>rollup-service</code>, Nest <code>src/market</code></li></ul>
+
+<h3>Acceptable</h3>
+
+<ul><li>Apocalypse monitor kept as internal operator tool</li><li>Compatibility exports retained until Stage-style contract retirement</li><li>Single-pm2 writer assumption (multi-instance <strong>UNCERTAIN</strong>)</li></ul>
+
+<hr/>
+
+<h2 id="22-glossary">22. Glossary</h2>
+
+<div class="table-wrap"><table>
+<tr><th>Term</th><th>Meaning</th></tr>
+<tr><td>Persistent world</td><td>Single active <code>market_worlds</code> row; continuous market</td></tr>
+<tr><td>MARKET_TICK + null cycle</td><td>Persistent price history provenance</td></tr>
+<tr><td>Long Director</td><td>Hours-scale regime chain</td></tr>
+<tr><td>Adaptive Director</td><td>Short mode/roles/events inside writer batch</td></tr>
+<tr><td>Golden / Demon</td><td>Adaptive spotlight roles (not death)</td></tr>
+<tr><td>eventModifier</td><td>Capped net active event effect on price/condition</td></tr>
+<tr><td>Provision</td><td>Create <code>persistent_accounts</code> with £10k</td></tr>
+<tr><td>Authoritative death</td><td>Irreversible DEAD + price 0</td></tr>
+<tr><td>Replacement</td><td>Authored new coin after death delay</td></tr>
+<tr><td>PlayerShell</td><td>Auth+Toast+Persistent providers</td></tr>
+<tr><td>SessionExpiredError</td><td>FE 401 handler → logout</td></tr>
+<tr><td>Refractory</td><td>~20m cooldown after adaptive intervention</td></tr>
+</table></div>
+
+<hr/>
+
+<h2 id="23-how-it-all-fits-together">23. How It All Fits Together</h2>
+
+<div class="mermaid">
+flowchart TB
+  subgraph Client
+    A[Auth JWT localStorage]
+    P[PersistentContext 5s]
+    M[Market UI + Director panel]
+    T[Trade buy/sell]
+    A --> P --> M
+    M --> T
+  end
+
+  subgraph API["Express :3000"]
+    PR["/api/persistent"]
+    CO["/api/coins history"]
+    LG["legacy /game /transactions"]
+  end
+
+  subgraph Runtime["Production workers"]
+    W[MarketSimulator 30s]
+    B[Bots 60s]
+    R[Replacement 60s]
+  end
+
+  subgraph Core["Same DB world"]
+    Dir[Long + Adaptive Directors]
+    Ev[Coin events]
+    Eco[persistentEconomy]
+    Px[persistentPricing]
+    Death[Death + Replacement]
+  end
+
+  DB[(Postgres)]
+
+  T --> PR --> Eco
+  P --> PR
+  M --> CO
+  W --> Dir --> Ev --> Px --> DB
+  W --> Death
+  B --> Eco
+  Eco --> DB
+  R --> Death
+  Death --> DB
+  LG -.->|compat only| DB
+</div>
+
+<p><strong>Bottom line:</strong> players interact only with the persistent economy and runtime/signals surfaces; a single production writer batch advances prices, directors, and events under a strict lock order; bots and replacements share that world; legacy Apocalypse code remains mounted but is not the production gameplay path as of <strong>12 Sep 2026</strong>.</p>
+
+<hr/>
+
+<p>*End of human architecture report. SHAs BE <code>4601dfa</code> / FE <code>012631e</code>.*</p>
+</main>
+</div>
+<script>
+  mermaid.initialize({ startOnLoad: true, theme: 'neutral', securityLevel: 'loose' });
+</script>
+</body>
+</html>
