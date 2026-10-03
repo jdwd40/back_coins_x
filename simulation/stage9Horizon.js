@@ -34,6 +34,7 @@ const marketDomain = require('../game/marketDomain');
 const persistentCoinEventDomain = require('../game/persistentCoinEventDomain');
 const persistentCoinEventRuntime = require('../game/persistentCoinEventRuntime');
 const { planAdaptiveEventTargets } = require('../game/adaptiveDirectorEventPlan');
+const { reduceSnapshot } = require('../game/adaptiveDirectorObservation');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
@@ -99,6 +100,12 @@ function initialCoinState(coin, introducedAtMs) {
     eventLedger: [], // surviving (not-yet-expired) planned persistent events
     eventSeqCursor: 0, // monotone per-coin sequence anchor (expired included)
     lastEventModifier: 0,
+    // Adaptive closed loop: the per-coin MARKET_TICK log the Director
+    // observation reduces (mirrors persistent price_history rows), and the
+    // running living peak / worst drawdown for long-horizon reporting.
+    obsTicks: [],
+    peakSeen: coin.reference,
+    maxDrawdownSeen: 0,
     status: 'ALIVE',
     diedAt: null,
     introducedAtMs,
@@ -184,6 +191,9 @@ function reconcileDomain({
     state.generation = 1;
     state.checkpoint = checkpoint;
     state.priceWindow = [{ atMs: nowMs, price: validated.startingPrice }];
+    // S9-03 inserts an introduction MARKET_TICK row at the starting price;
+    // the observation tick log mirrors it.
+    state.obsTicks = [{ atMs: nowMs, price: validated.startingPrice }];
     state.lastPrice = validated.startingPrice;
 
     world.push({ coin, state });
@@ -331,6 +341,11 @@ function stepAliveCoin({
   }
 
   state.priceWindow.push({ atMs: nowMs, price });
+  // The committed MARKET_TICK the next Director observation will read.
+  state.obsTicks.push({ atMs: nowMs, price });
+  if (price > state.peakSeen) state.peakSeen = price;
+  const livingDrawdown = 1 - price / state.peakSeen;
+  if (livingDrawdown > state.maxDrawdownSeen) state.maxDrawdownSeen = livingDrawdown;
   state.condition = nextCondition;
   state.structuralReference = nextReference;
   state.peakReference = nextPeak;
@@ -348,6 +363,8 @@ function stepAliveCoin({
     state.status = 'DEAD';
     state.diedAt = nowMs;
     state.lastPrice = 0;
+    // S9-01 writes a final zero-price MARKET_TICK at the death instant.
+    state.obsTicks.push({ atMs: nowMs, price: 0 });
     events.deaths.push({
       coinId: coin.coinId,
       symbol: coin.symbol,
@@ -484,6 +501,72 @@ function replayFingerprint(result) {
   };
 }
 
+// Adaptive closed loop (long-term-balancing evidence): the bounded
+// Director observation for the CURRENT in-memory world, reduced through
+// the REAL production observation semantics (reduceSnapshot — the same
+// pure reduction the DB-backed builder runs over persisted rows). Row
+// shapes mirror the production queries exactly: coin rows carry the last
+// committed price/state, tick rows are the per-coin MARKET_TICK log
+// window-bound and epoch-clipped like the production SQL (lower bound
+// exclusive), death/replacement rows are window-filtered by the reduction
+// itself. The macro comes from the SAME environment provider the pricing
+// path consumes, so a provider used with the adaptive loop must expose
+// regimeAt (the Market Director provider does).
+function buildLoopObservation({ world, seed, originMs, nowMs, environment, config }) {
+  if (typeof environment.regimeAt !== 'function') {
+    throw new Error('stage9 horizon adaptive loop requires an environment provider with regimeAt (e.g. the Market Director provider)');
+  }
+  const dc = config.directorControl;
+  const lookbackStartMs = Math.max(nowMs - dc.observationLookbackMs, originMs);
+  const coinRows = [];
+  const tickRows = [];
+  const deathRows = [];
+  const replacementRows = [];
+  for (const entry of world) {
+    const { coin, state } = entry;
+    const alive = state.status === 'ALIVE';
+    coinRows.push({
+      coin_id: coin.coinId,
+      current_price: alive ? state.lastPrice : 0,
+      retired: !alive,
+      archetype: coin.archetypeId,
+      condition: state.condition,
+      structural_reference: state.structuralReference,
+      peak_reference: state.peakReference,
+      status: state.status
+    });
+    // Window-bound the in-memory tick log exactly as the production SQL
+    // bounds price_history (and prune it: elapsed ticks can never
+    // re-enter the forward-moving window).
+    state.obsTicks = state.obsTicks.filter((t) => t.atMs > lookbackStartMs && t.atMs <= nowMs);
+    for (const t of state.obsTicks) {
+      tickRows.push({ coin_id: coin.coinId, price: t.price, created_at: new Date(t.atMs).toISOString() });
+    }
+    if (!alive && state.diedAt !== null) {
+      deathRows.push({ coin_id: coin.coinId, died_at: new Date(state.diedAt).toISOString() });
+    }
+    replacementRows.push({ coin_id: coin.coinId, created_at: new Date(state.introducedAtMs).toISOString() });
+  }
+  // Canonical ordering, matching the production ORDER BY clauses.
+  tickRows.sort((a, b) => a.coin_id - b.coin_id || (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0));
+  const located = environment.regimeAt(nowMs);
+  return reduceSnapshot({
+    coinRows,
+    tickRows,
+    deathRows,
+    replacementRows,
+    macro: {
+      regime: located.regime,
+      regimeIndex: located.regimeIndex,
+      intensity: located.intensity,
+      environment: environment.environmentAt(nowMs)
+    },
+    nowMs,
+    world: { worldId: HORIZON_WORLD_ID, seed, epochStartedAtMs: originMs },
+    config
+  });
+}
+
 function runStage9Horizon({
   days = 30,
   cadenceMinutes = 60,
@@ -493,6 +576,8 @@ function runStage9Horizon({
   replacementDelayMs = replacementPool.DEFAULT_REPLACEMENT_CONFIG.replacementDelayMs,
   replacementConfig = null,
   earlyChurnMs = DAY_MS,
+  adaptiveDirector = false,
+  directorDomain = null,
   log = () => {}
 } = {}) {
   if (!(days > 0) || !(cadenceMinutes > 0)) {
@@ -514,6 +599,29 @@ function runStage9Horizon({
   const environment = typeof provider === 'string'
     ? createEnvironmentProvider(provider, { seed, originMs })
     : provider;
+
+  // Adaptive closed loop (long-term-balancing evidence): when enabled, the
+  // synthetic per-step NORMAL decision is replaced by the REAL adaptive
+  // Director — the bounded observation is reduced from the evolving world
+  // (buildLoopObservation), the pure decision domain evaluates it with the
+  // committed control state threaded exactly as the runtime does
+  // (game/adaptiveDirectorRuntime.js), and the committed decision drives
+  // the SAME Wave 2 planner + Wave 1 reconcile path below. directorDomain
+  // is injectable so one harness build can run the baseline and patched
+  // domains against identical initial conditions.
+  const adaptive = adaptiveDirector === true;
+  const director = adaptive
+    ? (directorDomain || require('../game/adaptiveDirector'))
+    : null;
+  if (adaptive && typeof director.evaluateAdaptiveDirectorDecision !== 'function') {
+    throw new Error('stage9 horizon adaptive loop requires a director domain exposing evaluateAdaptiveDirectorDecision');
+  }
+  let controlState = null;
+  const decisionLog = [];
+  const modeStepCounts = { NORMAL: 0, BOOM: 0, BUST: 0, RESCUE: 0 };
+  const stepsPerDay = Math.max(1, Math.round(DAY_MS / cadenceMs));
+  const dailyPrices = [];
+  const dailyObservations = [];
 
   const authoredIds = new Set(
     replacementPool.loadReplacementRoster(effectiveReplacementConfig).map((entry) => entry.coinId)
@@ -548,17 +656,70 @@ function runStage9Horizon({
     // ledgers to the planner's targets at nowMs (the shared pure runtime
     // helper, identical semantics to the live writer's database path).
     // Dead coins are never reconciled: their events expire historically.
+    // Adaptive closed loop: evaluate the REAL adaptive Director first —
+    // observation reduced from the world state committed through the
+    // previous step, control state threaded, exactly the runtime order
+    // (evaluation -> plan -> reconcile -> pricing batch).
+    let stepDecision = {
+      mode: 'NORMAL', direction: 'POSITIVE', intensity: 0,
+      decisionIndex: s, goldenCoinId: null, demonCoinId: null
+    };
+    let stepObservation = {
+      coins: liveAtStepStart.map((entry) => ({ coinId: entry.coin.coinId })),
+      macro: { environment: environment.environmentAt(nowMs) }
+    };
+    if (adaptive) {
+      const observation = buildLoopObservation({
+        world, seed, originMs, nowMs, environment, config
+      });
+      const { state: nextControl, changed } = director.evaluateAdaptiveDirectorDecision({
+        worldSeed: seed,
+        nowMs,
+        controlState,
+        observation,
+        config
+      });
+      controlState = nextControl;
+      if (changed) {
+        decisionLog.push({
+          atMs: nowMs,
+          decisionIndex: controlState.decisionIndex,
+          mode: controlState.mode,
+          direction: controlState.direction,
+          intensity: controlState.intensity,
+          startedAtMs: new Date(controlState.startedAt).getTime(),
+          endsAtMs: new Date(controlState.endsAt).getTime(),
+          reason: controlState.reason
+        });
+      }
+      modeStepCounts[controlState.mode] += 1;
+      stepDecision = {
+        mode: controlState.mode,
+        direction: controlState.direction,
+        intensity: controlState.intensity,
+        decisionIndex: controlState.decisionIndex,
+        goldenCoinId: controlState.goldenCoinId,
+        demonCoinId: controlState.demonCoinId
+      };
+      stepObservation = observation;
+      if (s % stepsPerDay === 0) {
+        dailyObservations.push({
+          atMs: nowMs,
+          liveCoinCount: observation.liveCoinCount,
+          drawdownPct: observation.drawdownPct,
+          medianMovementPct: observation.medianMovementPct,
+          broadMovementPct: observation.broadMovementPct,
+          breadth: { ...observation.breadth },
+          weakCount: observation.weakCount,
+          distressedCount: observation.distressedCount,
+          recentDeathCount: observation.recentDeathCount,
+          lastMeaningfulMovementAtMs: observation.lastMeaningfulMovementAtMs
+        });
+      }
+    }
     const stepEventModifiers = (() => {
       const envNow = environment.environmentAt(nowMs);
-      const decision = {
-        mode: 'NORMAL', direction: 'POSITIVE', intensity: 0,
-        decisionIndex: s, goldenCoinId: null, demonCoinId: null
-      };
-      const observation = {
-        coins: liveAtStepStart.map((entry) => ({ coinId: entry.coin.coinId })),
-        macro: { environment: envNow }
-      };
-      const plan = planAdaptiveEventTargets({ decision, observation, config });
+      const plan = planAdaptiveEventTargets({ decision: stepDecision, observation: stepObservation, config });
       const planByCoin = new Map(plan.map((p) => [p.coinId, p]));
       const modifiers = new Map();
       for (const entry of liveAtStepStart) {
@@ -573,7 +734,7 @@ function runStage9Horizon({
           targetNegative: planEntry.targetNegative,
           role: planEntry.role,
           reason: planEntry.reason,
-          decision,
+          decision: stepDecision,
           worldSeed: seed,
           worldId: HORIZON_WORLD_ID,
           eventSeverityScale: envNow.eventSeverityScale,
@@ -631,6 +792,14 @@ function runStage9Horizon({
     const active = countActive(world);
     if (active < events.minActive) events.minActive = active;
     if (active > events.maxActive) events.maxActive = active;
+
+    if (adaptive && s % stepsPerDay === 0) {
+      const prices = {};
+      for (const entry of world) {
+        if (entry.state.status === 'ALIVE') prices[entry.coin.coinId] = entry.state.lastPrice;
+      }
+      dailyPrices.push({ atMs: nowMs, prices });
+    }
   }
 
   const metrics = finalizeMetrics(world, events, {
@@ -656,7 +825,25 @@ function runStage9Horizon({
     world,
     events,
     metrics,
-    historicalIds: historicalIds.slice()
+    historicalIds: historicalIds.slice(),
+    // Adaptive closed-loop evidence (present only when adaptiveDirector):
+    // the committed decision log, time-weighted mode occupancy, and the
+    // daily observation/price series for return/drawdown distributions.
+    ...(adaptive ? {
+      adaptive: {
+        decisionLog,
+        modeStepCounts,
+        steps,
+        dailyPrices,
+        dailyObservations,
+        maxDrawdownSeenByCoin: world.map((entry) => ({
+          coinId: entry.coin.coinId,
+          isReplacement: entry.state.isReplacement,
+          maxDrawdownSeen: entry.state.maxDrawdownSeen
+        })),
+        finalControlState: controlState
+      }
+    } : {})
   };
 }
 

@@ -330,5 +330,11 @@ async function buildAdaptiveDirectorObservation(queryable, { world, nowMs, confi
 }
 
 module.exports = {
-  buildAdaptiveDirectorObservation
+  buildAdaptiveDirectorObservation,
+  // The PURE snapshot reduction, exported for deterministic simulations
+  // (simulation/stage9Horizon.js adaptive closed loop) so the harness
+  // reduces its in-memory world through the EXACT production observation
+  // semantics (movement, breadth, breadth-aware market clock, drawdown,
+  // health counts, death/replacement windows) instead of re-deriving them.
+  reduceSnapshot
 };

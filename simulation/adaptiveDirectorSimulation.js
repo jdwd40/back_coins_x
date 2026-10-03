@@ -325,10 +325,26 @@ const ACCEPTANCE_PROFILE_IDS = Object.freeze([
   'mild-decline-moving',
   'severe-decline',
   'sustained-overheat',
-  'death-cluster'
+  'death-cluster',
+  'stale-drawdown-churn'
 ]);
 
 const ACCEPTANCE_COINS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+// stale-drawdown-churn roster: the live production roster and exact
+// per-coin observation values from the 2026-10-03T14:16:21Z read-only
+// production probe (world 1, deployed SHA da8b1b6) — see the profile branch
+// below for the full provenance.
+const STALE_CHURN_COINS = [1, 2, 6, 9, 10, 101, 102, 104, 105, 106];
+const STALE_CHURN_MOVEMENT = {
+  1: -0.0038, 2: -0.0402, 6: -0.2143, 9: 0.1608, 10: -0.2693,
+  101: -0.0209, 102: 0.0445, 104: 0.1768, 105: -0.0115, 106: 0.2949
+};
+const STALE_CHURN_CONDITION = {
+  1: 0.142, 2: -0.133, 6: 0.293, 9: 0.333, 10: -0.205,
+  101: -0.021, 102: -0.495, 104: 0.020, 105: 0.155, 106: 0.491
+};
+const STALE_CHURN_DRAWDOWN = 0.5744;
 
 const ACCEPTANCE_MACRO = Object.freeze({
   regime: 'BULL',
@@ -415,6 +431,22 @@ function buildAcceptanceScenario(profile, seedIndex) {
       drawdownPct = 0;
       conditionOf = () => 0.3;
       lastMeaningfulMovementAtMs = nowMs - 2 * MINUTE_MS;
+    } else if (profile === 'stale-drawdown-churn') {
+      // Long-term-balancing reproduction (production evidence 2026-10-03):
+      // a PERSISTENT severe drawdown from the decaying peak references
+      // (drawdownPct 0.5744 against rescueDrawdownPct 0.25) coexisting with
+      // FRESH, mixed, both-direction movement — the exact live probe
+      // observation (median -0.0077, broad +0.0117, rising 4 / falling 5 /
+      // flat 1, weakCount 1, distressed 0, no deaths, movement clock
+      // fresh). Production held the Director in a permanent RESCUE <>
+      // refractory loop for 23 straight days (1262 RESCUE episodes,
+      // 16-21% duty every day, mean intensity 0.95, zero BOOM/BUST) on
+      // this state alone: the stale drawdown IS the steady state of this
+      // volatility regime, not an emergency in progress.
+      movementOf = (coinId) => STALE_CHURN_MOVEMENT[coinId] + 0.004 * jitter(tickIndex, coinId, 8);
+      drawdownPct = STALE_CHURN_DRAWDOWN;
+      conditionOf = (coinId) => STALE_CHURN_CONDITION[coinId];
+      lastMeaningfulMovementAtMs = nowMs - 2 * MINUTE_MS;
     } else {
       // death-cluster: a rolling fresh death cluster during hours 4-8,
       // otherwise a calm market.
@@ -432,7 +464,8 @@ function buildAcceptanceScenario(profile, seedIndex) {
       }
     }
 
-    const coins = ACCEPTANCE_COINS.map((coinId) => ({
+    const roster = profile === 'stale-drawdown-churn' ? STALE_CHURN_COINS : ACCEPTANCE_COINS;
+    const coins = roster.map((coinId) => ({
       coinId,
       archetype: 'ZIP',
       condition: conditionOf(coinId),
