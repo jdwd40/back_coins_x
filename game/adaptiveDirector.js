@@ -41,7 +41,10 @@
 //     bias, clamped away from certainty. Anti-loop: a draw repeating the
 //     last swing direction stands only when a confirmation roll clears
 //     stagnationSameDirectionProbability; otherwise it flips.
-//   * RESCUE (POSITIVE) is favoured by any of: severe broad drawdown, a
+//   * RESCUE (POSITIVE) is favoured by any of: a severe broad drawdown
+//     whose decline is STILL PROGRESSING (drawdown at/above
+//     rescueDrawdownPct corroborated by ongoing broad negative movement —
+//     a stale drawdown from earlier peaks never rescues on its own), a
 //     CORROBORATED falling breadth fraction (breadth combined with
 //     meaningful negative magnitude, corroborating drawdown, or
 //     weak/distressed/recent-death health evidence — falling breadth alone
@@ -365,6 +368,20 @@ function resolveRoles({ committed, nowMs, observation, config, draws }) {
 // refractory; like every trigger they wait out the full refractory once
 // their own window has ended.
 //
+// Long-term-balancing correction (production evidence 2026-10-03): the
+// severe-drawdown verdict additionally requires the decline to be STILL
+// PROGRESSING — the same magnitude corroboration the broad-fall trigger
+// uses. The drawdown reference is the 30-day-half-life decaying peak, so
+// in this volatility regime a mean drawdown above rescueDrawdownPct is
+// the steady state, not an emergency: production held a permanent
+// RESCUE <> refractory loop for 23 straight days (1262 RESCUE episodes at
+// 16-21% duty every day, mean intensity 0.95, zero BOOM/BUST) on a stale
+// ~0.57 drawdown while the market churned in both directions. An actively
+// progressing severe drawdown (a crash in progress) still rescues
+// immediately as an emergency; a stale drawdown with no ongoing broad
+// decline does not, and chronic depression remains covered by the
+// weak/distressed-condition and death-cluster paths.
+//
 // PR #36 wave-2 correction: severity is proportional to the EVIDENCE. The
 // breadth component is roster-scaled AND weighted by the strength of its
 // corroboration (corroborationStrength) — one distressed outlier no longer
@@ -376,10 +393,14 @@ function rescueSignals(observation, config) {
   const dc = config.directorControl;
   const live = observation.liveCoinCount;
   const fallingFraction = live === 0 ? 0 : observation.breadth.falling / live;
-  const severeDrawdown = observation.drawdownPct >= dc.rescueDrawdownPct;
   const magnitudeCorroborated =
     (observation.medianMovementPct !== null && observation.medianMovementPct <= -dc.rescueCorroborationDeclinePct)
     || (observation.broadMovementPct !== null && observation.broadMovementPct <= -dc.rescueCorroborationDeclinePct);
+  // Severe drawdown rescues independently ONLY while the broad decline is
+  // still progressing (long-term-balancing correction above): a stale
+  // drawdown from earlier peaks is this regime's steady state, not an
+  // emergency in progress.
+  const severeDrawdown = observation.drawdownPct >= dc.rescueDrawdownPct && magnitudeCorroborated;
   // A single critically weak coin does NOT corroborate a market-wide broad
   // fall (one distressed outlier should not justify whole-market rescue
   // intensity; clustered distress has its own independent path below).

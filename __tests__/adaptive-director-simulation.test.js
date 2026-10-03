@@ -123,7 +123,7 @@ describe('Wave 2 adaptive Director: deterministic acceptance sweep (PR #36 corre
   test('the sweep covers the condition profiles over 20 seeds x 24 hours, reproducibly', () => {
     expect([...ACCEPTANCE_PROFILE_IDS].sort()).toEqual([
       'death-cluster', 'healthy-variable', 'mild-decline', 'mild-decline-moving',
-      'severe-decline', 'stagnation', 'sustained-overheat'
+      'severe-decline', 'stagnation', 'stale-drawdown-churn', 'sustained-overheat'
     ]);
     expect(Object.keys(acceptance.profiles).sort()).toEqual([...ACCEPTANCE_PROFILE_IDS].sort());
     for (const data of Object.values(acceptance.profiles)) {
@@ -207,6 +207,127 @@ describe('Wave 2 adaptive Director: deterministic acceptance sweep (PR #36 corre
       // rescue corroboration magnitude.
       expect(observation.breadth.falling).toBe(7);
       expect(observation.liveCoinCount).toBe(10);
+    }
+  });
+
+  test('a STALE severe drawdown with fresh mixed movement never rescues on any seed (production churn pathology)', () => {
+    // Long-term-balancing acceptance: the profile reproduces the exact
+    // 2026-10-03T14:16:21Z production observation (persistent 0.5744
+    // drawdown from decaying peaks, mixed fresh movement, one weak coin,
+    // no deaths). Production rescued ~55x/day at ~0.95 intensity for 23
+    // straight days on this state. A drawdown left over from earlier peaks
+    // is NOT an emergency while the market is not broadly declining, so
+    // rescue must not fire at all; the Director stays on its normal
+    // broad-swing cadence all day.
+    for (const run of acceptance.profiles['stale-drawdown-churn'].seeds) {
+      expect(run.rescueCount).toBe(0);
+      expect(run.modeTimeFraction.RESCUE).toBe(0);
+      expect(run.modeTimeFraction.NORMAL).toBe(1);
+      expect(run.directInterventionTransitions).toBe(0);
+      expect(run.longestInterventionStreakMinutes).toBe(0);
+      // Not inert either: the normal swing/role cadence continues.
+      expect(run.decisionsPerHour).toBeGreaterThan(0);
+      expect(run.decisionsPerHour).toBeLessThanOrEqual(15);
+    }
+  });
+
+  test('the stale-drawdown-churn profile carries the production observation (not a passing artifact)', () => {
+    // Distinct acceptance check: the fabricated observations must keep the
+    // SEVERE stale drawdown (>= rescueDrawdownPct), a FRESH movement clock
+    // and non-corroborating movement at every sampled tick, so the
+    // zero-rescue verdict above measures the trigger semantics rather than
+    // a stale clock or a vanished drawdown.
+    const dc = CONFIG.directorControl;
+    const scenario = buildAcceptanceScenario('stale-drawdown-churn', 0);
+    for (const tickIndex of [0, 60, 360, 720, 1080, 1439]) {
+      const nowMs = scenario.startMs + tickIndex * scenario.tickMs;
+      const observation = scenario.observationAt(tickIndex, nowMs);
+      expect(observation.drawdownPct).toBeGreaterThanOrEqual(dc.rescueDrawdownPct);
+      expect(observation.lastMeaningfulMovementAtMs).not.toBeNull();
+      expect(nowMs - observation.lastMeaningfulMovementAtMs).toBeLessThanOrEqual(5 * 60000);
+      expect(observation.medianMovementPct).toBeGreaterThan(-dc.rescueCorroborationDeclinePct);
+      expect(observation.broadMovementPct).toBeGreaterThan(-dc.rescueCorroborationDeclinePct);
+      expect(observation.recentDeathCount).toBe(0);
+      expect(observation.weakCount).toBeLessThan(dc.rescueWeakCount);
+      expect(observation.distressedCount).toBeLessThan(dc.deathClusterCount);
+      expect(observation.liveCoinCount).toBe(10);
+    }
+  });
+
+  test('a severe drawdown rescues when a broad decline STARTS and disengages when the decline HALTS', () => {
+    // Boundary acceptance: the same persistent 0.5 drawdown all day.
+    // Hours 0-12: fresh mixed movement (stale drawdown only) — no rescue.
+    // Hours 12-16: broad decline at -4% (an emergency in progress) —
+    // rescue fires promptly and recurs within its bounded duty.
+    // Hours 16-24: the decline halts (mixed movement returns) with the
+    // drawdown unchanged — no NEW rescue window commits after the halt;
+    // the Director is not a peg for old peaks.
+    const startMs = Date.parse('2026-10-02T00:00:00.000Z');
+    const tickMs = 60000;
+    const ticks = 24 * 60;
+    const observationAt = (tickIndex, nowMs) => {
+      const hour = tickIndex / 60;
+      const declining = hour >= 12 && hour < 16;
+      const movementOf = (coinId) => (declining
+        ? (coinId <= 8 ? -0.04 : 0.002)
+        : (coinId % 2 === 0 ? 0.012 : -0.009));
+      const coins = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((coinId) => ({
+        coinId,
+        archetype: 'ZIP',
+        condition: -0.1,
+        currentPrice: 1,
+        peakReference: 2,
+        structuralReference: 1,
+        movementPct: movementOf(coinId)
+      }));
+      const breadth = { rising: 0, falling: 0, flat: 0 };
+      for (const coin of coins) {
+        if (Math.abs(coin.movementPct) < 0.005) breadth.flat += 1;
+        else if (coin.movementPct > 0) breadth.rising += 1;
+        else breadth.falling += 1;
+      }
+      const movements = coins.map((c) => c.movementPct).sort((a, b) => a - b);
+      return {
+        liveCoinCount: coins.length,
+        coins,
+        breadth,
+        medianMovementPct: movements[Math.floor(movements.length / 2)],
+        broadMovementPct: movements.reduce((s, v) => s + v, 0) / movements.length,
+        drawdownPct: 0.5,
+        weakCount: 1,
+        distressedCount: 0,
+        recentDeathCount: 0,
+        recentDeaths: [],
+        recentReplacements: [],
+        lastMeaningfulMovementAtMs: nowMs - 2 * 60000,
+        macro: {
+          regime: 'BULL', regimeIndex: 3, intensity: 0.5,
+          environment: {
+            structuralBias: 0.02, volatilityScale: 1, positiveEventBias: 0,
+            negativeEventBias: 0, eventSeverityScale: 1,
+            crashProbabilityModifier: 1, recoveryModifier: 1, collapseRiskModifier: 1
+          }
+        }
+      };
+    };
+    for (let seedIndex = 0; seedIndex < 20; seedIndex++) {
+      const report = runAdaptiveDirectorSimulation({
+        scenario: { worldSeed: `ltb-boundary:${seedIndex}`, startMs, tickMs, ticks, observationAt },
+        config: CONFIG
+      });
+      const rescueWindows = report.decisions.filter((d, i, all) =>
+        d.mode === 'RESCUE' && (i === 0 || all[i - 1].startedAtMs !== d.startedAtMs));
+      const declineStartMs = startMs + 12 * 3600000;
+      const haltMs = startMs + 16 * 3600000;
+      // No rescue while the drawdown is stale (hours 0-12).
+      expect(rescueWindows.filter((d) => d.startedAtMs < declineStartMs)).toHaveLength(0);
+      // Rescue fires during the broad decline.
+      expect(rescueWindows.filter((d) => d.startedAtMs >= declineStartMs && d.startedAtMs < haltMs).length)
+        .toBeGreaterThan(0);
+      // No NEW rescue window commits once the decline has halted, even
+      // though the severe drawdown persists unchanged.
+      expect(rescueWindows.filter((d) => d.startedAtMs >= haltMs)).toHaveLength(0);
+      expect(report.summary.directInterventionTransitions).toBe(0);
     }
   });
 

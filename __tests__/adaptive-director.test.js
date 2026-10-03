@@ -704,10 +704,130 @@ describe('Wave 2 adaptive Director: idempotent re-evaluation', () => {
     expect(state.reason).toMatch(/^rescue: /);
     });
 
-    test('severe drawdown remains independently capable of rescue', () => {
+    test('severe drawdown rescues while the broad decline is still progressing', () => {
+    // An ACTIVELY progressing severe drawdown remains an independent
+    // emergency: severe drawdown corroborated by ongoing broad decline
+    // (the same magnitude evidence standard the broad-fall trigger uses).
     const { state } = evaluate({
     controlState: expiredNormal(),
-    observation: makeObservation({ drawdownPct: 0.3 })
+    observation: makeObservation({
+      drawdownPct: 0.3,
+      medianMovementPct: -0.05,
+      broadMovementPct: -0.04,
+      breadth: { rising: 0, falling: 5, flat: 1 },
+      coins: makeCoins().map((c) => ({ ...c, movementPct: -0.04 }))
+    })
+    });
+    expect(state.mode).toBe('RESCUE');
+    });
+
+    test('a STALE severe drawdown with no ongoing broad decline does NOT rescue (production churn pathology)', () => {
+    // Long-term-balancing correction (production evidence 2026-10-03): a
+    // severe drawdown left behind by earlier peaks — the steady state of
+    // this volatility regime under the 30-day decaying peak reference —
+    // is not an emergency while the market is not broadly declining. The
+    // default observation (positive median/broad movement, fresh clock,
+    // no deaths) carries a drawdown far above rescueDrawdownPct yet must
+    // NOT rescue; production looped RESCUE ~55x/day for 23 days on
+    // exactly this state.
+    const { state } = evaluate({
+    controlState: expiredNormal(),
+    observation: makeObservation({ drawdownPct: 0.574 })
+    });
+    expect(state.mode).toBe('NORMAL');
+    });
+
+    test('a severe drawdown with no observable movement (null) does NOT rescue', () => {
+    // No in-window ticks means no evidence of an ongoing decline: the
+    // conservative verdict is no drawdown rescue (death, weak-condition
+    // and broad-fall paths remain available on their own evidence).
+    const { state } = evaluate({
+    controlState: expiredNormal(),
+    observation: makeObservation({
+      drawdownPct: 0.5,
+      medianMovementPct: null,
+      broadMovementPct: null,
+      coins: makeCoins().map((c) => ({ ...c, movementPct: null }))
+    })
+    });
+    expect(state.mode).toBe('NORMAL');
+    });
+
+    test('corroboration boundary: median movement at EXACTLY -rescueCorroborationDeclinePct rescues', () => {
+    // The corroboration verdict is <= the threshold: a severe drawdown
+    // whose broad decline sits at exactly -2% is still progressing and
+    // rescues (boundary inclusive, matching the broad-fall trigger's
+    // magnitude standard).
+    const dc = CONFIG.directorControl;
+    const { state } = evaluate({
+    controlState: expiredNormal(),
+    observation: makeObservation({
+      drawdownPct: 0.3,
+      medianMovementPct: -dc.rescueCorroborationDeclinePct,
+      broadMovementPct: -0.005,
+      breadth: { rising: 0, falling: 4, flat: 2 },
+      coins: makeCoins().map((c) => ({ ...c, movementPct: -dc.rescueCorroborationDeclinePct }))
+    })
+    });
+    expect(state.mode).toBe('RESCUE');
+    });
+
+    test('corroboration boundary: median movement just ABOVE the threshold does NOT rescue a stale drawdown', () => {
+    // One tick below the boundary (-0.0199 vs -0.02): the decline is not
+    // corroborated and the stale severe drawdown stays NORMAL.
+    const dc = CONFIG.directorControl;
+    const { state } = evaluate({
+    controlState: expiredNormal(),
+    observation: makeObservation({
+      drawdownPct: 0.3,
+      medianMovementPct: -dc.rescueCorroborationDeclinePct + 0.0001,
+      broadMovementPct: -dc.rescueCorroborationDeclinePct + 0.0001,
+      breadth: { rising: 1, falling: 3, flat: 2 },
+      coins: makeCoins().map((c) => ({ ...c, movementPct: -0.01 }))
+    })
+    });
+    expect(state.mode).toBe('NORMAL');
+    });
+
+    test('corroboration is median-only sufficient: broad above threshold, median at/below rescues', () => {
+    // Either magnitude measure corroborates independently (OR semantics,
+    // the same standard the broad-fall trigger uses).
+    const { state } = evaluate({
+    controlState: expiredNormal(),
+    observation: makeObservation({
+      drawdownPct: 0.3,
+      medianMovementPct: -0.04,
+      broadMovementPct: -0.01,
+      breadth: { rising: 0, falling: 4, flat: 2 },
+      coins: makeCoins().map((c) => ({ ...c, movementPct: -0.03 }))
+    })
+    });
+    expect(state.mode).toBe('RESCUE');
+    });
+
+    test('corroboration is mean-only sufficient: one volatile negative outlier can corroborate via the broad mean', () => {
+    // PINNED SEMANTIC (flagged in the long-term-balancing report): the
+    // broad (mean) movement corroborates independently of the median, so
+    // ONE sufficiently volatile negative outlier (-18.6% here against five
+    // +0.6% coins: mean -2.6%, median +0.6%) corroborates the
+    // severe-drawdown verdict on its own. The breadth (broad-fall) trigger
+    // cannot fire on one outlier (falling fraction 1/6 < 0.7) and severity
+    // stays evidence-scaled, but the drawdown rescue gate itself accepts
+    // mean-only corroboration — the same OR standard the broad-fall
+    // trigger has always used.
+    const coins = makeCoins([
+      { movementPct: 0.006 }, { movementPct: 0.006 }, { movementPct: 0.006 },
+      { movementPct: 0.006 }, { movementPct: 0.006 }, { movementPct: -0.186 }
+    ]);
+    const { state } = evaluate({
+    controlState: expiredNormal(),
+    observation: makeObservation({
+      drawdownPct: 0.3,
+      medianMovementPct: 0.006,
+      broadMovementPct: -0.026,
+      breadth: { rising: 5, falling: 1, flat: 0 },
+      coins
+    })
     });
     expect(state.mode).toBe('RESCUE');
     });
