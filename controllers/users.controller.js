@@ -160,6 +160,15 @@ const getUserProfile = async (req, res, next) => {
       });
     }
 
+    // Ownership check (#48): an authenticated user may only read their own
+    // profile. Follows the pattern in transactions.controller.js.
+    if (req.user.user_id !== Number(user_id)) {
+      return res.status(403).json({
+        success: false,
+        msg: 'Forbidden'
+      });
+    }
+
     const user = await selectUserById(user_id);
     if (!user) {
       return res.status(404).json({ 
@@ -204,6 +213,16 @@ const updateUserProfile = async (req, res, next) => {
       });
     }
     
+    // Ownership check (#48): an authenticated user may only update their own
+    // profile (including password). Follows the pattern in
+    // transactions.controller.js.
+    if (req.user.user_id !== Number(user_id)) {
+      return res.status(403).json({
+        success: false,
+        msg: 'Forbidden'
+      });
+    }
+
     if (!updates || Object.keys(updates).length === 0) {
       return res.status(400).json({ 
         success: false,
@@ -271,6 +290,15 @@ const deleteUser = async (req, res, next) => {
       return res.status(400).json({ 
         success: false,
         msg: 'Invalid user ID' 
+      });
+    }
+
+    // Ownership check (#48): an authenticated user may only delete their own
+    // account. Follows the pattern in transactions.controller.js.
+    if (req.user.user_id !== Number(user_id)) {
+      return res.status(403).json({
+        success: false,
+        msg: 'Forbidden'
       });
     }
 

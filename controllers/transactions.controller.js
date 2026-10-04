@@ -36,6 +36,11 @@ exports.getTransactionById = async (req, res, next) => {
     if (!transaction) {
       return res.status(404).json({ msg: 'Transaction not found' });
     }
+    // A transaction id is not authorization: protect this sibling detail
+    // route just like the user-scoped ledger and portfolio reads.
+    if (req.user.user_id !== transaction.user_id) {
+      return res.status(403).json({ msg: 'Forbidden' });
+    }
     res.status(200).json(transaction);
   } catch (err) {
     next(err);
