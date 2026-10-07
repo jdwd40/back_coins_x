@@ -13,7 +13,8 @@ const {
   getMyPersistentTransactions,
   getPersistentLeaderboard,
   getPersistentMarketSignals,
-  getPersistentRuntime
+  getPersistentRuntime,
+  getPersistentCoinEvents
 } = require('../controllers/persistent.controller');
 const { authenticateToken } = require('../middleware/auth.middleware');
 
@@ -33,5 +34,7 @@ persistentRouter.get('/signals', getPersistentMarketSignals);
 // exact key contract, single REPEATABLE READ READ ONLY snapshot, no
 // mutations). The signals contract above is preserved exactly.
 persistentRouter.get('/runtime', getPersistentRuntime);
+// Issue #52: public read-only historical coin events (coin-detail timeline).
+persistentRouter.get('/coins/:coin_id/events', getPersistentCoinEvents);
 
 exports.persistentRouter = persistentRouter;

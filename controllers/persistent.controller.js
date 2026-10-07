@@ -24,6 +24,7 @@ const persistentEconomy = require('../game/persistentEconomy');
 const persistentLeaderboard = require('../game/persistentLeaderboard');
 const persistentMarketSignalsService = require('../game/persistentMarketSignalsService');
 const persistentRuntimeService = require('../game/persistentRuntimeService');
+const persistentCoinEventHistoryService = require('../game/persistentCoinEventHistoryService');
 
 function statusOf(err) {
   return Number.isInteger(err && err.status) ? err.status : 500;
@@ -162,6 +163,25 @@ exports.getPersistentMarketSignals = async (req, res, next) => {
 exports.getPersistentRuntime = async (req, res, next) => {
   try {
     const data = await persistentRuntimeService.getPersistentRuntime({});
+    res.status(200).json({ status: 'success', data });
+  } catch (err) {
+    if (statusOf(err) < 500) {
+      return res.status(statusOf(err)).json({ status: 'error', message: err.message });
+    }
+    next(err);
+  }
+};
+
+// GET /api/persistent/coins/:coin_id/events?limit=N — public read-only
+// started (active + expired) events for one coin in the active world,
+// newest first. 400 invalid coin_id/limit, 404 unknown coin, 200
+// worldId null / events [] with no active world. Issue #52.
+exports.getPersistentCoinEvents = async (req, res, next) => {
+  try {
+    const data = await persistentCoinEventHistoryService.getPersistentCoinEventHistory({
+      coinId: req.params.coin_id,
+      limit: req.query.limit
+    });
     res.status(200).json({ status: 'success', data });
   } catch (err) {
     if (statusOf(err) < 500) {

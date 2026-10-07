@@ -32,6 +32,7 @@ These endpoints back the current player experience.
 | `GET` | `/api/persistent/leaderboard` | Public | Humans and bots ranked by net worth |
 | `GET` | `/api/persistent/signals` | Public | Persistent coin prices, status, archetypes, momentum, and broad regime |
 | `GET` | `/api/persistent/runtime` | Public | Adaptive Director mode, Golden/Demon roles, active events, capped modifiers, and recent safe decision summaries |
+| `GET` | `/api/persistent/coins/:coin_id/events?limit=N` | Public | One coin's started (active + expired) event history, newest first; default 50, max 100 |
 
 ### Buy or sell
 
@@ -58,6 +59,38 @@ Both trade endpoints return `201` with:
 ```
 
 Business rejections use `{ "status": "error", "message": "..." }`. The economy enforces positive quantities, a £0.01 minimum notional, sufficient cash/holdings, ALIVE/non-retired coins, and server-owned pricing.
+
+### Coin event history
+
+`GET /api/persistent/coins/:coin_id/events?limit=N` is public and read-only. It returns events that have already started for one coin in the active persistent world. Both active and expired events are included, also for dead or retired catalogue coins. Future events are excluded using the database snapshot time.
+
+```json
+{
+  "status": "success",
+  "data": {
+    "serverTime": "2026-10-07T07:00:00.000Z",
+    "worldId": 1,
+    "coinId": 4,
+    "events": [
+      {
+        "eventId": 812,
+        "name": "Exchange Listing",
+        "direction": "POSITIVE",
+        "source": "MARKET",
+        "modifierPct": 3.25,
+        "startsAt": "2026-10-07T06:55:00.000Z",
+        "endsAt": "2026-10-07T07:05:00.000Z"
+      }
+    ]
+  }
+}
+```
+
+- Ordering: `startsAt` descending, then `eventId` descending.
+- `modifierPct` is the signed modifier × 100, rounded to 4 decimals (negative for `NEGATIVE` events).
+- `source` is a coarse public category: `MARKET` for ordinary market events, `DIRECTOR` for any Director-driven event. Internal role and intervention categories are never exposed.
+- An event is active when `startsAt <= serverTime < endsAt`.
+- `400` for a non-positive-integer `coin_id` or a `limit` outside 1–100. `404` for a coin that is not in the catalogue. With no active world the response is `200` with `worldId: null` and `events: []`. Database failures return `5xx`.
 
 ### Account provisioning
 
