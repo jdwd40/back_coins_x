@@ -26,7 +26,13 @@ jest.setTimeout(60000);
 
 const PREDICATE = "source = 'MARKET_TICK' AND cycle_id IS NULL";
 const WORLD_SEED = 'price-history-provenance-test-seed';
-const EPOCH = new Date('2026-09-01T00:00:00.000Z');
+// World epoch relative to the real clock: 48h back covers the oldest
+// persistent sample below (25h ago) while keeping the checkpoint-less phase
+// walk from the epoch far inside the pricing bounded-walk guard (10000
+// cycles, about 14 days for the fastest archetype). A fixed calendar epoch
+// tripped the guard once it was ~2 weeks old, so the bot snapshot dropped
+// every coin.
+const EPOCH = new Date(Date.now() - 48 * 60 * 60 * 1000);
 const COIN_ID = 1;
 
 async function insertMixedHistory(coinId) {
