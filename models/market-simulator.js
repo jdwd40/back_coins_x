@@ -696,10 +696,22 @@ class MarketSimulator {
           WHERE current_price > 0
             AND retired = FALSE
         ),
+        -- Extremes cover the active persistent world only (#54 follow-up).
+        -- market_history rows from before the world epoch were written by
+        -- the legacy cycle writer, which also summed the retired coins
+        -- (11-13) and reset prices every cycle, so they are not comparable
+        -- with today's live-coin index. No active world: no bound.
+        world_start AS (
+          SELECT COALESCE(MIN(epoch_started_at), '-infinity'::timestamptz) AS since
+          FROM market_worlds
+          WHERE active
+        ),
         market_history_stats AS (
           SELECT 
-            (SELECT MAX(total_value) FROM market_history) as all_time_high,
-            (SELECT MIN(total_value) FROM market_history) as all_time_low,
+            (SELECT MAX(total_value) FROM market_history
+             WHERE created_at >= (SELECT since FROM world_start)) as all_time_high,
+            (SELECT MIN(total_value) FROM market_history
+             WHERE created_at >= (SELECT since FROM world_start)) as all_time_low,
             (SELECT total_value 
              FROM market_history 
              WHERE created_at >= NOW() - INTERVAL '1 minute'
@@ -707,7 +719,7 @@ class MarketSimulator {
              LIMIT 1) as latest_value,
             MAX(total_value) as period_high
           FROM market_history
-          WHERE 1=1 ${timeFilter}
+          WHERE created_at >= (SELECT since FROM world_start) ${timeFilter}
         )
         SELECT 
           (SELECT current_value FROM current_market) as current_value,

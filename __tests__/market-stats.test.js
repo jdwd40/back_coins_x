@@ -65,6 +65,46 @@ describe('Market Statistics', () => {
     expect(response.body.latestValue).toBeGreaterThan(0);
   });
 
+  // #54 follow-up: allTimeHigh/allTimeLow/periodHigh cover the active
+  // persistent world only. Pre-epoch market_history rows came from the
+  // legacy cycle writer (which also summed retired coins 11-13).
+  it('allTimeHigh, allTimeLow and periodHigh ignore market_history rows from before the active world epoch', async () => {
+    const persistentWorld = require('../game/persistentWorld');
+    const epoch = new Date(Date.now() - 20 * 60 * 1000); // 20 minutes ago
+    await persistentWorld.provisionWorld(db, { seed: 'issue-54-ath-seed', epochStartedAt: epoch });
+
+    await db.query(`
+      INSERT INTO market_history (total_value, market_trend, created_at)
+      VALUES
+        (1279419.71, 'STRONG_BOOM', NOW() - INTERVAL '2 hours'),    -- legacy high
+        (10, 'STRONG_BUST', NOW() - INTERVAL '3 hours'),            -- legacy low
+        (5000, 'MILD_BOOM', NOW() - INTERVAL '25 minutes'),         -- legacy, inside 30M window
+        (1000, 'STABLE', NOW() - INTERVAL '15 minutes'),
+        (800, 'STABLE', NOW() - INTERVAL '10 minutes'),
+        (900, 'STABLE', NOW() - INTERVAL '5 minutes')
+    `);
+
+    const response = await request(app).get('/api/market/stats').expect(200);
+
+    expect(response.body.allTimeHigh).toBe(1000);
+    expect(response.body.allTimeLow).toBe(800);
+    expect(response.body.periodHigh).toBe(1000);
+  });
+
+  it('with no active world the extremes still cover all market_history (unchanged behaviour)', async () => {
+    await db.query(`
+      INSERT INTO market_history (total_value, market_trend, created_at)
+      VALUES (1279419.71, 'STRONG_BOOM', NOW() - INTERVAL '2 hours'),
+             (900, 'STABLE', NOW() - INTERVAL '5 minutes')
+    `);
+
+    const response = await request(app).get('/api/market/stats').expect(200);
+
+    expect(response.body.allTimeHigh).toBe(1279419.71);
+    expect(response.body.allTimeLow).toBe(900);
+    expect(response.body.periodHigh).toBe(900);
+  });
+
   // Issue #54: currentValue must sum LIVE coins only. Retired rows (legacy
   // coins, soft-retired DEAD coins) keep a frozen non-zero price.
   it('currentValue excludes a retired coin with current_price > 0 and tracks live prices', async () => {
