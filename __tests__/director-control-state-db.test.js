@@ -156,6 +156,7 @@ describe('Wave 1: Director control state round-trip and safe restart', () => {
       expect(loaded.mode).toBe('NORMAL');
       expect(new Date(loaded.lastMeaningfulMovementAt).getTime()).toBe(BASE_MS - 5 * MINUTE);
     } finally {
+      await client.query('ROLLBACK').catch(() => {}); // no-op after COMMIT; ends the tx if the body threw
       client.release();
     }
   });
@@ -265,6 +266,8 @@ describe('Wave 1: Director control state first-write race (two real clients)', (
       await expectation;
       await clientB.query('ROLLBACK');
     } finally {
+      await clientA.query('ROLLBACK').catch(() => {}); // no-op after COMMIT; ends the tx if the body threw
+      await clientB.query('ROLLBACK').catch(() => {}); // no-op after COMMIT; ends the tx if the body threw
       clientA.release();
       clientB.release();
     }
@@ -296,6 +299,8 @@ describe('Wave 1: Director control state first-write race (two real clients)', (
       await expectation;
       await clientB.query('ROLLBACK');
     } finally {
+      await clientA.query('ROLLBACK').catch(() => {}); // no-op after COMMIT; ends the tx if the body threw
+      await clientB.query('ROLLBACK').catch(() => {}); // no-op after COMMIT; ends the tx if the body threw
       clientA.release();
       clientB.release();
     }
@@ -321,6 +326,8 @@ describe('Wave 1: Director control state first-write race (two real clients)', (
       await replay;
       await clientB.query('COMMIT');
     } finally {
+      await clientA.query('ROLLBACK').catch(() => {}); // no-op after COMMIT; ends the tx if the body threw
+      await clientB.query('ROLLBACK').catch(() => {}); // no-op after COMMIT; ends the tx if the body threw
       clientA.release();
       clientB.release();
     }

@@ -598,6 +598,8 @@ describe('Wave 1: per-coin active capacity enforcement', () => {
       expect(String(bResult.error && bResult.error.message)).toMatch(/capacity/i);
       await clientB.query('ROLLBACK').catch(() => {});
     } finally {
+      await clientA.query('ROLLBACK').catch(() => {}); // no-op after COMMIT; ends the tx if the body threw
+      await clientB.query('ROLLBACK').catch(() => {}); // no-op after COMMIT; ends the tx if the body threw
       clientA.release();
       clientB.release();
     }

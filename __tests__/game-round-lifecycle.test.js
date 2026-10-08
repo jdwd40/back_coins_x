@@ -203,6 +203,7 @@ describe('Core 4: wealth and monotonic peak', () => {
       await reconcileActivePeaks(client);
       await client.query('COMMIT');
     } finally {
+      await client.query('ROLLBACK').catch(() => {}); // no-op after COMMIT; ends the tx if the body threw
       client.release();
     }
     p = await participantRow(participant.participantId);
@@ -216,6 +217,7 @@ describe('Core 4: wealth and monotonic peak', () => {
       await reconcileActivePeaks(client2);
       await client2.query('COMMIT');
     } finally {
+      await client2.query('ROLLBACK').catch(() => {}); // no-op after COMMIT; ends the tx if the body threw
       client2.release();
     }
     p = await participantRow(participant.participantId);
@@ -338,6 +340,7 @@ describe('Core 4: finalization and consecutive-cycle isolation', () => {
       );
       await client.query('COMMIT');
     } finally {
+      await client.query('ROLLBACK').catch(() => {}); // no-op after COMMIT; ends the tx if the body threw
       client.release();
     }
 

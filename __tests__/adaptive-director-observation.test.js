@@ -245,6 +245,7 @@ describe('Wave 2 observation: persisted-source definition and boundedness', () =
       });
       await client.query('COMMIT');
     } finally {
+      await client.query('ROLLBACK').catch(() => {}); // no-op after COMMIT; ends the tx if the body threw
       client.release();
     }
     const resumed = await buildAdaptiveDirectorObservation(db, { world, nowMs: BASE_MS, config: CONFIG });
