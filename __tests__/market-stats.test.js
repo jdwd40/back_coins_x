@@ -65,5 +65,49 @@ describe('Market Statistics', () => {
     expect(response.body.latestValue).toBeGreaterThan(0);
   });
 
-  // Note: Removed the market simulation test as it was timing-dependent
+  // Issue #54: currentValue must sum LIVE coins only. Retired rows (legacy
+  // coins, soft-retired DEAD coins) keep a frozen non-zero price.
+  it('currentValue excludes a retired coin with current_price > 0 and tracks live prices', async () => {
+    await db.query(
+      `INSERT INTO coins (name, symbol, current_price, market_cap, circulating_supply, founder, cycle_baseline_price, retired)
+       VALUES ('RetiredLegacy', 'RTL', 400000.00, 1000000, 1000000, 'test', 400000.00, TRUE)`
+    );
+    // A live coin's price moves: currentValue must reflect it.
+    await db.query('UPDATE coins SET current_price = 1234.56 WHERE coin_id = 1');
+
+    const { rows } = await db.query(
+      'SELECT COALESCE(SUM(current_price), 0) AS live_sum FROM coins WHERE retired = FALSE AND current_price > 0'
+    );
+    const liveSum = parseFloat(rows[0].live_sum);
+
+    const response = await request(app).get('/api/market/stats').expect(200);
+
+    expect(response.body.currentValue).toBeCloseTo(liveSum, 2);
+    expect(response.body.currentValue).toBeLessThan(400000);
+    // No recent market_history row: latestValue falls back to the same live sum.
+    expect(response.body.latestValue).toBeCloseTo(liveSum, 2);
+  });
+
+  it('currentValue matches the writer-committed latestValue when retired coins hold a price', async () => {
+    const persistentWorld = require('../game/persistentWorld');
+    const marketSimulator = require('../models/market-simulator');
+    const epochMs = new Date('2026-08-31T00:00:00.000Z').getTime();
+    marketSimulator.stop();
+    await persistentWorld.provisionWorld(db, { seed: 'issue-54-stats-seed', epochStartedAt: new Date(epochMs) });
+    await db.query(
+      `INSERT INTO coins (name, symbol, current_price, market_cap, circulating_supply, founder, cycle_baseline_price, retired)
+       VALUES ('RetiredLegacy', 'RTL', 400000.00, 1000000, 1000000, 'test', 400000.00, TRUE)`
+    );
+
+    // One persistent batch writes market_history.total_value (live coins only).
+    await marketSimulator.updateAllPrices({ nowMs: epochMs + 10 * 60 * 1000 });
+    marketSimulator.stop();
+    const { rows } = await db.query('SELECT count(*)::int AS n FROM market_history');
+    expect(rows[0].n).toBe(1);
+
+    const response = await request(app).get('/api/market/stats').expect(200);
+    const { currentValue, latestValue } = response.body;
+    expect(latestValue).toBeGreaterThan(0);
+    expect(Math.abs(currentValue - latestValue) / latestValue).toBeLessThan(0.01);
+  }, 60000);
 });

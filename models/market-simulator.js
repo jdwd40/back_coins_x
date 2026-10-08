@@ -686,9 +686,15 @@ class MarketSimulator {
       // Get market statistics from market_history table
       const marketStats = await db.query(`
         WITH current_market AS (
+          -- Live coins only (issue #54), the same set the price writer sums
+          -- into market_history.total_value. Retired rows (migration 014
+          -- legacy coins) keep a frozen non-zero price and must not count.
+          -- DEAD coins are excluded too: they are priced at exactly 0 (the
+          -- writer aborts a batch otherwise) and soft-retired.
           SELECT SUM(current_price) as current_value
           FROM coins
           WHERE current_price > 0
+            AND retired = FALSE
         ),
         market_history_stats AS (
           SELECT 

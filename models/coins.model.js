@@ -29,13 +29,30 @@ const TIME_RANGES = {
 const PERSISTENT_PH = "source = 'MARKET_TICK' AND cycle_id IS NULL";
 
 /**
+ * Market cap is derived on read as current price x circulating supply
+ * (issue #54). The stored coins.market_cap column is an authored launch
+ * value that nothing updates, so it must not be shown as the live cap.
+ * Falls back to the stored value only if price/supply are not numeric.
+ */
+function computeMarketCap(coin) {
+  const price = Number(coin.current_price);
+  const supply = Number(coin.circulating_supply);
+  if (coin.current_price === null || coin.current_price === undefined ||
+      coin.circulating_supply === null || coin.circulating_supply === undefined ||
+      !Number.isFinite(price) || !Number.isFinite(supply)) {
+    return coin.market_cap;
+  }
+  return price * supply;
+}
+
+/**
  * Format coin data for response
  */
 function formatCoinResponse(coin) {
   return {
     ...coin,
     current_price: CurrencyFormatter.formatGBP(coin.current_price),
-    market_cap: CurrencyFormatter.formatGBP(coin.market_cap),
+    market_cap: CurrencyFormatter.formatGBP(computeMarketCap(coin)),
     // Convert price_change_24h from string to number (PostgreSQL NUMERIC returns as string)
     price_change_24h: coin.price_change_24h === null ? null : Number(coin.price_change_24h)
   };
