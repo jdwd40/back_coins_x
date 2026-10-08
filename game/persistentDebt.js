@@ -25,6 +25,7 @@
 // Legacy apocalypse_* / users.funds data is never read or written here.
 
 const db = require('../db/connection');
+const { applyLocalTimeouts } = require('../db/timeouts');
 const persistentWorld = require('./persistentWorld');
 const { PERSISTENT_STARTING_CASH } = require('./persistentEconomy');
 const {
@@ -123,18 +124,20 @@ async function assertBotAccount(client, userIdNum) {
 // account, re-evaluate bankruptcy on the LOCKED row, guarded cash credit +
 // debt increment, ledger-after-success — one client, one transaction.
 // ---------------------------------------------------------------------------
-async function issueBotLoan({ userId } = {}) {
+// Optional `timeouts` are applied with SET LOCAL inside the transaction
+// (issue #56: the bot tick's database work is server-bounded).
+async function issueBotLoan({ userId, timeouts = null } = {}) {
   const userIdNum = Number(userId);
   if (!Number.isInteger(userIdNum) || userIdNum <= 0) {
     throw new PersistentDebtError('Invalid user_id.', 400);
   }
   const loanAmount = resolvePersistentBotLoanAmount();
 
-  const world = await persistentWorld.resolveActiveWorld(db);
-
   const client = await db.getClient();
   try {
     await client.query('BEGIN');
+    await applyLocalTimeouts(client, timeouts);
+    const world = await persistentWorld.resolveActiveWorld(client);
 
     await assertBotAccount(client, userIdNum);
 
@@ -209,7 +212,7 @@ async function issueBotLoan({ userId } = {}) {
 // (cash >= amount is the backstop), guarded debt decrement (debt >=
 // amount), ledger-after-success.
 // ---------------------------------------------------------------------------
-async function repayBotDebt({ userId, reserve = resolvePersistentBotOperatingReserve() } = {}) {
+async function repayBotDebt({ userId, reserve = resolvePersistentBotOperatingReserve(), timeouts = null } = {}) {
   const userIdNum = Number(userId);
   if (!Number.isInteger(userIdNum) || userIdNum <= 0) {
     throw new PersistentDebtError('Invalid user_id.', 400);
@@ -218,11 +221,11 @@ async function repayBotDebt({ userId, reserve = resolvePersistentBotOperatingRes
     throw new PersistentDebtError('Invalid operating reserve.', 500);
   }
 
-  const world = await persistentWorld.resolveActiveWorld(db);
-
   const client = await db.getClient();
   try {
     await client.query('BEGIN');
+    await applyLocalTimeouts(client, timeouts);
+    const world = await persistentWorld.resolveActiveWorld(client);
 
     await assertBotAccount(client, userIdNum);
 

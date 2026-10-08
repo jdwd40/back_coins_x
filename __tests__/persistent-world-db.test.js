@@ -27,6 +27,8 @@ const MIGRATION_030 = '030_director_control_refractory.sql';
 const MIGRATION_031 = '031_director_control_last_intervention_mode.sql';
 // 032 creates director_decision_history (FK market_worlds), dropped above.
 const MIGRATION_032 = '032_create_director_decision_history.sql';
+// 033 creates persistent_bot_heartbeat (FK market_worlds), dropped above.
+const MIGRATION_033 = '033_create_persistent_bot_heartbeat.sql';
 const WORLD_SEED = 'stage2-world-seed';
 
 async function provisionedWorld() {
@@ -73,6 +75,7 @@ describe('Stage 2: tracked production migration 024', () => {
     // market_worlds, so they are part of it. Wave 4's 032
     // director_decision_history depends on both market_worlds and
     // director_control_state, so it is part of it too.)
+    await db.query('DROP TABLE IF EXISTS persistent_bot_heartbeat CASCADE');
     await db.query('DROP TABLE IF EXISTS director_decision_history CASCADE');
     await db.query('DROP TABLE IF EXISTS persistent_coin_events CASCADE');
     await db.query('DROP TABLE IF EXISTS director_control_state CASCADE');
@@ -84,7 +87,7 @@ describe('Stage 2: tracked production migration 024', () => {
     await db.query('DROP TABLE IF EXISTS market_director_state CASCADE');
     await db.query('DROP TABLE IF EXISTS market_coin_state CASCADE');
     await db.query('DROP TABLE IF EXISTS market_worlds CASCADE');
-    await db.query('DELETE FROM schema_migrations WHERE migration = ANY($1)', [[MIGRATION_024, MIGRATION_025, MIGRATION_026, MIGRATION_027, MIGRATION_028, MIGRATION_029, MIGRATION_030, MIGRATION_031, MIGRATION_032]]);
+    await db.query('DELETE FROM schema_migrations WHERE migration = ANY($1)', [[MIGRATION_024, MIGRATION_025, MIGRATION_026, MIGRATION_027, MIGRATION_028, MIGRATION_029, MIGRATION_030, MIGRATION_031, MIGRATION_032, MIGRATION_033]]);
     const result = await runMigrations({ log: () => {} });
     expect(result.applied).toContain(MIGRATION_024);
     expect(result.applied).toContain(MIGRATION_025);
@@ -98,6 +101,7 @@ describe('Stage 2: tracked production migration 024', () => {
     expect((await db.query(`SELECT to_regclass('public.persistent_coin_events') AS r`)).rows[0].r).not.toBeNull();
     expect((await db.query(`SELECT to_regclass('public.director_control_state') AS r`)).rows[0].r).not.toBeNull();
     expect((await db.query(`SELECT to_regclass('public.director_decision_history') AS r`)).rows[0].r).not.toBeNull();
+    expect((await db.query(`SELECT to_regclass('public.persistent_bot_heartbeat') AS r`)).rows[0].r).not.toBeNull();
 
     const verification = await verifyGameSchema();
     expect(verification.problems).toEqual([]);

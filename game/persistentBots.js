@@ -37,6 +37,7 @@
 // execution per tick across every process. This module owns no timers.
 
 const db = require('../db/connection');
+const { applySessionTimeouts, isDatabaseTimeoutError } = require('../db/timeouts');
 const persistentWorld = require('./persistentWorld');
 const persistentEconomy = require('./persistentEconomy');
 const persistentDebt = require('./persistentDebt');
@@ -46,13 +47,15 @@ const defaultLogger = require('../utils/logger');
 const checkpointModel = require('../models/pricingCheckpoint.model');
 const coinStateModel = require('../models/marketCoinState.model');
 const eventsModel = require('../models/persistentCoinEvents.model');
+const heartbeatModel = require('../models/persistentBotHeartbeat.model');
 const persistentCoinEventDomain = require('./persistentCoinEventDomain');
 const marketDomain = require('./marketDomain');
 const { resolveSimulationConfig } = require('./simulationConfig');
 const {
   BOT_ROSTER,
   BOT_PERSONALITY_PROFILES,
-  DEFAULT_BOT_MAX_TRADE_SIZE
+  DEFAULT_BOT_MAX_TRADE_SIZE,
+  resolvePersistentBotTickLimits
 } = require('./botConfig');
 const {
   GAME_MIN_TRADE_VALUE,
@@ -83,6 +86,52 @@ function floorQuantity(value) {
 
 // Coarse risk severity order for the public maxEntryRisk/exitAtRisk rules.
 const RISK_RANK = Object.freeze({ STABLE: 0, SHAKY: 1, DANGER: 2, CRITICAL: 3, DEAD: 4 });
+
+// ---------------------------------------------------------------------------
+// Issue #56 (verified production root cause, 8 Oct): DUST positions.
+// Full exits sized as floorQuantity(quantity * 1) could leave 1e-8 behind
+// (float product just below the stored value), and repeated fractional
+// sells shrank positions below the £0.01 minimum notional. Such a dust
+// holding can never be sold (every sale under £0.01 is rejected), yet it
+// counted as "held": the coin was excluded from entries forever, and a
+// risk-exit on it was re-decided — and rejected — every tick, returning
+// before any entry was considered. Over weeks every catalogue coin became
+// dust-held for Carl, Mike and Ray, so they held 100% cash.
+//
+// Rules now:
+//   * a position is MEANINGFUL only when its live sale value reaches the
+//     minimum notional; dust neither blocks a new entry nor produces an
+//     (unexecutable) exit decision;
+//   * a fraction-1 exit sells the exact held quantity (never a floored
+//     product), and a partial exit that would strand a dust remainder sells
+//     the whole position instead.
+// ---------------------------------------------------------------------------
+function isMeaningfulPosition(quantity, price) {
+  return quantity > 0 && price > 0 && round2(quantity * price) >= GAME_MIN_TRADE_VALUE;
+}
+
+function exitSellQuantity(holding, coin, fraction = 1) {
+  const held = holding.quantity;
+  if (!isMeaningfulPosition(held, coin.currentPrice)) return null;
+  let quantity = fraction >= 1 ? held : floorQuantity(held * fraction);
+  if (quantity < held && !isMeaningfulPosition(held - quantity, coin.currentPrice)) {
+    quantity = held; // never strand an unsellable remainder
+  }
+  if (!isMeaningfulPosition(quantity, coin.currentPrice)) return null;
+  return quantity;
+}
+
+// Issue #55: P&L thresholds use the PRECISE average entry. The ratio is
+// recomputed from the money fields when available (costBasis / quantity),
+// so a caller that supplies a display-rounded averageEntryPrice can never
+// shift the profit-take/loss-cut triggers.
+function preciseAverageEntry(holding) {
+  if (typeof holding.costBasis === 'number' && Number.isFinite(holding.costBasis) && holding.costBasis > 0
+      && holding.quantity > 0) {
+    return holding.costBasis / holding.quantity;
+  }
+  return holding.averageEntryPrice;
+}
 
 // ---------------------------------------------------------------------------
 // The shaped PUBLIC bot state contract (exact-key allowlists). No seed, no
@@ -233,10 +282,13 @@ async function readMarketSnapshotRows({ world, nowMs, queryable, historyWindow }
   return { coinRows, stateByCoinId, checkpointByCoinId, activeEventsByCoin, historyByCoinId, pastPrices };
 }
 
-async function loadPersistentBotMarketSnapshot({ world, nowMs, queryable = db, historyWindow = 20, config = resolveSimulationConfig(), logger = defaultLogger } = {}) {
+// `snapshotClient` (issue #56): run the REPEATABLE READ READ ONLY snapshot
+// transaction on a caller-owned client (the bot tick's bounded session)
+// instead of acquiring a pooled one; the caller keeps ownership/release.
+async function loadPersistentBotMarketSnapshot({ world, nowMs, queryable = db, snapshotClient = null, historyWindow = 20, config = resolveSimulationConfig(), logger = defaultLogger } = {}) {
   let rows;
-  if (queryable === db) {
-    const client = await db.getClient();
+  if (snapshotClient || queryable === db) {
+    const client = snapshotClient || await db.getClient();
     try {
       await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
       rows = await readMarketSnapshotRows({ world, nowMs, queryable: client, historyWindow });
@@ -245,7 +297,7 @@ async function loadPersistentBotMarketSnapshot({ world, nowMs, queryable = db, h
       try { await client.query('ROLLBACK'); } catch (_) { /* original error wins */ }
       throw err;
     } finally {
-      client.release();
+      if (!snapshotClient) client.release();
     }
   } else {
     rows = await readMarketSnapshotRows({ world, nowMs, queryable, historyWindow });
@@ -363,54 +415,69 @@ function decidePersistentBotAction({ strategy, state, random, maxTradeSize = DEF
     if (!(holding.quantity > 0)) continue;
     const coin = coinById.get(holding.coinId);
     if (!coin || coin.dead) continue; // dead holdings are unsellable history
-    const pnlFraction = holding.averageEntryPrice !== null && holding.averageEntryPrice > 0
-      ? (coin.currentPrice - holding.averageEntryPrice) / holding.averageEntryPrice
+    // Dust (issue #56) is unsellable: it never yields an exit decision.
+    if (!isMeaningfulPosition(holding.quantity, coin.currentPrice)) continue;
+    const averageEntry = preciseAverageEntry(holding);
+    const pnlFraction = averageEntry !== null && averageEntry > 0
+      ? (coin.currentPrice - averageEntry) / averageEntry
       : (holding.unrealizedPnlPct !== null ? holding.unrealizedPnlPct / 100 : 0);
 
     // Panic: a crash-sized public drop on a held coin (SIM-12 behaviour).
     if (profile.panicSellThreshold !== undefined
         && coin.recentChangePct !== null
         && coin.recentChangePct / 100 <= profile.panicSellThreshold) {
-      const quantity = floorQuantity(holding.quantity * (profile.panicSellFraction ?? 1));
-      if (quantity > 0 && round2(quantity * coin.currentPrice) >= GAME_MIN_TRADE_VALUE) {
+      const quantity = exitSellQuantity(holding, coin, profile.panicSellFraction ?? 1);
+      if (quantity !== null) {
         return { type: 'SELL', coinId: coin.coinId, quantity, reason: 'panic' };
       }
     }
     // Risk exit: the public collapse-risk reading turned unacceptable.
     if (profile.exitAtRisk !== undefined && RISK_RANK[coin.collapseRisk] >= RISK_RANK[profile.exitAtRisk]) {
-      return { type: 'SELL', coinId: coin.coinId, quantity: holding.quantity, reason: 'risk-exit' };
+      const quantity = exitSellQuantity(holding, coin, 1);
+      if (quantity !== null) {
+        return { type: 'SELL', coinId: coin.coinId, quantity, reason: 'risk-exit' };
+      }
     }
     // Profit-taking above the public gain threshold.
     if (profile.profitTakeThreshold !== undefined && pnlFraction >= profile.profitTakeThreshold) {
-      const quantity = floorQuantity(holding.quantity * (profile.profitSellFraction ?? 1));
-      if (quantity > 0 && round2(quantity * coin.currentPrice) >= GAME_MIN_TRADE_VALUE) {
+      const quantity = exitSellQuantity(holding, coin, profile.profitSellFraction ?? 1);
+      if (quantity !== null) {
         return { type: 'SELL', coinId: coin.coinId, quantity, reason: 'profit-take' };
       }
     }
     // Loss-cutting below the public decline threshold.
     if (profile.lossCutThreshold !== undefined && pnlFraction <= profile.lossCutThreshold) {
-      const quantity = floorQuantity(holding.quantity * (profile.lossSellFraction ?? 1));
-      if (quantity > 0 && round2(quantity * coin.currentPrice) >= GAME_MIN_TRADE_VALUE) {
+      const quantity = exitSellQuantity(holding, coin, profile.lossSellFraction ?? 1);
+      if (quantity !== null) {
         return { type: 'SELL', coinId: coin.coinId, quantity, reason: 'loss-cut' };
       }
     }
     // Momentum personality: the trend stopped confirming.
     if (profile.exitOnDownMomentum && coin.momentum === 'DOWN') {
-      const quantity = floorQuantity(holding.quantity * (profile.reversalSellFraction ?? 1));
-      if (quantity > 0 && round2(quantity * coin.currentPrice) >= GAME_MIN_TRADE_VALUE) {
+      const quantity = exitSellQuantity(holding, coin, profile.reversalSellFraction ?? 1);
+      if (quantity !== null) {
         return { type: 'SELL', coinId: coin.coinId, quantity, reason: 'momentum-reversal' };
       }
     }
     if (profile.exitOnPhases && profile.exitOnPhases.includes(coin.phase)) {
-      const quantity = floorQuantity(holding.quantity * (profile.reversalSellFraction ?? 1));
-      if (quantity > 0 && round2(quantity * coin.currentPrice) >= GAME_MIN_TRADE_VALUE) {
+      const quantity = exitSellQuantity(holding, coin, profile.reversalSellFraction ?? 1);
+      if (quantity !== null) {
         return { type: 'SELL', coinId: coin.coinId, quantity, reason: 'phase-exit' };
       }
     }
   }
 
   // --- Entry rules ----------------------------------------------------------
-  const heldIds = new Set(holdings.filter((h) => h.quantity > 0).map((h) => h.coinId));
+  // A coin counts as held only through a MEANINGFUL live position (issue
+  // #56): unsellable dust never locks a bot out of re-entering a coin. A
+  // holding whose coin is missing from this tick's snapshot stays "held"
+  // (conservative; it is not a candidate anyway).
+  const heldIds = new Set(holdings.filter((h) => {
+    if (!(h.quantity > 0)) return false;
+    const coin = coinById.get(h.coinId);
+    if (!coin || coin.dead) return true;
+    return isMeaningfulPosition(h.quantity, coin.currentPrice);
+  }).map((h) => h.coinId));
   const contrarian = random() < (profile.contrarianProbability ?? 0);
   const gated = profile.activityGate !== undefined && random() >= profile.activityGate;
 
@@ -485,104 +552,355 @@ function decidePersistentBotAction({ strategy, state, random, maxTradeSize = DEF
 }
 
 // ---------------------------------------------------------------------------
-// Tick execution. Claims (world_id, tick_id) first — a claimed tick is a
-// no-op everywhere else. Then each roster bot: provision (idempotent), read
-// its account, build+assert the shaped public state, decide, execute through
-// the shared persistent services, repay debt above the reserve after any
-// cash inflow. A domain rejection (price moved mid-tick, a coin died) is
-// recorded as a non-fatal skip — never bypassed, never a direct mutation.
+// Tick execution (issue #56 hardening).
+//
+// Single writer + bounded work:
+//   * the tick runs on ONE dedicated pooled session that is DESTROYED at
+//     the end (never returned to the pool), carrying session-level
+//     statement_timeout / lock_timeout / idle_in_transaction limits so the
+//     SERVER cancels any stuck tick statement — a JavaScript timeout race
+//     would only stop waiting while the work (and its locks) carried on;
+//   * that session takes a non-blocking session advisory lock
+//     (pg_try_advisory_lock, never waited on, so it cannot deadlock): at
+//     most one bot tick runs at a time across every Node/PM2 process; a
+//     second process gets outcome BUSY and touches nothing;
+//   * each bot trade/loan/repay runs in its own transaction with the same
+//     limits applied by SET LOCAL;
+//   * a cooperative deadline (resolvePersistentBotTickLimits) stops the
+//     tick from starting new work after the budget, so a slow tick ends
+//     before the next wakeup with outcome TIMEOUT.
+//
+// Claim vs success (the two are distinct facts):
+//   * the public market snapshot is loaded BEFORE the claim; a systemic
+//     all-coin signal failure aborts with outcome SIGNALS_FAILED and claims
+//     NOTHING, so the next wakeup retries cleanly;
+//   * persistent_bot_ticks remains the duplicate-tick claim authority (a
+//     claimed tick is a no-op everywhere else) — a claim only means the
+//     tick started;
+//   * only a tick that processed every roster bot WITHOUT a decision,
+//     programming or infrastructure failure records SUCCESS in the durable
+//     heartbeat (models/persistentBotHeartbeat.model.js); expected domain
+//     rejections are skips, but any other per-bot failure, a timeout or an
+//     error records a failure outcome and leaves the last success aging;
+//   * each committed bot action updates last_action_at as it commits, so a
+//     later failure in the same tick cannot hide it.
+//
+// Each bot: provision (idempotent), read its account, build+assert the
+// shaped public state, decide, execute through the shared persistent
+// services, repay debt above the reserve after any cash inflow. A domain
+// rejection (price moved mid-tick, a coin died, a loan no longer needed) is
+// a non-fatal per-bot skip — never bypassed, never a direct mutation. A
+// server-cancelled lock wait or statement, a driver error or a throwing
+// decision is a per-bot FAILURE: the remaining bots still run, but the
+// tick is not successful.
 // ---------------------------------------------------------------------------
-async function runPersistentBotTick({ tickId, nowMs = Date.now(), queryable = db, logger = defaultLogger } = {}) {
+
+// Session advisory lock key for the persistent bot run lock. Deliberately
+// distinct from the Apocalypse game transaction lock (727001) and the
+// migration runner lock (727000): it is only ever TRY-acquired at session
+// level by the bot tick, so it can never block or deadlock another path.
+const PERSISTENT_BOT_RUN_LOCK_KEY = 727056;
+
+const TICK_OUTCOMES = Object.freeze({
+  SUCCESS: 'SUCCESS',
+  SIGNALS_FAILED: 'SIGNALS_FAILED',
+  TIMEOUT: 'TIMEOUT',
+  ERROR: 'ERROR',
+  BUSY: 'BUSY',
+  ALREADY_CLAIMED: 'ALREADY_CLAIMED'
+});
+
+function tickFailure(message, outcome, status = 500) {
+  const err = new PersistentBotError(message, status);
+  err.outcome = outcome;
+  return err;
+}
+
+function classifyTickError(err) {
+  if (err && err.outcome && TICK_OUTCOMES[err.outcome]) return err.outcome;
+  if (isDatabaseTimeoutError(err)) return TICK_OUTCOMES.TIMEOUT;
+  return TICK_OUTCOMES.ERROR;
+}
+
+// Expected, authoritative domain rejections from the shared persistent
+// services: their own error classes with a 4xx status. Everything else (a
+// raw driver/PostgreSQL error, a server-cancelled statement or lock wait, a
+// 5xx service fault, a programming error) is a bot FAILURE (review R1).
+function isExpectedDomainRejection(err) {
+  if (!(err instanceof persistentEconomy.PersistentEconomyError || err instanceof persistentDebt.PersistentDebtError)) {
+    return false;
+  }
+  return Number.isInteger(err.status) && err.status >= 400 && err.status < 500;
+}
+
+function summarizeActions(actions) {
+  const summary = { trades: 0, holds: 0, skips: 0, errors: 0, buys: 0, sells: 0, loans: 0, repays: 0 };
+  for (const action of actions) {
+    if (action.action === 'BUY') { summary.buys += 1; summary.trades += 1; }
+    else if (action.action === 'SELL') { summary.sells += 1; summary.trades += 1; }
+    else if (action.action === 'LOAN') { summary.loans += 1; summary.trades += 1; }
+    else if (action.action === 'REPAY') { summary.repays += 1; summary.trades += 1; }
+    else if (action.action === 'HOLD') summary.holds += 1;
+    else if (action.action === 'SKIP') summary.skips += 1;
+    else if (action.action === 'ERROR') summary.errors += 1;
+  }
+  return summary;
+}
+
+async function runPersistentBotTick({
+  tickId,
+  nowMs = Date.now(),
+  logger = defaultLogger,
+  limits = resolvePersistentBotTickLimits(),
+  clock = () => Date.now()
+} = {}) {
   if (!Number.isInteger(tickId) || tickId < 0) {
     throw new PersistentBotError(`persistent bot tickId must be a non-negative integer; received ${String(tickId)}`, 400);
   }
-  const world = await persistentWorld.resolveActiveWorld(queryable);
+  const startedAtMs = clock();
+  const deadlineAtMs = startedAtMs + limits.deadlineMs;
+  const checkDeadline = (phase) => {
+    if (clock() > deadlineAtMs) {
+      throw tickFailure(
+        `persistent bot tick ${tickId} exceeded its ${limits.deadlineMs}ms deadline before ${phase}`,
+        TICK_OUTCOMES.TIMEOUT,
+        503
+      );
+    }
+  };
+  const dbLimits = {
+    statementTimeoutMs: limits.statementTimeoutMs,
+    lockTimeoutMs: limits.lockTimeoutMs,
+    idleInTransactionTimeoutMs: limits.idleInTransactionTimeoutMs
+  };
 
-  // Claim the tick: the database is the duplicate-tick authority.
-  const { rows: claimed } = await queryable.query(
-    `INSERT INTO persistent_bot_ticks (world_id, tick_id)
-     VALUES ($1, $2)
-     ON CONFLICT (world_id, tick_id) DO NOTHING
-     RETURNING tick_id`,
-    [world.worldId, tickId]
-  );
-  if (claimed.length === 0) {
-    return { tickId, claimed: false, actions: [] };
-  }
-
-  // Roster identity provisioning is idempotent and shared with the legacy
-  // worker (same users rows, same unauthenticatable credentials).
-  const roster = await ensureBotsProvisioned({ queryable });
-
-  // ONE public market snapshot for the whole tick (see
-  // loadPersistentBotMarketSnapshot): every bot decides against the same
-  // committed state, however many writer batches commit meanwhile.
-  const snapshot = await loadPersistentBotMarketSnapshot({ world, nowMs, queryable, logger });
-  const liveFailures = snapshot.failures.filter((f) => !f.dead);
-  if (snapshot.liveCoinCount > 0 && liveFailures.length === snapshot.liveCoinCount) {
-    // Systemic, not a single bad coin: fail the tick loudly.
-    const sample = liveFailures.slice(0, 3).map((f) => `coin ${f.coinId}: ${f.message}`).join('; ');
-    logger.error(`[GAME] Persistent bot signals failed for ALL ${snapshot.liveCoinCount} live coins; aborting bot tick ${tickId}`);
-    throw new PersistentBotError(`persistent bot signals failed for all ${snapshot.liveCoinCount} live coins (${sample})`, 500);
-  }
-  const failedCoinIds = new Set(snapshot.failures.map((f) => f.coinId));
-
-  const actions = [];
-  for (const bot of roster) {
-    await persistentEconomy.provisionPersistentAccount({ userId: bot.userId, queryable });
-    const account = await persistentEconomy.getPersistentAccountState({ userId: bot.userId, queryable });
-    const state = await buildPublicPersistentMarketState({ world, account, nowMs, queryable, snapshot });
-    const random = createBotRandom({ seed: world.seed, botKey: bot.botKey, tickId });
-
-    let decision;
-    try {
-      decision = decidePersistentBotAction({ strategy: bot.strategy, state, random });
-    } catch (err) {
-      actions.push({ botKey: bot.botKey, userId: bot.userId, action: 'SKIP', reason: `decision-error: ${err.message}` });
-      continue;
+  const client = await db.getClient();
+  let world = null;
+  let claimed = false;
+  let locked = false;
+  try {
+    await applySessionTimeouts(client, dbLimits);
+    const { rows: lockRows } = await client.query('SELECT pg_try_advisory_lock($1) AS locked', [PERSISTENT_BOT_RUN_LOCK_KEY]);
+    locked = lockRows[0].locked === true;
+    if (!locked) {
+      // Another process is mid-tick: never overlap, never wait.
+      return { tickId, claimed: false, outcome: TICK_OUTCOMES.BUSY, actions: [] };
     }
 
-    // A coin left out of the snapshot (signal failure) must not make a
-    // bot holding it look bankrupt: defer any loan to a tick where every
-    // held coin has a public signal.
-    if (decision.type === 'LOAN'
-        && state.holdings.some((h) => h.quantity > 0 && failedCoinIds.has(h.coinId))) {
-      actions.push({ botKey: bot.botKey, userId: bot.userId, action: 'SKIP', reason: 'loan-deferred: held coin signal unavailable this tick' });
-      continue;
+    world = await persistentWorld.resolveActiveWorld(client);
+    await heartbeatModel.recordAttempt(client, world.worldId);
+
+    // Cheap pre-check (the INSERT below stays the authority): a tick
+    // already claimed elsewhere is a no-op without a snapshot read.
+    const { rows: existing } = await client.query(
+      'SELECT 1 FROM persistent_bot_ticks WHERE world_id = $1 AND tick_id = $2',
+      [world.worldId, tickId]
+    );
+    if (existing.length > 0) {
+      return { tickId, claimed: false, outcome: TICK_OUTCOMES.ALREADY_CLAIMED, actions: [] };
     }
 
-    try {
-      if (decision.type === 'BUY') {
-        const result = await persistentEconomy.buyPersistentTrade({ userId: bot.userId, coinId: decision.coinId, quantity: decision.quantity });
-        actions.push({ botKey: bot.botKey, userId: bot.userId, action: 'BUY', coinId: decision.coinId, quantity: decision.quantity, reason: decision.reason, totalAmount: result.transaction.totalAmount });
-      } else if (decision.type === 'SELL') {
-        const result = await persistentEconomy.sellPersistentTrade({ userId: bot.userId, coinId: decision.coinId, quantity: decision.quantity });
-        actions.push({ botKey: bot.botKey, userId: bot.userId, action: 'SELL', coinId: decision.coinId, quantity: decision.quantity, reason: decision.reason, totalAmount: result.transaction.totalAmount });
-        // Cash inflow: outstanding debt is repaid first, above the reserve.
-        const repayment = await persistentDebt.repayBotDebt({ userId: bot.userId });
-        if (repayment.repaid > 0) {
-          actions.push({ botKey: bot.botKey, userId: bot.userId, action: 'REPAY', amount: repayment.repaid, debt: repayment.debt });
-        }
-      } else if (decision.type === 'LOAN') {
-        const loan = await persistentDebt.issueBotLoan({ userId: bot.userId });
-        actions.push({ botKey: bot.botKey, userId: bot.userId, action: 'LOAN', amount: loan.amount, debt: loan.debt, reason: decision.reason });
-      } else {
-        actions.push({ botKey: bot.botKey, userId: bot.userId, action: 'HOLD', reason: decision.reason });
-      }
-    } catch (err) {
-      // A residual authoritative rejection (mid-tick price move, a coin
-      // dying between read and write, a no-longer-bankrupt loan request) is
-      // a non-fatal skip — the shared services already rolled back cleanly.
+    // ONE public market snapshot for the whole tick (see
+    // loadPersistentBotMarketSnapshot), read BEFORE the claim.
+    checkDeadline('the market snapshot');
+    const snapshot = await loadPersistentBotMarketSnapshot({ world, nowMs, snapshotClient: client, logger });
+    const liveFailures = snapshot.failures.filter((f) => !f.dead);
+    if (snapshot.liveCoinCount > 0 && liveFailures.length === snapshot.liveCoinCount) {
+      // Systemic, not a single bad coin: fail loudly and claim nothing.
+      const sample = liveFailures.slice(0, 3).map((f) => `coin ${f.coinId}: ${f.message}`).join('; ');
+      logger.error(`[GAME] Persistent bot signals failed for ALL ${snapshot.liveCoinCount} live coins; aborting bot tick ${tickId} without claiming it`);
+      throw tickFailure(
+        `persistent bot signals failed for all ${snapshot.liveCoinCount} live coins (${sample})`,
+        TICK_OUTCOMES.SIGNALS_FAILED
+      );
+    }
+    const failedCoinIds = new Set(snapshot.failures.map((f) => f.coinId));
+
+    // Claim the tick: the database is the duplicate-tick authority.
+    checkDeadline('the claim');
+    const { rows: claimRows } = await client.query(
+      `INSERT INTO persistent_bot_ticks (world_id, tick_id)
+       VALUES ($1, $2)
+       ON CONFLICT (world_id, tick_id) DO NOTHING
+       RETURNING tick_id`,
+      [world.worldId, tickId]
+    );
+    if (claimRows.length === 0) {
+      return { tickId, claimed: false, outcome: TICK_OUTCOMES.ALREADY_CLAIMED, actions: [] };
+    }
+    claimed = true;
+    await heartbeatModel.recordClaim(client, world.worldId, tickId);
+
+    // Roster identity provisioning is idempotent and shared with the legacy
+    // worker (same users rows, same unauthenticatable credentials).
+    const roster = await ensureBotsProvisioned({ queryable: client });
+
+    const actions = [];
+    const botFailures = [];
+    const fail = (bot, phase, err) => {
+      const kind = isDatabaseTimeoutError(err) ? TICK_OUTCOMES.TIMEOUT : TICK_OUTCOMES.ERROR;
+      botFailures.push({ botKey: bot.botKey, phase, kind });
       actions.push({
         botKey: bot.botKey,
         userId: bot.userId,
-        action: 'SKIP',
-        reason: `${decision.type.toLowerCase()}-rejected: ${err.message}`
+        action: 'ERROR',
+        reason: `${phase}-failed (${kind.toLowerCase()}): ${err && err.message ? err.message : String(err)}`
       });
-    }
-  }
+    };
+    // A committed bot action is recorded durably the moment it commits
+    // (review R5): a later failure in this tick cannot hide it.
+    const noteCommittedAction = () => heartbeatModel.recordAction(client, world.worldId);
 
-  return { tickId, claimed: true, actions };
+    for (const bot of roster) {
+      checkDeadline(`bot ${bot.botKey}`);
+      await persistentEconomy.provisionPersistentAccount({ userId: bot.userId, queryable: client });
+      const account = await persistentEconomy.getPersistentAccountState({ userId: bot.userId, queryable: client });
+      const state = await buildPublicPersistentMarketState({ world, account, nowMs, queryable: client, snapshot });
+      const random = createBotRandom({ seed: world.seed, botKey: bot.botKey, tickId });
+
+      let decision;
+      try {
+        decision = decidePersistentBotAction({ strategy: bot.strategy, state, random });
+      } catch (err) {
+        // A decision that throws is a programming/data fault, never an
+        // expected skip (review R1): the bot is recorded as failed.
+        fail(bot, 'decision', err);
+        continue;
+      }
+
+      // A coin left out of the snapshot (signal failure) must not make a
+      // bot holding it look bankrupt: defer any loan to a tick where every
+      // held coin has a public signal.
+      if (decision.type === 'LOAN'
+          && state.holdings.some((h) => h.quantity > 0 && failedCoinIds.has(h.coinId))) {
+        actions.push({ botKey: bot.botKey, userId: bot.userId, action: 'SKIP', reason: 'loan-deferred: held coin signal unavailable this tick' });
+        continue;
+      }
+
+      if (decision.type === 'HOLD') {
+        actions.push({ botKey: bot.botKey, userId: bot.userId, action: 'HOLD', reason: decision.reason });
+        continue;
+      }
+
+      let committed = false;
+      try {
+        if (decision.type === 'BUY') {
+          const result = await persistentEconomy.buyPersistentTrade({ userId: bot.userId, coinId: decision.coinId, quantity: decision.quantity, timeouts: dbLimits });
+          committed = true;
+          actions.push({ botKey: bot.botKey, userId: bot.userId, action: 'BUY', coinId: decision.coinId, quantity: decision.quantity, reason: decision.reason, totalAmount: result.transaction.totalAmount });
+        } else if (decision.type === 'SELL') {
+          const result = await persistentEconomy.sellPersistentTrade({ userId: bot.userId, coinId: decision.coinId, quantity: decision.quantity, timeouts: dbLimits });
+          committed = true;
+          actions.push({ botKey: bot.botKey, userId: bot.userId, action: 'SELL', coinId: decision.coinId, quantity: decision.quantity, reason: decision.reason, totalAmount: result.transaction.totalAmount });
+        } else if (decision.type === 'LOAN') {
+          const loan = await persistentDebt.issueBotLoan({ userId: bot.userId, timeouts: dbLimits });
+          committed = true;
+          actions.push({ botKey: bot.botKey, userId: bot.userId, action: 'LOAN', amount: loan.amount, debt: loan.debt, reason: decision.reason });
+        } else {
+          throw new PersistentBotError(`unknown persistent bot decision type ${String(decision.type)}`, 500);
+        }
+      } catch (err) {
+        if (isExpectedDomainRejection(err)) {
+          // An authoritative domain rejection (mid-tick price move, a coin
+          // dying between read and write, a no-longer-bankrupt loan
+          // request): the shared services rolled back cleanly and the bot
+          // simply skips this tick.
+          actions.push({
+            botKey: bot.botKey,
+            userId: bot.userId,
+            action: 'SKIP',
+            reason: `${decision.type.toLowerCase()}-rejected: ${err.message}`
+          });
+        } else {
+          // Infrastructure (connection loss, server-cancelled statement or
+          // lock wait) or programming fault: a FAILED bot, never a skip.
+          fail(bot, decision.type.toLowerCase(), err);
+        }
+      }
+      if (committed) await noteCommittedAction();
+
+      if (committed && decision.type === 'SELL') {
+        // Cash inflow: outstanding debt is repaid first, above the reserve.
+        // Separate from the SELL so a repay fault never mislabels the
+        // already-committed sale.
+        try {
+          const repayment = await persistentDebt.repayBotDebt({ userId: bot.userId, timeouts: dbLimits });
+          if (repayment.repaid > 0) {
+            actions.push({ botKey: bot.botKey, userId: bot.userId, action: 'REPAY', amount: repayment.repaid, debt: repayment.debt });
+            await noteCommittedAction();
+          }
+        } catch (err) {
+          if (isExpectedDomainRejection(err)) {
+            actions.push({ botKey: bot.botKey, userId: bot.userId, action: 'SKIP', reason: `repay-rejected: ${err.message}` });
+          } else {
+            fail(bot, 'repay', err);
+          }
+        }
+      }
+    }
+
+    const summary = summarizeActions(actions);
+    if (botFailures.length > 0) {
+      // Processing the roster loop is not success (review R1): any bot that
+      // failed for a non-domain reason fails the tick. The claim stays (its
+      // committed actions are real), the success fields are untouched and
+      // the failure counter advances. TIMEOUT only when every bot failure
+      // was a server-cancelled statement/lock wait.
+      const outcome = botFailures.every((f) => f.kind === TICK_OUTCOMES.TIMEOUT)
+        ? TICK_OUTCOMES.TIMEOUT
+        : TICK_OUTCOMES.ERROR;
+      const phases = [...new Set(botFailures.map((f) => `${f.phase}:${f.kind.toLowerCase()}`))].join(', ');
+      const err = tickFailure(
+        `persistent bot tick ${tickId}: ${botFailures.length} of ${roster.length} bots failed (${phases})`,
+        outcome
+      );
+      err.actions = actions;
+      err.summary = summary;
+      throw err;
+    }
+    await heartbeatModel.recordSuccess(client, world.worldId, tickId, {
+      trades: summary.trades,
+      holds: summary.holds,
+      skips: summary.skips
+    });
+    return {
+      tickId,
+      claimed: true,
+      outcome: TICK_OUTCOMES.SUCCESS,
+      actions,
+      summary,
+      durationMs: clock() - startedAtMs
+    };
+  } catch (err) {
+    const outcome = classifyTickError(err);
+    if (world) {
+      try {
+        await heartbeatModel.recordFailure(client, world.worldId, outcome);
+      } catch (heartbeatErr) {
+        logger.error(`[GAME] Persistent bot heartbeat failure record failed for tick ${tickId}: ${heartbeatErr.message}`);
+      }
+    }
+    if (err && typeof err === 'object') {
+      err.outcome = outcome;
+      err.claimed = claimed;
+      err.tickId = tickId;
+    }
+    throw err;
+  } finally {
+    // Release the run lock explicitly (so the very next tick can take it
+    // without waiting for the backend to notice a closed socket), then
+    // DESTROY the dedicated session: its session timeouts and any aborted
+    // state can never leak back into the shared pool. If the unlock itself
+    // fails the session is torn down anyway, which also frees the lock.
+    if (locked) {
+      try {
+        await client.query('SELECT pg_advisory_unlock($1)', [PERSISTENT_BOT_RUN_LOCK_KEY]);
+      } catch (unlockErr) {
+        logger.error(`[GAME] Persistent bot run-lock release failed for tick ${tickId}; destroying the session: ${unlockErr.message}`);
+      }
+    }
+    client.release(true);
+  }
 }
 
 module.exports = {
@@ -590,6 +908,12 @@ module.exports = {
   PERSISTENT_BOT_COIN_KEYS,
   PERSISTENT_BOT_HOLDING_KEYS,
   PersistentBotError,
+  PERSISTENT_BOT_RUN_LOCK_KEY,
+  TICK_OUTCOMES,
+  isMeaningfulPosition,
+  exitSellQuantity,
+  isExpectedDomainRejection,
+  summarizeActions,
   assertPublicPersistentBotState,
   buildPublicPersistentMarketState,
   decidePersistentBotAction,

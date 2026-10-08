@@ -42,6 +42,7 @@ const seed = async (shouldEnd = false) => {
       DROP TABLE IF EXISTS "apocalypse_participants" CASCADE;
       DROP TABLE IF EXISTS "coin_collapse_schedule" CASCADE;
       DROP TABLE IF EXISTS "market_price_checkpoints" CASCADE;
+      DROP TABLE IF EXISTS "persistent_bot_heartbeat" CASCADE;
       DROP TABLE IF EXISTS "persistent_bot_ticks" CASCADE;
       DROP TABLE IF EXISTS "persistent_coin_events" CASCADE;
       DROP TABLE IF EXISTS "director_control_state" CASCADE;
@@ -403,6 +404,15 @@ const seed = async (shouldEnd = false) => {
       'utf8'
     );
     await db.query(directorDecisionHistoryMigration);
+
+    console.log('📦 Applying persistent-bot-heartbeat migration (db/migrations/033_create_persistent_bot_heartbeat.sql)...');
+    // Issue #56: the durable cross-process bot worker heartbeat DDL,
+    // sourced from the production migration only.
+    const persistentBotHeartbeatMigration = require('fs').readFileSync(
+      require('path').join(__dirname, 'migrations', '033_create_persistent_bot_heartbeat.sql'),
+      'utf8'
+    );
+    await db.query(persistentBotHeartbeatMigration);
 
     console.log('📦 Inserting coins data...');
     // Insert coins data
