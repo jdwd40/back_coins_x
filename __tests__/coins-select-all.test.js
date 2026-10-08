@@ -112,7 +112,7 @@ describe('selectAllCoins per-coin lookups', () => {
       name: 'FutureCoin',
       symbol: 'FTR',
       current_price: '£0.10',
-      market_cap: '£30,000.00',
+      market_cap: '£250.00', // price x supply, derived on read (issue #54)
       circulating_supply: 2500,
       price_change_24h: 50,
       founder: 'Roberto',
