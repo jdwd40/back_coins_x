@@ -31,8 +31,32 @@ These endpoints back the current player experience.
 | `GET` | `/api/persistent/transactions?limit=N` | JWT | Current player's newest-first trade ledger; default 50, max 100 |
 | `GET` | `/api/persistent/leaderboard` | Public | Humans and bots ranked by net worth |
 | `GET` | `/api/persistent/signals` | Public | Persistent coin prices, status, archetypes, momentum, and broad regime |
-| `GET` | `/api/persistent/runtime` | Public | Adaptive Director mode, Golden/Demon roles, active events, capped modifiers, and recent safe decision summaries |
+| `GET` | `/api/persistent/runtime` | Public | Adaptive Director mode, Golden/Demon roles, active events, capped modifiers, recent safe decision summaries, and the bot-worker heartbeat (`bots`) |
 | `GET` | `/api/persistent/coins/:coin_id/events?limit=N` | Public | One coin's started (active + expired) event history, newest first; default 50, max 100 |
+
+### Bot-worker heartbeat (`GET /api/persistent/runtime` → `data.bots`)
+
+`bots` is `null` when no world is active. Otherwise it is the durable, cross-process heartbeat written by whichever process runs the bot tick (no process-local timer state):
+
+```json
+{
+  "tickIntervalMs": 60000,
+  "staleAfterMs": 180000,
+  "stale": false,
+  "lastAttemptAt": "2026-10-08T12:57:12.673Z",
+  "lastClaimedTickAt": "2026-10-08T12:57:12.681Z",
+  "lastSuccessfulTickAt": "2026-10-08T12:57:12.965Z",
+  "lastActionAt": "2026-10-08T12:57:12.965Z",
+  "lastFailureAt": null,
+  "lastOutcome": "SUCCESS",
+  "consecutiveFailures": 0,
+  "lastTickSummary": { "trades": 2, "holds": 2, "skips": 0 }
+}
+```
+
+`stale` is true when no tick has ever succeeded or the last success is older than `staleAfterMs` (three tick intervals) at the response snapshot. A claimed tick is not a success: `lastClaimedTickAt` can be newer than `lastSuccessfulTickAt` after a timeout or error. `lastOutcome` is one of `SUCCESS`, `SIGNALS_FAILED`, `TIMEOUT`, `ERROR`; no raw error text, seeds or strategy internals are exposed. A tick is `SUCCESS` only when every bot was processed without a decision, programming or infrastructure failure; expected domain rejections (e.g. a price that moved mid-tick) count as skips, while a throwing decision, a server-cancelled statement/lock wait or a connection error fails the tick (`ERROR`, or `TIMEOUT` when every failure was a cancelled statement/lock wait), leaves `lastSuccessfulTickAt` unchanged and increments `consecutiveFailures`. `lastActionAt` is the time of the most recent committed bot trade/loan/repayment, recorded as it commits, even when its tick later fails.
+
+Holding `averageEntryPrice` on `GET /api/persistent/account` is the unrounded `costBasis / quantity` price ratio (format it for display); `costBasis`, `currentValue` and `unrealizedPnl` remain 2-decimal money.
 
 ### Buy or sell
 

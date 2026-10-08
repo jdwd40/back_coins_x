@@ -88,8 +88,24 @@ const COIN_KEYS = ['coinId', 'events', 'activeNetModifierPct'].sort();
 const EVENT_KEYS = ['eventId', 'name', 'modifierPct', 'startsAt', 'endsAt'].sort();
 const SUMMARY_ALLOWLIST = ['GENESIS_NORMAL', 'NORMAL_SWING', 'REFRACTORY_NORMAL', 'STAGNATION_SWING', 'RESCUE_DISTRESS', 'OVERHEAT_CORRECTION', 'ROLE_ROTATION', 'OTHER_SAFE'];
 
+// Issue #56: the additive durable bot heartbeat (exact allowlisted keys).
+const BOTS_KEYS = [
+  'tickIntervalMs', 'staleAfterMs', 'stale', 'lastAttemptAt', 'lastClaimedTickAt',
+  'lastSuccessfulTickAt', 'lastActionAt', 'lastFailureAt', 'lastOutcome',
+  'consecutiveFailures', 'lastTickSummary'
+].sort();
+
 function assertExactRuntimeKeys(data) {
-  expect(Object.keys(data).sort()).toEqual(['coins', 'director', 'serverTime', 'worldId'].sort());
+  expect(Object.keys(data).sort()).toEqual(['bots', 'coins', 'director', 'serverTime', 'worldId'].sort());
+  if (data.worldId === null) {
+    expect(data.bots).toBeNull();
+  } else {
+    expect(Object.keys(data.bots).sort()).toEqual(BOTS_KEYS);
+    expect(typeof data.bots.stale).toBe('boolean');
+    if (data.bots.lastTickSummary !== null) {
+      expect(Object.keys(data.bots.lastTickSummary).sort()).toEqual(['holds', 'skips', 'trades']);
+    }
+  }
   expect(typeof data.serverTime).toBe('string');
   expect(Number.isFinite(new Date(data.serverTime).getTime())).toBe(true);
   if (data.director !== null) {
@@ -136,9 +152,10 @@ describe('Wave 4: GET /api/persistent/runtime (real PG, disposable coins_test)',
     expect(Object.keys(res.body).sort()).toEqual(['data', 'status'].sort());
     expect(res.body.status).toBe('success');
     const data = res.body.data;
-    expect(Object.keys(data).sort()).toEqual(['coins', 'director', 'serverTime', 'worldId'].sort());
+    expect(Object.keys(data).sort()).toEqual(['bots', 'coins', 'director', 'serverTime', 'worldId'].sort());
     expect(data.worldId).toBeNull();
     expect(data.director).toBeNull();
+    expect(data.bots).toBeNull();
     expect(data.coins).toEqual([]);
     expect(typeof data.serverTime).toBe('string');
     // The soft resolve must never provision a world.
