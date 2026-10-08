@@ -36,6 +36,7 @@
 // it) trades normally at the server-locked live price.
 
 const db = require('../db/connection');
+const { applyLocalTimeouts } = require('../db/timeouts');
 const persistentWorld = require('./persistentWorld');
 const {
   GAME_MIN_TRADE_VALUE,
@@ -232,15 +233,20 @@ async function persistentCoinStatus(client, worldId, coinIdNum) {
 // basis upsert, ledger row after success — all in ONE transaction on ONE
 // client. Any validation failure rolls back cash/holding/ledger entirely.
 // ---------------------------------------------------------------------------
-async function buyPersistentTrade({ userId, coinId, quantity: rawQuantity } = {}) {
+// Optional `timeouts` ({ statementTimeoutMs, lockTimeoutMs,
+// idleInTransactionTimeoutMs }) are applied with SET LOCAL inside the trade
+// transaction so the SERVER cancels a stuck statement or lock wait (issue
+// #56: the bot tick must never wait forever). Player trades pass none and
+// keep the existing behaviour.
+async function buyPersistentTrade({ userId, coinId, quantity: rawQuantity, timeouts = null } = {}) {
   const { userIdNum, coinIdNum } = validateIds(userId, coinId);
   const quantity = validateQuantity(rawQuantity);
-
-  const world = await persistentWorld.resolveActiveWorld(db);
 
   const client = await db.getClient();
   try {
     await client.query('BEGIN');
+    await applyLocalTimeouts(client, timeouts);
+    const world = await persistentWorld.resolveActiveWorld(client);
 
     // Lock the authoritative coin row FIRST (coins-before-account order —
     // the market writer's batch locks all coins first too). The price is
@@ -367,15 +373,15 @@ async function buyPersistentTrade({ userId, coinId, quantity: rawQuantity } = {}
 // remaining cost basis (a full sale zeroes it), cash credit and ledger row
 // land in the same transaction.
 // ---------------------------------------------------------------------------
-async function sellPersistentTrade({ userId, coinId, quantity: rawQuantity } = {}) {
+async function sellPersistentTrade({ userId, coinId, quantity: rawQuantity, timeouts = null } = {}) {
   const { userIdNum, coinIdNum } = validateIds(userId, coinId);
   const quantity = validateQuantity(rawQuantity);
-
-  const world = await persistentWorld.resolveActiveWorld(db);
 
   const client = await db.getClient();
   try {
     await client.query('BEGIN');
+    await applyLocalTimeouts(client, timeouts);
+    const world = await persistentWorld.resolveActiveWorld(client);
 
     // Lock the authoritative coin row; the sale price is server-side only.
     const { rows: coinRows } = await client.query(
@@ -523,7 +529,14 @@ async function getPersistentAccountState({ userId, queryable = db } = {}) {
     // Server-owned position economics (mirrors the V2-2 round holding
     // contract): the client never derives money. Rows are quantity > 0 by
     // the WHERE clause, so the average entry always exists here.
-    const averageEntryPrice = quantity > 0 ? round2(costBasis / quantity) : null;
+    //
+    // Issue #55: the average entry is a PRICE ratio, not money — it is
+    // returned unrounded (costBasis / quantity). Rounding it to pennies made
+    // every sub-£1 coin show a wrong entry (PLD £0.1100 vs £0.1089) and
+    // shifted the bots' profit-take/loss-cut triggers. Display precision is
+    // the client's formatPrice job; costBasis/currentValue/unrealizedPnl stay
+    // 2dp money.
+    const averageEntryPrice = quantity > 0 ? costBasis / quantity : null;
     const unrealizedPnl = round2(currentValue - costBasis);
     const unrealizedPnlPct = costBasis > 0 ? round2((unrealizedPnl / costBasis) * 100) : null;
     return {

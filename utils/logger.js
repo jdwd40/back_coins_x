@@ -10,6 +10,12 @@ const logger = {
   error: (...args) => {
     console.error(...args);
   },
+  // Concise operational summaries that must be visible in production logs
+  // (issue #56: one safe line per persistent bot tick). Never pass secrets,
+  // seeds or raw request data here.
+  info: (...args) => {
+    console.log(...args);
+  },
   // Warnings always available (used by CORS rejection path in production)
   warn: (...args) => {
     console.warn(...args);

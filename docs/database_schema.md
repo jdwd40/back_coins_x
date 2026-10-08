@@ -65,7 +65,8 @@ coins ──< price_history
 | Director audit history | `director_decision_history` | safe recent decision summaries |
 | Coin events | `persistent_coin_events` | runtime API; capped net modifier enters pricing once |
 | Restart state | `market_price_checkpoints` plus Director cursors | market writer resume |
-| Bot tick completion | `persistent_bot_ticks` | no public raw tick data |
+| Bot tick claim | `persistent_bot_ticks` (a claim means the tick STARTED, not that it succeeded) | no public raw tick data |
+| Bot worker heartbeat | `persistent_bot_heartbeat` (migration 033; attempt / claim / success / failure kept distinct) | runtime API `bots` (allowlisted, `stale` after 3 intervals) |
 
 ## Atomicity and lock order
 

@@ -56,7 +56,19 @@
 //     the cap formula is NEVER duplicated here) * 100, rounded to 4
 //     decimals.
 //
-// Exact public keys only: top {serverTime, worldId, director, coins};
+// Issue #56 bot heartbeat: top-level `bots` is null with no active world,
+// otherwise the allowlisted durable heartbeat projection
+// {tickIntervalMs, staleAfterMs, stale, lastAttemptAt, lastClaimedTickAt,
+// lastSuccessfulTickAt, lastActionAt, lastFailureAt, lastOutcome,
+// consecutiveFailures, lastTickSummary: {trades, holds, skips} | null} read
+// from persistent_bot_heartbeat (migration 033) under the SAME snapshot.
+// `stale` = no successful tick yet, or the last success is older than
+// staleAfterMs (3 tick intervals) at the snapshot instant. Nothing here is
+// derived from this API process's own timers — the reader may not be the
+// process running the worker — so there is deliberately no
+// "workerRunning" flag. No raw errors, seeds or strategy/config internals.
+//
+// Exact public keys only: top {serverTime, worldId, director, coins, bots};
 // director {mode, direction, intensity, startedAt, endsAt, goldenCoinId,
 // goldenExpiresAt, demonCoinId, demonExpiresAt, recentDecisions};
 // decision {mode, direction, intensity, startedAt, endsAt, summaryCode};
@@ -72,7 +84,24 @@ const persistentCoinEventDomain = require('./persistentCoinEventDomain');
 const controlModel = require('../models/directorControlState.model');
 const eventsModel = require('../models/persistentCoinEvents.model');
 const decisionHistoryModel = require('../models/directorDecisionHistory.model');
+const heartbeatModel = require('../models/persistentBotHeartbeat.model');
 const { resolveSimulationConfig } = require('./simulationConfig');
+const { DEFAULT_BOT_TICK_INTERVAL_MS, resolvePersistentBotTickLimits } = require('./botConfig');
+
+// The staleness scale for the public heartbeat. A malformed bot interval
+// configuration must not take the public runtime read down with it; the
+// default interval is used for the display threshold in that case (the
+// worker itself refuses to run on an invalid config, so the heartbeat
+// will read stale regardless).
+function resolveHeartbeatScale() {
+  let limits;
+  try {
+    limits = resolvePersistentBotTickLimits();
+  } catch (_) {
+    limits = resolvePersistentBotTickLimits(DEFAULT_BOT_TICK_INTERVAL_MS);
+  }
+  return { tickIntervalMs: limits.tickIntervalMs, staleAfterMs: limits.staleAfterMs };
+}
 
 const RECENT_DECISIONS_LIMIT = 10;
 
@@ -150,7 +179,7 @@ function projectRoles(control, rosterIds, snapshotMs) {
   return { golden, demon };
 }
 
-async function getPersistentRuntime({ queryable = db, config = resolveSimulationConfig() } = {}) {
+async function getPersistentRuntime({ queryable = db, config = resolveSimulationConfig(), heartbeatScale = resolveHeartbeatScale() } = {}) {
   const ownsConnection = queryable === db;
   let client = queryable;
   if (ownsConnection) {
@@ -174,7 +203,7 @@ async function getPersistentRuntime({ queryable = db, config = resolveSimulation
       if (ownsConnection) {
         await client.query('COMMIT');
       }
-      return { serverTime, worldId: null, director: null, coins: [] };
+      return { serverTime, worldId: null, director: null, coins: [], bots: null };
     }
     const worldId = world.worldId;
 
@@ -191,6 +220,7 @@ async function getPersistentRuntime({ queryable = db, config = resolveSimulation
       [worldId]
     );
     const activeEvents = await eventsModel.listActivePersistentCoinEvents(client, worldId, snapshotMs);
+    const heartbeat = await heartbeatModel.loadHeartbeat(client, worldId);
 
     const rosterIds = new Set(rosterRows.map((row) => Number(row.coin_id)));
 
@@ -259,7 +289,13 @@ async function getPersistentRuntime({ queryable = db, config = resolveSimulation
       await client.query('COMMIT');
     }
 
-    return { serverTime, worldId, director, coins };
+    const bots = heartbeatModel.projectPublicBotHeartbeat(heartbeat, {
+      snapshotMs,
+      tickIntervalMs: heartbeatScale.tickIntervalMs,
+      staleAfterMs: heartbeatScale.staleAfterMs
+    });
+
+    return { serverTime, worldId, director, coins, bots };
   } catch (err) {
     if (ownsConnection && client && typeof client.query === 'function') {
       try { await client.query('ROLLBACK'); } catch (_) {}

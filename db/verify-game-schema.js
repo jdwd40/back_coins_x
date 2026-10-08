@@ -2276,6 +2276,148 @@ async function verifyDirectorDecisionHistory(q, problems) {
   if (bad.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${bad.rows[0].n} director decision history rows with inverted window, out-of-band intensity or negative decision index`);
 }
 
+// Issue #56 (migration 033): the durable cross-process bot worker
+// heartbeat — one row per world; a claim, a success and a failure are
+// distinct facts, and the outcome vocabulary is a fixed public-safe list.
+//
+// The COMPLETE shape is verified (review R4/R4b), mirroring migration
+// 033's compatibility check: exact column set/types/nullability/defaults;
+// every CHECK compared VERBATIM with the server's canonical deparse of the
+// ENFORCED expression (no text normalisation, so quoted literals such as
+// 'public.SUCCESS', casts and "OR TRUE" weakenings can never be erased
+// into a match); PK/FK compared structurally on key column names and the
+// referenced relation's OID; validated, non-deferrable, with no extra
+// constraint or user trigger.
+const HEARTBEAT_COLUMNS = Object.freeze([
+  ['world_id', 'integer', true, null],
+  ['last_attempt_at', 'timestamp with time zone', false, null],
+  ['last_claimed_tick_id', 'bigint', false, null],
+  ['last_claimed_at', 'timestamp with time zone', false, null],
+  ['last_success_tick_id', 'bigint', false, null],
+  ['last_success_at', 'timestamp with time zone', false, null],
+  ['last_action_at', 'timestamp with time zone', false, null],
+  ['last_failure_at', 'timestamp with time zone', false, null],
+  ['last_outcome', 'character varying(16)', false, null],
+  ['consecutive_failures', 'integer', true, '0'],
+  ['last_trade_count', 'integer', false, null],
+  ['last_hold_count', 'integer', false, null],
+  ['last_skip_count', 'integer', false, null],
+  ['updated_at', 'timestamp with time zone', true, 'now()']
+]);
+
+// key -> [contype, expected]. PK/FK are keyed by type (their names are
+// generated) and checked structurally: expected is { cols, refTable,
+// refCols }. CHECKs are keyed by their fixed names and expected is the
+// EXACT canonical pg_get_constraintdef text.
+const HEARTBEAT_CONSTRAINTS = Object.freeze({
+  p: ['p', { cols: ['world_id'], refTable: null, refCols: null }],
+  f: ['f', { cols: ['world_id'], refTable: 'public.market_worlds', refCols: ['world_id'] }],
+  persistent_bot_heartbeat_outcome_known: ['c', "CHECK (((last_outcome IS NULL) OR ((last_outcome)::text = ANY ((ARRAY['SUCCESS'::character varying, 'SIGNALS_FAILED'::character varying, 'TIMEOUT'::character varying, 'ERROR'::character varying])::text[]))))"],
+  persistent_bot_heartbeat_failures_nonneg: ['c', 'CHECK ((consecutive_failures >= 0))'],
+  persistent_bot_heartbeat_claim_pair: ['c', 'CHECK (((last_claimed_tick_id IS NULL) = (last_claimed_at IS NULL)))'],
+  persistent_bot_heartbeat_success_pair: ['c', 'CHECK (((last_success_tick_id IS NULL) = (last_success_at IS NULL)))'],
+  persistent_bot_heartbeat_values_nonneg: ['c', 'CHECK ((((last_claimed_tick_id IS NULL) OR (last_claimed_tick_id >= 0)) AND ((last_success_tick_id IS NULL) OR (last_success_tick_id >= 0)) AND ((last_trade_count IS NULL) OR (last_trade_count >= 0)) AND ((last_hold_count IS NULL) OR (last_hold_count >= 0)) AND ((last_skip_count IS NULL) OR (last_skip_count >= 0))))']
+});
+
+function sameList(a, b) {
+  if (a === null || b === null) return a === b;
+  return Array.isArray(a) && a.length === b.length && a.every((v, i) => v === b[i]);
+}
+
+function heartbeatConstraintMatches(row, expected) {
+  if (row.contype === 'c') return row.def === expected;
+  return sameList(row.cols, expected.cols)
+    && (row.ref_table ?? null) === expected.refTable
+    && sameList(row.ref_cols ?? null, expected.refCols);
+}
+
+async function verifyPersistentBotHeartbeat(q, problems) {
+  const table = 'persistent_bot_heartbeat';
+  const reg = await q(`SELECT c.relkind FROM pg_class c WHERE c.oid = to_regclass('public.${table}')`);
+  if (reg.rows.length === 0) {
+    problems.push(`table public.${table} does not exist`);
+    return;
+  }
+  const before = problems.length;
+  if (reg.rows[0].relkind !== 'r') problems.push(`public.${table} is not an ordinary table (relkind ${reg.rows[0].relkind})`);
+
+  const cols = await q(
+    `SELECT a.attname AS name, format_type(a.atttypid, a.atttypmod) AS dtype,
+            a.attnotnull AS nn, pg_get_expr(d.adbin, d.adrelid) AS dflt
+       FROM pg_attribute a
+       LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+      WHERE a.attrelid = 'public.${table}'::regclass AND a.attnum > 0 AND NOT a.attisdropped`
+  );
+  const actualCols = new Map(cols.rows.map((r) => [r.name, r]));
+  for (const [name, dtype, nn, dflt] of HEARTBEAT_COLUMNS) {
+    const col = actualCols.get(name);
+    if (!col) { problems.push(`missing column: ${table}.${name}`); continue; }
+    if (col.dtype !== dtype) problems.push(`column ${table}.${name}: type ${col.dtype}, expected ${dtype}`);
+    if (col.nn !== nn) problems.push(`column ${table}.${name}: not null=${col.nn}, expected ${nn}`);
+    if ((col.dflt ?? null) !== dflt) problems.push(`column ${table}.${name}: default ${col.dflt ?? 'none'}, expected ${dflt ?? 'none'}`);
+  }
+  const expectedNames = new Set(HEARTBEAT_COLUMNS.map(([name]) => name));
+  for (const name of actualCols.keys()) {
+    if (!expectedNames.has(name)) problems.push(`unexpected column: ${table}.${name}`);
+  }
+
+  const cons = await q(
+    `SELECT c.conname, c.contype, c.convalidated, c.condeferrable,
+            c.confupdtype, c.confdeltype, c.confmatchtype, pg_get_constraintdef(c.oid) AS def,
+            (SELECT array_agg(a.attname::text ORDER BY k.ord)
+               FROM unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord)
+               JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum) AS cols,
+            (SELECT rn.nspname::text || '.' || r.relname::text
+               FROM pg_class r JOIN pg_namespace rn ON rn.oid = r.relnamespace
+              WHERE r.oid = c.confrelid) AS ref_table,
+            (SELECT array_agg(a.attname::text ORDER BY k.ord)
+               FROM unnest(c.confkey) WITH ORDINALITY AS k(attnum, ord)
+               JOIN pg_attribute a ON a.attrelid = c.confrelid AND a.attnum = k.attnum) AS ref_cols
+       FROM pg_constraint c
+      WHERE c.conrelid = 'public.${table}'::regclass AND c.contype <> 'n'`
+  );
+  const seen = new Set();
+  for (const r of cons.rows) {
+    const key = r.contype === 'p' || r.contype === 'f' ? r.contype : r.conname;
+    const expected = HEARTBEAT_CONSTRAINTS[key];
+    if (!expected || expected[0] !== r.contype) {
+      problems.push(`unexpected constraint on ${table}: ${r.conname} (${r.def})`);
+      continue;
+    }
+    seen.add(key);
+    if (!heartbeatConstraintMatches(r, expected[1])) {
+      problems.push(`constraint ${table}.${r.conname} does not enforce the intended expression (found ${r.def})`);
+    }
+    if (r.convalidated !== true) problems.push(`constraint ${table}.${r.conname} is NOT VALID`);
+    if (r.condeferrable === true) problems.push(`constraint ${table}.${r.conname} is deferrable`);
+    if (r.contype === 'f' && (r.confupdtype !== 'a' || r.confdeltype !== 'a' || r.confmatchtype !== 's')) {
+      problems.push(`constraint ${table}.${r.conname} has unexpected referential actions (found ${r.def})`);
+    }
+  }
+  for (const key of Object.keys(HEARTBEAT_CONSTRAINTS)) {
+    if (!seen.has(key)) {
+      const label = key === 'p' ? 'primary key (world_id)' : key === 'f' ? 'FOREIGN KEY world_id -> market_worlds' : `CHECK ${key}`;
+      problems.push(`missing constraint on ${table}: ${label}`);
+    }
+  }
+
+  const triggers = await q(
+    `SELECT tgname FROM pg_trigger WHERE tgrelid = 'public.${table}'::regclass AND NOT tgisinternal ORDER BY tgname`
+  );
+  for (const t of triggers.rows) problems.push(`unexpected user trigger on ${table}: ${t.tgname}`);
+
+  // Live-data invariant, only once the shape it depends on is verified
+  // (an incompatible table is reported as problems, never as a thrown
+  // query error). A success can never be newer than the newest claim.
+  if (problems.length !== before) return;
+  const bad = await q(
+    `SELECT count(*)::int AS n FROM persistent_bot_heartbeat
+      WHERE last_success_tick_id IS NOT NULL
+        AND (last_claimed_tick_id IS NULL OR last_success_tick_id > last_claimed_tick_id)`
+  );
+  if (bad.rows[0].n > 0) problems.push(`INVARIANT VIOLATION: ${bad.rows[0].n} persistent bot heartbeat rows record a successful tick newer than the newest claimed tick`);
+}
+
 async function verifyGameSchema({ query } = {}) {
   const q = query || ((...args) => db.query(...args));
   const problems = [];
@@ -2303,6 +2445,7 @@ async function verifyGameSchema({ query } = {}) {
   await verifyPersistentCoinEvents(q, problems);
   await verifyDirectorControlState(q, problems);
   await verifyDirectorDecisionHistory(q, problems);
+  await verifyPersistentBotHeartbeat(q, problems);
 
   return { ok: problems.length === 0, problems };
 }
@@ -2310,7 +2453,7 @@ if (require.main === module) {
   verifyGameSchema()
     .then(async ({ ok, problems }) => {
       if (ok) {
-        console.log('game schema verification PASSED (apocalypse_cycles [SETTLING lifecycle + settlement observability], coins.cycle_baseline_price, canonical coin catalogue [migrations 013 + 014 retirement], coin_collapse_schedule [legacy], apocalypse_coin_collapses [dynamic death record], apocalypse_participants, apocalypse_holdings, apocalypse_transactions, users.is_bot, apocalypse_bots, apocalypse_bot_ticks, apocalypse_cash_events, apocalypse_economy_ticks, apocalypse_economy_events, apocalypse_results [immutable], apocalypse_coin_events [0-5 active cap], apocalypse_market_phases [one primary phase], apocalypse_market_state [one row per cycle, monotonic peak], market_price_checkpoints [per-coin resumable pricing accumulator, exact float8/bigint round-trip], market_worlds [single active persistent world], market_coin_state [bidirectional condition, decaying reference, explicit timestamped death], market_director_state [one Director cursor per world, bounded intensity], persistent_accounts/holdings/transactions [one world-scoped persistent economy, exactly-once starting cash], persistent_accounts.debt + persistent_loans [bot-only interest-free loan ledger, debt persistence], persistent_bot_ticks [world-scoped bot tick identity], persistent_coin_events [persistent-world coin-event authority, per-world/per-coin sequence identity, 0-5 active cap], director_control_state [Director short-term control cursor, Golden/Demon distinct], director_decision_history [append-only Director decision ledger, summary codes only])');
+        console.log('game schema verification PASSED (apocalypse_cycles [SETTLING lifecycle + settlement observability], coins.cycle_baseline_price, canonical coin catalogue [migrations 013 + 014 retirement], coin_collapse_schedule [legacy], apocalypse_coin_collapses [dynamic death record], apocalypse_participants, apocalypse_holdings, apocalypse_transactions, users.is_bot, apocalypse_bots, apocalypse_bot_ticks, apocalypse_cash_events, apocalypse_economy_ticks, apocalypse_economy_events, apocalypse_results [immutable], apocalypse_coin_events [0-5 active cap], apocalypse_market_phases [one primary phase], apocalypse_market_state [one row per cycle, monotonic peak], market_price_checkpoints [per-coin resumable pricing accumulator, exact float8/bigint round-trip], market_worlds [single active persistent world], market_coin_state [bidirectional condition, decaying reference, explicit timestamped death], market_director_state [one Director cursor per world, bounded intensity], persistent_accounts/holdings/transactions [one world-scoped persistent economy, exactly-once starting cash], persistent_accounts.debt + persistent_loans [bot-only interest-free loan ledger, debt persistence], persistent_bot_ticks [world-scoped bot tick identity], persistent_coin_events [persistent-world coin-event authority, per-world/per-coin sequence identity, 0-5 active cap], director_control_state [Director short-term control cursor, Golden/Demon distinct], director_decision_history [append-only Director decision ledger, summary codes only], persistent_bot_heartbeat [durable cross-process bot worker heartbeat, claim/success/failure distinct])');
         await db.end();
         return;
       }

@@ -534,6 +534,33 @@ function resolveBotConfig(env = process.env) {
   };
 }
 
+// Issue #56: bounded persistent bot ticks. Derived from the validated tick
+// interval (no new env surface):
+//   * deadlineMs — the cooperative tick budget: no new phase/bot starts
+//     after it, so a slow tick ends well before the next wakeup;
+//   * statement/lock/idle-in-transaction limits — PostgreSQL-side bounds
+//     that genuinely CANCEL stuck database work (a JS race would not);
+//   * staleAfterMs — the public heartbeat staleness threshold (three
+//     missed intervals, the issue's alerting rule).
+const BOT_TICK_DEADLINE_FRACTION = 2 / 3;
+const MAX_BOT_STATEMENT_TIMEOUT_MS = 10 * 1000;
+const MAX_BOT_LOCK_TIMEOUT_MS = 5 * 1000;
+const BOT_IDLE_IN_TRANSACTION_TIMEOUT_MS = 15 * 1000;
+const BOT_HEARTBEAT_STALE_INTERVALS = 3;
+
+function resolvePersistentBotTickLimits(tickIntervalMs = resolveBotConfig().tickIntervalMs) {
+  const interval = validateBotTickIntervalMs(tickIntervalMs);
+  const deadlineMs = Math.max(1, Math.floor(interval * BOT_TICK_DEADLINE_FRACTION));
+  return {
+    tickIntervalMs: interval,
+    deadlineMs,
+    statementTimeoutMs: Math.min(MAX_BOT_STATEMENT_TIMEOUT_MS, deadlineMs),
+    lockTimeoutMs: Math.min(MAX_BOT_LOCK_TIMEOUT_MS, deadlineMs),
+    idleInTransactionTimeoutMs: BOT_IDLE_IN_TRANSACTION_TIMEOUT_MS,
+    staleAfterMs: interval * BOT_HEARTBEAT_STALE_INTERVALS
+  };
+}
+
 // Module-load roster validation: a malformed roster can never reach a tick.
 validateBotRoster();
 // Module-load profile validation: a malformed exit/exposure profile can
@@ -558,6 +585,8 @@ module.exports = {
   validateBotPersonalityProfiles,
   validateBotMaxCoinExposureFraction,
   DEFAULT_BOT_TICK_INTERVAL_MS,
+  BOT_HEARTBEAT_STALE_INTERVALS,
+  resolvePersistentBotTickLimits,
   MIN_BOT_TICK_INTERVAL_MS,
   MAX_BOT_TICK_INTERVAL_MS,
   DEFAULT_BOT_MAX_TRADE_SIZE,
