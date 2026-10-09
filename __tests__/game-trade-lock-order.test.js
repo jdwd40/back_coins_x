@@ -44,6 +44,19 @@ function cycleStartNow() {
 async function setupLiveRound(userId, now) {
   const cycle = await reconcileCycle({ now });
   const participant = await gameRoundService.joinRound({ userId, now });
+  // joinRound's second reconcile is the first collapse evaluation, and the
+  // pre-decline roll can genuinely kill the target coin (~1% for FTR at this
+  // instant; the buy then throws "collapsed to £0"). The roll depends on the
+  // wall-clock bucket, so a fixed seed is not stable across the day. This
+  // test is about lock order, not collapse: if that roll landed on coin 1,
+  // clear it and put the price back so the precondition holds.
+  await db.query(
+    'DELETE FROM apocalypse_coin_collapses WHERE coin_id = 1 AND cycle_id = $1',
+    [cycle.cycle_id]
+  );
+  await db.query(
+    'UPDATE coins SET current_price = cycle_baseline_price WHERE coin_id = 1 AND current_price = 0'
+  );
   return { apocalypseId: cycle.apocalypse_id, participantId: participant.participantId };
 }
 

@@ -72,7 +72,16 @@ async function txRows(participantId) {
 // Fixed-time cycle (fresh 7-day window: every coin stays alive) with user 1 joined.
 async function setupLongRound(userId = 1) {
   const now = LONG_ROUND_NOW;
-  const cycle = await reconcileCycle({ now, durationMs: LONG_DURATION_MS });
+  // joinRound reconciles the cycle a second time, and that pass is the
+  // first real collapse evaluation. The death roll is seeded but not zero
+  // (measured: FTR died in 1 of 100 fresh cycles here), so an unseeded cycle
+  // occasionally makes the following buy throw "collapsed to £0". Pin the
+  // seed to one verified to leave every coin alive at this instant.
+  const cycle = await reconcileCycle({
+    now,
+    durationMs: LONG_DURATION_MS,
+    generateSeed: () => 'alive-fixture-1'
+  });
   const participant = await joinRound({ userId, now });
   return { cycle, participant, now };
 }

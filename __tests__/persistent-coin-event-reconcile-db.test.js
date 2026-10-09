@@ -256,6 +256,8 @@ describe('Wave 3 reconcile (DB): concurrency and identity safety', () => {
       expect(rows).toHaveLength(2); // exactly one payload set committed
       expect(new Set(rows.map((r) => r.event_seq)).size).toBe(2);
     } finally {
+      await clientA.query('ROLLBACK').catch(() => {}); // no-op after COMMIT; ends the tx if the body threw
+      await clientB.query('ROLLBACK').catch(() => {}); // no-op after COMMIT; ends the tx if the body threw
       clientA.release();
       clientB.release();
     }

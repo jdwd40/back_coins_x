@@ -25,7 +25,15 @@ const { assertDisposableTestDatabase } = require('./helpers/testDatabaseGuard');
 jest.setTimeout(120000);
 
 const WORLD_SEED = 'stage11-02-persistent-market-signals-test';
-const EPOCH = new Date('2026-09-04T00:00:00.000Z');
+// World epoch relative to the real clock. The tests drive writer batches at
+// Date.now()-based instants, and each batch resumes from the previous
+// checkpoint (beforeEach commits one at EPOCH + 60s). The persistent pricing
+// bounded-walk guard (MAX_PERSISTENT_CYCLES = 10000, about 14 days for the
+// fastest archetype) rejects a longer gap, so a fixed calendar epoch made
+// every later batch abort once the date was ~2 weeks old. One hour back
+// keeps every batch instant used below after the checkpoint and well
+// inside the guard.
+const EPOCH = new Date(Date.now() - 60 * 60 * 1000);
 
 function round2(v) { return Math.round(v * 100) / 100; }
 
@@ -287,13 +295,16 @@ describe('Stage 11-02: GET /api/persistent/signals (real PG, disposable coins_te
     expect(c4.momentum).toBe('FLAT');
 
     // replacement also exercises recent=null for fresh intro (history at reconcile now, not <=cutoff)
-    await forceWriterDeath(2, Date.now() - 200000);
-    const del = await replacementRuntime.reconcilePersistentReplacements({ nowMs: Date.now() - 200000 + 7 * 3600 * 1000 });
+    // (Batch instant must not precede the coin-3 death batch above, whose
+    // checkpoints are at ~Date.now(); an earlier instant aborts the batch as
+    // a "checkpoint from the future".)
+    await forceWriterDeath(2, Date.now());
+    const del = await replacementRuntime.reconcilePersistentReplacements({ nowMs: Date.now() + 7 * 3600 * 1000 });
     res = await request(app).get('/api/persistent/signals').expect(200);
+    expect(del.inserted.length).toBeGreaterThan(0);
     const newish = res.body.data.coins.find(c => c.coinId > 100 && c.status === 'ALIVE');
-    if (newish) {
-      expect(newish.recentChangePct).toBeNull();
-    }
+    expect(newish).toBeDefined();
+    expect(newish.recentChangePct).toBeNull();
   });
 
   test('10. real concurrent tx snapshot: signals sees pre-commit or post-commit replace state, never partial mix (no mock of locking)', async () => {
@@ -302,40 +313,51 @@ describe('Stage 11-02: GET /api/persistent/signals (real PG, disposable coins_te
     const preCheck = await db.query('SELECT retired FROM coins WHERE coin_id=1');
     expect(preCheck.rows[0].retired).toBe(false);
 
-    // Start uncommitted replace tx (real DB tx, no mock)
+    // Start uncommitted replace tx (real DB tx, no mock). Always end the
+    // transaction and release the client, even when an assertion fails:
+    // a leaked open transaction holds row locks that block every later
+    // test file's reseed (DROP TABLE) and stalls the whole suite.
     const writeClient = await db.getClient();
-    await writeClient.query('BEGIN');
-    // Retire the predecessor inside tx (uncommitted)
-    await writeClient.query('UPDATE coins SET retired = true WHERE coin_id = 1');
-    // Insert authored replacement inside same uncommitted tx (partial work)
-    await writeClient.query(
-      `INSERT INTO coins (coin_id, name, symbol, current_price, market_cap, circulating_supply, price_change_24h, founder, cycle_baseline_price, retired)
-       VALUES (999, 'SnapTestRepl', 'SNAP', 0.25, 1000, 4000, 0, 'Stage11-snap', 0.25, false)
-       ON CONFLICT (coin_id) DO UPDATE SET retired = EXCLUDED.retired, current_price = EXCLUDED.current_price`
-    );
-    await writeClient.query(
-      `INSERT INTO market_coin_state (coin_id, world_id, archetype, condition, structural_reference, peak_reference, status, died_at)
-       SELECT 999, world_id, 'DEGEN', 0, 0.25, 0.25, 'ALIVE', NULL
-       FROM market_worlds WHERE active LIMIT 1
-       ON CONFLICT (coin_id) DO NOTHING`
-    );
-    // Insert minimal history
-    await writeClient.query(
-      `INSERT INTO price_history (coin_id, price, created_at, source) VALUES (999, 0.25, now(), 'MARKET_TICK')`
-    );
+    let committed = false;
+    try {
+      await writeClient.query('BEGIN');
+      // Retire the predecessor inside tx (uncommitted)
+      await writeClient.query('UPDATE coins SET retired = true WHERE coin_id = 1');
+      // Insert authored replacement inside same uncommitted tx (partial work)
+      await writeClient.query(
+        `INSERT INTO coins (coin_id, name, symbol, current_price, market_cap, circulating_supply, price_change_24h, founder, cycle_baseline_price, retired)
+         VALUES (999, 'SnapTestRepl', 'SNAP', 0.25, 1000, 4000, 0, 'Stage11-snap', 0.25, false)
+         ON CONFLICT (coin_id) DO UPDATE SET retired = EXCLUDED.retired, current_price = EXCLUDED.current_price`
+      );
+      await writeClient.query(
+        `INSERT INTO market_coin_state (coin_id, world_id, archetype, condition, structural_reference, peak_reference, status, died_at)
+         SELECT 999, world_id, 'DEGEN', 0, 0.25, 0.25, 'ALIVE', NULL
+         FROM market_worlds WHERE active LIMIT 1
+         ON CONFLICT (coin_id) DO NOTHING`
+      );
+      // Insert minimal history
+      await writeClient.query(
+        `INSERT INTO price_history (coin_id, price, created_at, source) VALUES (999, 0.25, now(), 'MARKET_TICK')`
+      );
 
-    // While tx uncommitted, signals (its own tx snapshot) MUST see pre state fully
-    const during = await request(app).get('/api/persistent/signals').expect(200);
-    const dData = during.body.data;
-    const seenDead = dData.coins.find(c => c.coinId === 1);
-    const seenNew = dData.coins.find(c => c.coinId === 999);
-    expect(seenDead).toBeDefined(); // pre: still visible, not yet retired in snapshot
-    expect(seenDead.status).toBe('DEAD');
-    expect(seenNew).toBeUndefined(); // no partial insert visible
+      // While tx uncommitted, signals (its own tx snapshot) MUST see pre state fully
+      const during = await request(app).get('/api/persistent/signals').expect(200);
+      const dData = during.body.data;
+      const seenDead = dData.coins.find(c => c.coinId === 1);
+      const seenNew = dData.coins.find(c => c.coinId === 999);
+      expect(seenDead).toBeDefined(); // pre: still visible, not yet retired in snapshot
+      expect(seenDead.status).toBe('DEAD');
+      expect(seenNew).toBeUndefined(); // no partial insert visible
 
-    // Commit the tx
-    await writeClient.query('COMMIT');
-    writeClient.release();
+      // Commit the tx
+      await writeClient.query('COMMIT');
+      committed = true;
+    } finally {
+      if (!committed) {
+        try { await writeClient.query('ROLLBACK'); } catch (_) { /* original failure wins */ }
+      }
+      writeClient.release();
+    }
 
     // Now post
     const post = await request(app).get('/api/persistent/signals').expect(200);
