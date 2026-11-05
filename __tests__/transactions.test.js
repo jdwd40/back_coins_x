@@ -115,11 +115,11 @@ describe('Transactions API', () => {
         });
     });
 
-    test('401: returns unauthorized when trying to view another user\'s transactions', () => {
+    test('403: returns forbidden when trying to view another user\'s transactions', () => {
       return request(app)
         .get('/api/transactions/user/2')
         .set('Authorization', `Bearer ${testUserToken}`)
-        .expect(401)
+        .expect(403)
         .then(({ body }) => {
           expect(body.msg).toBe('Unauthorized');
         });
@@ -153,14 +153,37 @@ describe('Transactions API', () => {
         });
     });
 
-    test('401: returns unauthorized when trying to view another user\'s portfolio', () => {
+    test('403: returns forbidden when trying to view another user\'s portfolio', () => {
       return request(app)
         .get('/api/transactions/portfolio/2')
         .set('Authorization', `Bearer ${testUserToken}`)
-        .expect(401)
+        .expect(403)
         .then(({ body }) => {
           expect(body.msg).toBe('Unauthorized');
         });
+    });
+  });
+
+  describe.each(['buy', 'sell'])('POST /api/transactions/%s for another user', (action) => {
+    test('403: is rejected without touching the target account', async () => {
+      const ledgerBefore = await db.query('SELECT count(*)::int AS n FROM transactions');
+      const fundsBefore = await db.query('SELECT funds FROM users WHERE user_id = 2');
+
+      const { status, body } = await request(app)
+        .post(`/api/transactions/${action}`)
+        .set('Authorization', `Bearer ${testUserToken}`)
+        .send({ user_id: 2, coin_id: 1, amount: 1 });
+
+      expect(status).toBe(403);
+      expect(body).toEqual({
+        status: 'error',
+        message: 'Unauthorized. You can only make transactions for your own account.'
+      });
+
+      const ledgerAfter = await db.query('SELECT count(*)::int AS n FROM transactions');
+      const fundsAfter = await db.query('SELECT funds FROM users WHERE user_id = 2');
+      expect(ledgerAfter.rows[0].n).toBe(ledgerBefore.rows[0].n);
+      expect(fundsAfter.rows[0].funds).toBe(fundsBefore.rows[0].funds);
     });
   });
 });

@@ -10,6 +10,14 @@ const {
 } = usersModel;
 
 /**
+ * Whether the authenticated user is the account named by the :user_id param.
+ * There is no admin role, so ownership is the only authorization rule.
+ * @param {Object} req - Express request object (after authenticateToken)
+ * @returns {boolean}
+ */
+const isAccountOwner = (req) => req.user.user_id === Number(req.params.user_id);
+
+/**
  * Registers a new user
  * @param {Object} req - Express request object
  * @param {Object} res - Express response object
@@ -160,6 +168,13 @@ const getUserProfile = async (req, res, next) => {
       });
     }
 
+    if (!isAccountOwner(req)) {
+      return res.status(403).json({ 
+        success: false,
+        msg: 'You can only access your own account' 
+      });
+    }
+
     const user = await selectUserById(user_id);
     if (!user) {
       return res.status(404).json({ 
@@ -204,6 +219,13 @@ const updateUserProfile = async (req, res, next) => {
       });
     }
     
+    if (!isAccountOwner(req)) {
+      return res.status(403).json({ 
+        success: false,
+        msg: 'You can only access your own account' 
+      });
+    }
+
     if (!updates || Object.keys(updates).length === 0) {
       return res.status(400).json({ 
         success: false,
@@ -271,6 +293,13 @@ const deleteUser = async (req, res, next) => {
       return res.status(400).json({ 
         success: false,
         msg: 'Invalid user ID' 
+      });
+    }
+
+    if (!isAccountOwner(req)) {
+      return res.status(403).json({ 
+        success: false,
+        msg: 'You can only access your own account' 
       });
     }
 

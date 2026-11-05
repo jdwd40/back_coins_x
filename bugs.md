@@ -4,21 +4,23 @@ Confirmed Coins defects only. Last reviewed against both production branches on 
 
 ## Open
 
-### P1 — authenticated profile routes do not enforce ownership
+### P1 — single-transaction read does not enforce ownership
 
-**Affected routes:**
+**Affected route:** `GET /api/transactions/:transaction_id`
 
-- `GET /api/users/:user_id`
-- `PUT /api/users/:user_id`
-- `DELETE /api/users/:user_id`
+**Evidence:** `getTransactionById` looks up the row by id alone and never compares its `user_id` with `req.user.user_id`, so any authenticated user can read any user's transaction.
 
-**Evidence:** `authenticateToken` confirms that the JWT belongs to a real user, but the three handlers use the path `user_id` without comparing it with `req.user.user_id`. An authenticated user can therefore target another user's profile id. The transaction and portfolio handlers already perform this ownership check.
+**Expected:** ordinary users may read only their own transactions.
 
-**Expected:** ordinary users may read, modify, or delete only their own profile. There is no admin role.
-
-**Status:** confirmed; not fixed by this documentation pass.
+**Status:** confirmed by code reading; not fixed.
 
 ## Fixed
+
+### Authenticated profile routes did not enforce ownership
+
+Any authenticated user could read, update (including password and email), or delete any account through `GET`, `PUT`, and `DELETE /api/users/:user_id`.
+
+**Fixed 5 November 2026:** the three handlers return `403` unless `:user_id` is the authenticated user. Cross-user rejections on the transaction routes also moved from `401` to `403`.
 
 ### Short-range market charts glitched or retained the wrong data
 

@@ -20,7 +20,7 @@ exports.getUserTransactions = async (req, res, next) => {
   try {
     // Check if the authenticated user matches the user_id in the request
     if (req.user.user_id !== parseInt(req.params.user_id)) {
-      return res.status(401).json({ msg: 'Unauthorized' });
+      return res.status(403).json({ msg: 'Unauthorized' });
     }
 
     const transactions = await selectUserTransactions(req.params.user_id);
@@ -46,7 +46,7 @@ exports.getPortfolioByUserId = async (req, res, next) => {
   try {
     // Check if the authenticated user matches the user_id in the request
     if (req.user.user_id !== parseInt(req.params.user_id)) {
-      return res.status(401).json({ msg: 'Unauthorized' });
+      return res.status(403).json({ msg: 'Unauthorized' });
     }
 
     const user_id = parseInt(req.params.user_id);
@@ -80,7 +80,7 @@ exports.processBuyTransaction = async (req, res, next) => {
 
     // Check if the authenticated user matches the user_id in the request
     if (req.user.user_id !== parseInt(user_id)) {
-      return res.status(401).json({ 
+      return res.status(403).json({ 
         status: 'error',
         message: 'Unauthorized. You can only make transactions for your own account.' 
       });
@@ -160,7 +160,7 @@ exports.processSellTransaction = async (req, res, next) => {
 
     // Check if the authenticated user matches the user_id in the request
     if (req.user.user_id !== parseInt(user_id)) {
-      return res.status(401).json({ 
+      return res.status(403).json({ 
         status: 'error',
         message: 'Unauthorized. You can only make transactions for your own account.' 
       });

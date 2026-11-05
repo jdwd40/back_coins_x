@@ -143,12 +143,12 @@ Persistent coin-history reads include only world ticks with `source='MARKET_TICK
 |---|---|---:|---|
 | `POST` | `/api/users/register` | Public | Register with `username`, `email`, and `password` |
 | `POST` | `/api/users/login` | Public | Authenticate and receive a JWT |
-| `GET` | `/api/users/:user_id` | JWT | Read a profile |
-| `PUT` | `/api/users/:user_id` | JWT | Update a profile |
-| `DELETE` | `/api/users/:user_id` | JWT | Delete a user |
+| `GET` | `/api/users/:user_id` | JWT | Read your own profile |
+| `PUT` | `/api/users/:user_id` | JWT | Update your own profile |
+| `DELETE` | `/api/users/:user_id` | JWT | Delete your own account |
 | `PATCH` | `/api/users/:user_id/funds` | JWT | Retained compatibility route; always returns `403` |
 
-Cross-user ownership enforcement for the three profile routes is tracked as an open defect in [`bugs.md`](bugs.md).
+The three profile routes return `403` when `:user_id` is not the authenticated user. There is no admin role.
 
 ## Legacy compatibility API
 
@@ -183,7 +183,7 @@ Diagnostics never expose the world seed, future event schedule, or internal Dire
 - `201` successful registration or trade
 - `400` invalid input or domain rejection
 - `401` missing, invalid, or expired authentication
-- `403` retired self-funding route
+- `403` request for another user's account or data, or the retired self-funding route
 - `404` missing resource or fail-closed diagnostics
 - `409` duplicate username/email
 - `500` unexpected server error
