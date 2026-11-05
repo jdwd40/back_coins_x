@@ -3,6 +3,15 @@ const app = require('../app');
 const db = require('../db/connection');
 const seed = require('../db/seed');
 const jwt = require('jsonwebtoken');
+const bcrypt = require('bcrypt');
+
+async function accountRow(userId) {
+  const { rows } = await db.query(
+    'SELECT user_id, username, email, password_hash, funds, updated_at FROM users WHERE user_id = $1',
+    [userId]
+  );
+  return rows[0];
+}
 
 describe('Users API', () => {
   let testUserToken;
@@ -328,13 +337,43 @@ describe('Users API', () => {
           });
       });
 
-      test('404: returns not found for non-existent user_id', () => {
-        return request(app)
+      test('403: cannot read another user\'s profile and exposes no profile data', async () => {
+        const { status, body } = await request(app)
+          .get('/api/users/2')
+          .set('Authorization', `Bearer ${testUserToken}`);
+
+        expect(status).toBe(403);
+        expect(body).toEqual({ success: false, msg: 'You can only access your own account' });
+      });
+
+      test('403: a non-existent user_id is denied the same way, so ids cannot be probed', async () => {
+        const missing = await request(app)
           .get('/api/users/999')
+          .set('Authorization', `Bearer ${testUserToken}`);
+        const existing = await request(app)
+          .get('/api/users/2')
+          .set('Authorization', `Bearer ${testUserToken}`);
+
+        expect(missing.status).toBe(403);
+        expect(missing.body).toEqual(existing.body);
+      });
+
+      test('400: rejects a non-numeric user_id', () => {
+        return request(app)
+          .get('/api/users/not-a-number')
           .set('Authorization', `Bearer ${testUserToken}`)
-          .expect(404)
+          .expect(400)
           .then(({ body }) => {
-            expect(body.msg).toBe('User not found');
+            expect(body.msg).toBe('Invalid user ID');
+          });
+      });
+
+      test('401: anonymous callers are rejected before user_id validation', () => {
+        return request(app)
+          .get('/api/users/not-a-number')
+          .expect(401)
+          .then(({ body }) => {
+            expect(body.msg).toBe('Authentication required');
           });
       });
     });
@@ -361,6 +400,65 @@ describe('Users API', () => {
           });
       });
 
+      test('200: a user can change their own password', async () => {
+        await request(app)
+          .put('/api/users/1')
+          .set('Authorization', `Bearer ${testUserToken}`)
+          .send({ password: 'new-password-1' })
+          .expect(200);
+
+        // Compare the hash directly: login skips bcrypt under NODE_ENV=test.
+        const { password_hash } = await accountRow(1);
+        expect(await bcrypt.compare('new-password-1', password_hash)).toBe(true);
+      });
+
+      test('400: own-account updates keep the existing validation', () => {
+        return request(app)
+          .put('/api/users/1')
+          .set('Authorization', `Bearer ${testUserToken}`)
+          .send({ password: 'short' })
+          .expect(400)
+          .then(({ body }) => {
+            expect(body.msg).toBe('Validation failed');
+          });
+      });
+
+      test('403: cannot change another user\'s password or email', async () => {
+        const before = await accountRow(2);
+
+        const { status, body } = await request(app)
+          .put('/api/users/2')
+          .set('Authorization', `Bearer ${testUserToken}`)
+          .send({ email: 'attacker@example.com', password: 'attacker-pass' });
+
+        expect(status).toBe(403);
+        expect(body).toEqual({ success: false, msg: 'You can only access your own account' });
+
+        const after = await accountRow(2);
+        expect(after).toEqual(before);
+        expect(after.email).toBe('jane@example.com');
+        expect(await bcrypt.compare('attacker-pass', after.password_hash)).toBe(false);
+      });
+
+      test('403: ownership is checked before the request body', () => {
+        return request(app)
+          .put('/api/users/2')
+          .set('Authorization', `Bearer ${testUserToken}`)
+          .send({})
+          .expect(403);
+      });
+
+      test('400: rejects a non-numeric user_id', () => {
+        return request(app)
+          .put('/api/users/not-a-number')
+          .set('Authorization', `Bearer ${testUserToken}`)
+          .send({ username: 'new_name' })
+          .expect(400)
+          .then(({ body }) => {
+            expect(body.msg).toBe('Invalid user ID');
+          });
+      });
+
       test('401: returns unauthorized when no token provided', () => {
         return request(app)
           .put('/api/users/1')
@@ -373,11 +471,35 @@ describe('Users API', () => {
     });
 
     describe('DELETE /api/users/:user_id', () => {
-      test('204: deletes user when authenticated', () => {
-        return request(app)
+      test('200: a user can delete their own account', async () => {
+        await request(app)
           .delete('/api/users/1')
           .set('Authorization', `Bearer ${testUserToken}`)
           .expect(200);
+
+        expect(await accountRow(1)).toBeUndefined();
+      });
+
+      test('403: cannot delete another user\'s account and the target remains', async () => {
+        const before = await accountRow(2);
+
+        const { status, body } = await request(app)
+          .delete('/api/users/2')
+          .set('Authorization', `Bearer ${testUserToken}`);
+
+        expect(status).toBe(403);
+        expect(body).toEqual({ success: false, msg: 'You can only access your own account' });
+        expect(await accountRow(2)).toEqual(before);
+      });
+
+      test('400: rejects a non-numeric user_id', () => {
+        return request(app)
+          .delete('/api/users/not-a-number')
+          .set('Authorization', `Bearer ${testUserToken}`)
+          .expect(400)
+          .then(({ body }) => {
+            expect(body.msg).toBe('Invalid user ID');
+          });
       });
 
       test('401: returns unauthorized when no token provided', () => {
