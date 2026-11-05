@@ -6,26 +6,46 @@
 //   * NODE_ENV === 'test'
 //   * the resolved database name contains "test" (e.g. coins_test)
 //   * the resolved host is local: localhost / 127.0.0.1 / ::1 / a unix socket
+//   * a DATABASE_URL names exactly one host and one database
 // Anything else throws immediately, so a misconfigured environment can never
 // turn the test suite loose on a development or production database.
+//
+// Errors never echo the resolved host or database: a malformed DATABASE_URL can
+// put password fragments in either.
 
-function resolveTarget() {
-  if (process.env.DATABASE_URL) {
-    let url;
-    try {
-      url = new URL(process.env.DATABASE_URL);
-    } catch (err) {
-      throw new Error(`test database guard: unparseable DATABASE_URL (${err.message})`);
-    }
-    return {
-      host: decodeURIComponent(url.hostname),
-      database: decodeURIComponent(url.pathname.replace(/^\//, ''))
-    };
+const { buildPoolConfig, resolveEffectiveConnection } = require('../../db/connectionConfig');
+
+function assertUnambiguousDatabaseUrl(connectionString) {
+  if (!/^postgres(ql)?:\/\//i.test(connectionString)) {
+    throw new Error('test database guard: DATABASE_URL must be a postgres:// or postgresql:// URL');
   }
-  return {
-    host: decodeURIComponent(process.env.PGHOST || 'localhost'),
-    database: process.env.PGDATABASE || ''
-  };
+  let url;
+  try {
+    url = new URL(connectionString);
+  } catch {
+    throw new Error('test database guard: unparseable DATABASE_URL');
+  }
+  // Exactly one host and one database, both named by the URL itself: a missing
+  // value silently falls back to PG* variables, and a `host` query parameter
+  // silently overrides the authority.
+  const hosts = [url.hostname, ...url.searchParams.getAll('host')].filter(Boolean);
+  if (hosts.length !== 1) {
+    throw new Error('test database guard: DATABASE_URL must name exactly one host');
+  }
+  const hasDatabaseParam = ['database', 'dbname', 'db'].some((key) => url.searchParams.has(key));
+  if (url.pathname.length <= 1 || hasDatabaseParam) {
+    throw new Error('test database guard: DATABASE_URL must name its database once, in the path');
+  }
+}
+
+// The target the Pool will really reach, as resolved by pg itself.
+function resolveTarget() {
+  const config = buildPoolConfig();
+  if (config.connectionString) {
+    assertUnambiguousDatabaseUrl(config.connectionString);
+  }
+  const { host, database } = resolveEffectiveConnection(config);
+  return { host, database };
 }
 
 function isLocalHost(host) {
@@ -43,13 +63,11 @@ function assertDisposableTestDatabase() {
   const { host, database } = resolveTarget();
   if (!/test/i.test(database)) {
     throw new Error(
-      `test database guard: refusing to run mutating tests against database ${JSON.stringify(database)} — the approved disposable test database name must contain "test" (e.g. coins_test)`
+      'test database guard: refusing to run mutating tests — the approved disposable test database name must contain "test" (e.g. coins_test)'
     );
   }
   if (!isLocalHost(host)) {
-    throw new Error(
-      `test database guard: refusing to run mutating tests against non-local host ${JSON.stringify(host)}`
-    );
+    throw new Error('test database guard: refusing to run mutating tests against a non-local host');
   }
   return { host, database };
 }
