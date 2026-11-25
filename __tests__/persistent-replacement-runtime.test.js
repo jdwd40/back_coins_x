@@ -220,4 +220,77 @@ describe('Stage 9 S9-03: persistent replacement runtime', () => {
     expect((await db.query('SELECT count(*)::int AS n FROM market_coin_state WHERE coin_id = 1 AND status = \'DEAD\'')).rows[0].n).toBe(1);
     expect((await db.query('SELECT count(*)::int AS n FROM price_history WHERE coin_id = 1')).rows[0].n).toBeGreaterThan(0);
   });
+
+  test('commits retirement and partial recovery when the reserve is empty, then fills the visible shortfall after a top-up without duplicates', async () => {
+    const limitedRoster = replacementPool.AUTHORED_REPLACEMENT_ROSTER.slice(0, 10);
+    const limitedConfig = replacementPool.resolveReplacementConfig({
+      targetActiveCount: 10,
+      roster: limitedRoster
+    });
+
+    // Consume the deliberately limited reserve by replacing every original
+    // identity. This establishes an otherwise healthy ten-coin market with
+    // no identities left in the reserve.
+    const deathAt = FIRST_DEATH_MS;
+    const allDead = jest.spyOn(collapseRiskDomain, 'getPersistentCollapseRiskScore')
+      .mockReturnValue(9.5);
+    await marketSimulator.updateAllPrices({ nowMs: deathAt });
+    allDead.mockRestore();
+    const initialRecovery = await replacementRuntime.reconcilePersistentReplacements({
+      nowMs: deathAt + DELAY_MS,
+      replacementConfig: limitedConfig
+    });
+    expect(initialRecovery.inserted).toHaveLength(10);
+    expect(initialRecovery.activeAfter).toBe(10);
+
+    // The next death must still be retired and committed even though no
+    // replacement can be selected. The old worker threw and rolled this
+    // necessary transaction back.
+    const replacementDeathAt = deathAt + DELAY_MS + 30 * 1000;
+    await forceWriterDeath(101, replacementDeathAt);
+    const exhausted = await replacementRuntime.reconcilePersistentReplacements({
+      nowMs: replacementDeathAt + DELAY_MS,
+      replacementConfig: limitedConfig
+    });
+    expect(exhausted.retiredCoinIds).toEqual([101]);
+    expect(exhausted.inserted).toEqual([]);
+    expect(exhausted.pendingEligibleDeaths).toBe(1);
+    expect(exhausted.pendingEligibleDeathsAfter).toBe(1);
+    expect(exhausted.reserveExhausted).toBe(true);
+    expect((await db.query('SELECT retired FROM coins WHERE coin_id = 101')).rows[0].retired).toBe(true);
+    expect((await db.query('SELECT count(*)::int AS n FROM coins WHERE retired = FALSE')).rows[0].n).toBe(9);
+
+    // Adding a fresh, explicitly authored identity lets the same durable
+    // outstanding work converge automatically on the next reconciliation.
+    const toppedUpConfig = replacementPool.resolveReplacementConfig({
+      targetActiveCount: 10,
+      roster: [...limitedRoster, {
+        coinId: 117,
+        name: 'RecoveryForge',
+        symbol: 'RCF',
+        description: 'Fresh recovery identity used only by this integration test.',
+        startingPrice: 3.25,
+        marketCap: 19000,
+        circulatingSupply: 4100,
+        founder: 'Test Author',
+        archetype: 'BULL'
+      }]
+    });
+    const recovered = await replacementRuntime.reconcilePersistentReplacements({
+      nowMs: replacementDeathAt + DELAY_MS + 1,
+      replacementConfig: toppedUpConfig
+    });
+    expect(recovered.inserted).toEqual([expect.objectContaining({ coinId: 117, symbol: 'RCF' })]);
+    expect(recovered.pendingEligibleDeathsAfter).toBe(0);
+    expect(recovered.activeAfter).toBe(10);
+
+    // Replay is idempotent: no second 117 or duplicate introduction history.
+    const replay = await replacementRuntime.reconcilePersistentReplacements({
+      nowMs: replacementDeathAt + DELAY_MS + 1,
+      replacementConfig: toppedUpConfig
+    });
+    expect(replay.inserted).toEqual([]);
+    expect((await db.query('SELECT count(*)::int AS n FROM coins WHERE coin_id = 117')).rows[0].n).toBe(1);
+    expect((await db.query('SELECT count(*)::int AS n FROM price_history WHERE coin_id = 117')).rows[0].n).toBe(1);
+  });
 });

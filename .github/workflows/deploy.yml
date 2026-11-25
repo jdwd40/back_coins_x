@@ -33,6 +33,8 @@ jobs:
             npm install
             echo "Applying production database migrations..."
             NODE_ENV=production npm run migrate
+            echo "Reconciling persistent replacements before schema verification..."
+            NODE_ENV=production npm run reconcile:persistent-replacements
             echo "Verifying production game schema..."
             NODE_ENV=production npm run verify:game-schema
             echo "Verifying persistent world identity..."

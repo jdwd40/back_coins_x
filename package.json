@@ -13,6 +13,7 @@
     "seed": "node db/seed.js",
     "migrate": "node db/migrate.js",
     "verify:game-schema": "node db/verify-game-schema.js",
+    "reconcile:persistent-replacements": "node scripts/reconcile-persistent-replacements.js",
     "verify:persistent-world": "node db/verify-persistent-world.js",
     "provision:persistent-world": "node db/provision-persistent-world.js",
     "simulate:checkpoint-horizon": "node simulation/checkpointHorizon.js",

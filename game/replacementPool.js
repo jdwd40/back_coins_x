@@ -221,7 +221,30 @@ const AUTHORED_REPLACEMENT_ROSTER = Object.freeze([
     circulatingSupply: 5800,
     founder: 'Stage9 Authored',
     archetype: 'DEGEN'
-  })
+  }),
+  // Recovery reserve: deliberately fresh identities, never recycled from
+  // dead/live history. Keep these explicit and stable so operations can
+  // audit the reserve consumption order.
+  Object.freeze({ coinId: 117, name: 'AsterNode', symbol: 'AST', description: 'Recovery reserve ZIP replacement.', startingPrice: 0.19, marketCap: 9400, circulatingSupply: 5100, founder: 'Recovery Reserve', archetype: 'ZIP' }),
+  Object.freeze({ coinId: 118, name: 'BeaconMint', symbol: 'BCM', description: 'Recovery reserve MOON replacement.', startingPrice: 1.95, marketCap: 19500, circulatingSupply: 4700, founder: 'Recovery Reserve', archetype: 'MOON' }),
+  Object.freeze({ coinId: 119, name: 'CinderBlock', symbol: 'CDB', description: 'Recovery reserve BULL replacement.', startingPrice: 34.80, marketCap: 25200, circulatingSupply: 2900, founder: 'Recovery Reserve', archetype: 'BULL' }),
+  Object.freeze({ coinId: 120, name: 'DriftVault', symbol: 'DFV', description: 'Recovery reserve HODL replacement.', startingPrice: 52.40, marketCap: 31200, circulatingSupply: 2400, founder: 'Recovery Reserve', archetype: 'HODL' }),
+  Object.freeze({ coinId: 121, name: 'EmberDash', symbol: 'EMD', description: 'Recovery reserve DEGEN replacement.', startingPrice: 0.36, marketCap: 8200, circulatingSupply: 6200, founder: 'Recovery Reserve', archetype: 'DEGEN' }),
+  Object.freeze({ coinId: 122, name: 'FaultLine', symbol: 'FLT', description: 'Recovery reserve RUG replacement.', startingPrice: 0.24, marketCap: 7200, circulatingSupply: 6900, founder: 'Recovery Reserve', archetype: 'RUG' }),
+  Object.freeze({ coinId: 123, name: 'GlimmerNet', symbol: 'GLN', description: 'Recovery reserve ZIP replacement.', startingPrice: 0.16, marketCap: 8800, circulatingSupply: 5300, founder: 'Recovery Reserve', archetype: 'ZIP' }),
+  Object.freeze({ coinId: 124, name: 'HarborLoop', symbol: 'HLP', description: 'Recovery reserve MOON replacement.', startingPrice: 2.25, marketCap: 20800, circulatingSupply: 4600, founder: 'Recovery Reserve', archetype: 'MOON' }),
+  Object.freeze({ coinId: 125, name: 'IronRise', symbol: 'IRS', description: 'Recovery reserve BULL replacement.', startingPrice: 39.10, marketCap: 27400, circulatingSupply: 2750, founder: 'Recovery Reserve', archetype: 'BULL' }),
+  Object.freeze({ coinId: 126, name: 'JuniperHold', symbol: 'JHD', description: 'Recovery reserve HODL replacement.', startingPrice: 58.30, marketCap: 33400, circulatingSupply: 2250, founder: 'Recovery Reserve', archetype: 'HODL' }),
+  Object.freeze({ coinId: 127, name: 'KineticRift', symbol: 'KRF', description: 'Recovery reserve DEGEN replacement.', startingPrice: 0.62, marketCap: 9800, circulatingSupply: 5900, founder: 'Recovery Reserve', archetype: 'DEGEN' }),
+  Object.freeze({ coinId: 128, name: 'LavaBridge', symbol: 'LVB', description: 'Recovery reserve RUG replacement.', startingPrice: 0.29, marketCap: 7600, circulatingSupply: 6700, founder: 'Recovery Reserve', archetype: 'RUG' }),
+  Object.freeze({ coinId: 129, name: 'MosaicBit', symbol: 'MSB', description: 'Recovery reserve ZIP replacement.', startingPrice: 0.21, marketCap: 10200, circulatingSupply: 5000, founder: 'Recovery Reserve', archetype: 'ZIP' }),
+  Object.freeze({ coinId: 130, name: 'NorthStar', symbol: 'NST', description: 'Recovery reserve MOON replacement.', startingPrice: 2.60, marketCap: 22400, circulatingSupply: 4400, founder: 'Recovery Reserve', archetype: 'MOON' }),
+  Object.freeze({ coinId: 131, name: 'OakFoundry', symbol: 'OKF', description: 'Recovery reserve BULL replacement.', startingPrice: 42.70, marketCap: 28900, circulatingSupply: 2600, founder: 'Recovery Reserve', archetype: 'BULL' }),
+  Object.freeze({ coinId: 132, name: 'PillarCoin', symbol: 'PIL', description: 'Recovery reserve HODL replacement.', startingPrice: 63.00, marketCap: 35600, circulatingSupply: 2150, founder: 'Recovery Reserve', archetype: 'HODL' }),
+  Object.freeze({ coinId: 133, name: 'QuasarRush', symbol: 'QSR', description: 'Recovery reserve DEGEN replacement.', startingPrice: 0.71, marketCap: 10500, circulatingSupply: 5700, founder: 'Recovery Reserve', archetype: 'DEGEN' }),
+  Object.freeze({ coinId: 134, name: 'RazorPool', symbol: 'RZP', description: 'Recovery reserve RUG replacement.', startingPrice: 0.33, marketCap: 7900, circulatingSupply: 6500, founder: 'Recovery Reserve', archetype: 'RUG' }),
+  Object.freeze({ coinId: 135, name: 'SolarThread', symbol: 'SLT', description: 'Recovery reserve ZIP replacement.', startingPrice: 0.27, marketCap: 11200, circulatingSupply: 4800, founder: 'Recovery Reserve', archetype: 'ZIP' }),
+  Object.freeze({ coinId: 136, name: 'TideLedger', symbol: 'TDL', description: 'Recovery reserve MOON replacement.', startingPrice: 2.90, marketCap: 23800, circulatingSupply: 4300, founder: 'Recovery Reserve', archetype: 'MOON' })
 ]);
 
 const DEFAULT_REPLACEMENT_CONFIG = Object.freeze({

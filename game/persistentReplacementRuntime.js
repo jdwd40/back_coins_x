@@ -113,8 +113,12 @@ async function reconcilePersistentReplacements({
         inserted: [],
         eligibleDeaths: 0,
         pendingEligibleDeaths: 0,
+        pendingEligibleDeathsAfter: 0,
         activeBefore: 0,
-        activeAfter: 0
+        activeAfter: 0,
+        reserveRemaining: null,
+        reserveLow: false,
+        reserveExhausted: false
       };
     }
 
@@ -190,9 +194,10 @@ async function reconcilePersistentReplacements({
     for (let i = 0; i < insertCount; i += 1) {
       const definition = replacementPool.peekNextReplacement(historicalIds, effectiveConfig);
       if (!definition) {
-        throw new PersistentReplacementRuntimeError(
-          `authored replacement pool exhausted with ${pendingEligibleDeaths - i} eligible death(s) still pending`
-        );
+        // A depleted reserve is an operational shortfall, not data
+        // corruption. Commit the retirements and every insertion already
+        // made, then report the remaining durable work for the next wakeup.
+        break;
       }
 
       // Re-validate the exact authored row against ALL durable identities.
@@ -288,6 +293,8 @@ async function reconcilePersistentReplacements({
     }
 
     await client.query('COMMIT');
+    const pendingEligibleDeathsAfter = Math.max(0, pendingEligibleDeaths - inserted.length);
+    const reserveRemaining = Math.max(0, effectiveConfig.roster.length - insertedAuthoredIds.length - inserted.length);
     return {
       worldId: world.worldId,
       stateReady: true,
@@ -295,8 +302,15 @@ async function reconcilePersistentReplacements({
       inserted,
       eligibleDeaths: eligibleDeathCount,
       pendingEligibleDeaths,
+      pendingEligibleDeathsAfter,
       activeBefore,
-      activeAfter: activeBefore + inserted.length
+      activeAfter: activeBefore + inserted.length,
+      reserveRemaining,
+      // Keep one full active-roster's worth of identities in hand. A burst
+      // can consume several identities in one atomic reconciliation, so a
+      // fixed small threshold could report only after reserve exhaustion.
+      reserveLow: reserveRemaining <= targetActiveCount,
+      reserveExhausted: pendingEligibleDeathsAfter > 0 && reserveRemaining === 0
     };
   } catch (error) {
     try {

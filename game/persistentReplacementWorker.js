@@ -15,6 +15,7 @@ class PersistentReplacementWorker {
     this.timer = null;
     this.inFlight = null;
     this.intervalMs = DEFAULT_INTERVAL_MS;
+    this.lastReserveAlert = null;
   }
 
   isRunning() {
@@ -27,9 +28,31 @@ class PersistentReplacementWorker {
     this.inFlight = replacementRuntime.reconcilePersistentReplacements({ nowMs })
       .then((result) => {
         if (result.inserted.length > 0 || result.retiredCoinIds.length > 0) {
-          logger.log(
+          logger.info(
             `[GAME] Persistent replacement reconciliation: retired=${result.retiredCoinIds.length}, inserted=${result.inserted.length}, active=${result.activeAfter}`
           );
+        }
+        // A newly provisioned world has no state rows yet, so reserve
+        // availability is intentionally unknown rather than an alert.
+        if (!result.stateReady) return result;
+        if (result.reserveExhausted) {
+          const alertKey = `exhausted:${result.pendingEligibleDeathsAfter}`;
+          if (this.lastReserveAlert !== alertKey) {
+            logger.error(
+              `[GAME] Persistent replacement reserve exhausted: ${result.pendingEligibleDeathsAfter} eligible death(s) remain pending; add fresh authored identities to retry automatically`
+            );
+            this.lastReserveAlert = alertKey;
+          }
+        } else if (result.reserveLow) {
+          const alertKey = `low:${result.reserveRemaining}`;
+          if (this.lastReserveAlert !== alertKey) {
+            logger.warn(
+              `[GAME] Persistent replacement reserve low: ${result.reserveRemaining} unused identity/identities remain`
+            );
+            this.lastReserveAlert = alertKey;
+          }
+        } else {
+          this.lastReserveAlert = null;
         }
         return result;
       })
